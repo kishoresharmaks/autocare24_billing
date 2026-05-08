@@ -34,6 +34,7 @@ mobile/expo-env.d.ts
 *.sqlite
 *.sqlite3
 *.log
+*.tsbuildinfo
 logs/
 
 # Local tool caches and editor files

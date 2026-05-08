@@ -17,6 +17,7 @@ npm install
 npm run build
 npm run test:invoice
 npm run test:profit
+npm run test:shared
 npm run package
 ```
 

@@ -13,6 +13,7 @@
     "test:invoice": "npm run build:main && node scripts/invoice-flow-check.cjs",
     "test:profit": "npm run build:main && node scripts/profit-flow-check.cjs",
     "test:backup": "npm run build:main && node scripts/backup-flow-check.cjs",
+    "test:shared": "npm run build:main && node scripts/shared-logic-check.cjs",
     "sync-api:start": "npm --prefix cloud-api start",
     "sync-api:migrate": "npm --prefix cloud-api run migrate",
     "package": "npm run package:windows",
