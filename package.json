@@ -1,0 +1,81 @@
+{
+  "name": "autocare24-billing",
+  "version": "0.1.12",
+  "description": "Production Windows billing software for Autocare24 Bike & Car Detailing Studio with invoices, quotations, job cards, stock, reports, backup, PDF, and WhatsApp sharing.",
+  "main": "dist-electron/electron/main.js",
+  "author": "Kishoresharma",
+  "private": true,
+  "scripts": {
+    "dev": "npm run build:main && concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && set ELECTRON_RUN_AS_NODE=& electron .\"",
+    "build:main": "tsc -p tsconfig.electron.json",
+    "build:renderer": "vite build",
+    "build": "npm run build:main && npm run build:renderer",
+    "test:invoice": "npm run build:main && node scripts/invoice-flow-check.cjs",
+    "test:profit": "npm run build:main && node scripts/profit-flow-check.cjs",
+    "test:backup": "npm run build:main && node scripts/backup-flow-check.cjs",
+    "sync-api:start": "npm --prefix cloud-api start",
+    "sync-api:migrate": "npm --prefix cloud-api run migrate",
+    "package": "npm run package:windows",
+    "package:windows": "npm run build && electron-builder --win nsis",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^5.1.0",
+    "lucide-react": "^0.562.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "sql.js": "^1.13.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "concurrently": "^9.2.1",
+    "electron": "^39.2.4",
+    "electron-builder": "^26.0.12",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.6",
+    "wait-on": "^9.0.3"
+  },
+  "build": {
+    "appId": "com.autocare24.billing",
+    "productName": "Autocare24 Billing",
+    "copyright": "Copyright (c) 2026 Autocare24. All rights reserved.",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/sql.js/dist/sql-wasm.wasm",
+        "to": "sql-wasm.wasm"
+      },
+      {
+        "from": "src/renderer/assets/branding",
+        "to": "branding"
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "src/renderer/assets/branding/autocare24.ico",
+      "artifactName": "${productName} Setup ${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": false,
+      "runAfterFinish": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Autocare24 Billing",
+      "uninstallDisplayName": "Autocare24 Billing"
+    }
+  }
+}

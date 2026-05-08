@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+cloud-api/node_modules/
+mobile/node_modules/
+
+# Build output and release artifacts
+dist/
+dist-electron/
+release/
+release-final/
+release-ks/
+deliverables/
+*.blockmap
+*.exe
+*.msi
+*.dmg
+*.AppImage
+
+# Mobile and native build output
+mobile/.expo/
+mobile/android/
+mobile/ios/
+mobile/expo-env.d.ts
+*.apk
+*.aab
+*.jks
+*.keystore
+
+# Environment and local runtime data
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+*.log
+logs/
+
+# Local tool caches and editor files
+.agent/
+.agents/
+.claude/
+.codex-temp/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Nested/local Git metadata backups
+mobile/.git-local-backup*/

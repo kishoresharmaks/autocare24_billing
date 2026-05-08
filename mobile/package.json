@@ -1,0 +1,43 @@
+{
+  "name": "autocare24-owner-reports-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start --lan --clear",
+    "start:tunnel": "expo start --tunnel --clear",
+    "start:localhost": "expo start --localhost --clear",
+    "android": "expo start --android --lan --clear",
+    "typecheck": "tsc --noEmit",
+    "doctor": "npx expo-doctor@latest",
+    "build:android:preview": "npx eas-cli@latest build --platform android --profile preview",
+    "build:ios:preview": "npx eas-cli@latest build --platform ios --profile preview",
+    "build:ios:simulator": "npx eas-cli@latest build --platform ios --profile ios-simulator",
+    "build:all:preview": "npx eas-cli@latest build --platform all --profile preview"
+  },
+  "dependencies": {
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@react-native-community/netinfo": "11.5.2",
+    "@tanstack/query-async-storage-persister": "^5.91.2",
+    "@tanstack/react-query": "^5.91.2",
+    "@tanstack/react-query-persist-client": "^5.91.2",
+    "expo": "^55.0.0",
+    "expo-crypto": "^55.0.0",
+    "expo-device": "^55.0.0",
+    "expo-router": "~55.0.5",
+    "expo-secure-store": "~55.0.8",
+    "expo-status-bar": "~55.0.4",
+    "lucide-react-native": "^0.562.0",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-native": "0.83.2",
+    "react-native-safe-area-context": "~5.6.2",
+    "react-native-screens": "~4.23.0",
+    "react-native-svg": "15.15.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.7",
+    "babel-preset-expo": "~55.0.21",
+    "typescript": "^5.9.3"
+  }
+}

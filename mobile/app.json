@@ -1,0 +1,55 @@
+{
+  "expo": {
+    "name": "Autocare24 Reports",
+    "slug": "autocare24-reports",
+    "version": "0.1.0",
+    "platforms": [
+      "android",
+      "ios"
+    ],
+    "runtimeVersion": {
+      "policy": "sdkVersion"
+    },
+    "orientation": "portrait",
+    "icon": "./assets/autocare24-icon.png",
+    "scheme": "autocare24reports",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/autocare24-logo.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#f7f2ea"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.autocare24.reports",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.autocare24.reports",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/autocare24-icon.png",
+        "backgroundColor": "#f7f2ea"
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "autolinkingModuleResolution": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "f9ed3346-2fb7-4402-bebf-9f450c0cc596"
+      }
+    }
+  }
+}
