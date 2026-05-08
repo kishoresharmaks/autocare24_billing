@@ -104,6 +104,13 @@ DB_USER=cpaneluser_autocare24_user
 DB_PASSWORD=your-strong-password
 SYNC_REGISTRATION_KEY=make-a-long-private-device-key
 UPLOAD_DIR=/home/cpaneluser/autocare24-sync-uploads
+TOKEN_HASH_SECRET=make-a-different-long-private-token-hash-secret
+MAX_BODY_BYTES=25165824
+AUTH_RATE_LIMIT_MAX=10
+AUTH_RATE_LIMIT_WINDOW_MS=900000
+DEVICE_REGISTRATION_RATE_LIMIT_MAX=10
+DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS=900000
+TRUSTED_PROXY_IPS=
 INVOICE_PREFIX=AUTOCARE24
 ```
 
@@ -113,8 +120,12 @@ Important:
 - `SYNC_REGISTRATION_KEY` is what you enter in the desktop app when connecting a PC.
 - Use a long private value, not a simple password.
 - `UPLOAD_DIR` should be outside `public_html`.
+- `TOKEN_HASH_SECRET` protects stored device token hashes. Keep it stable after deployment.
+- `MAX_BODY_BYTES` defaults to 24 MB so the 15 MB document limit still has room for base64 JSON overhead.
+- Auth and device registration rate limits default to 10 attempts per 15 minutes per IP.
+- Leave `TRUSTED_PROXY_IPS` empty unless you know the exact reverse proxy IPs. If set, the API trusts `X-Forwarded-For` only from those IPs.
 - `INVOICE_PREFIX` is optional. The desktop also sends its configured invoice prefix during finalization.
-- Keep HTTPS enabled. The desktop app rejects normal HTTP except for local development.
+- Keep HTTPS enabled through the hosting panel or a TLS-terminating reverse proxy. The desktop app rejects normal HTTP except for local development.
 
 ## 7. Install Dependencies
 

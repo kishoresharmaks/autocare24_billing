@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell, type IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -510,6 +510,13 @@ if (hasSingleInstanceLock) {
     });
     createSplashWindow();
     await database.init();
+    try {
+      migrateGoogleDriveSecretStorage();
+    } catch (error) {
+      logAppEvent("warn", "Google Drive client secret secure-storage migration failed", {
+        message: error instanceof Error ? error.message : String(error)
+      });
+    }
     logAppEvent("info", "Application startup", {
       version: app.getVersion(),
       packaged: app.isPackaged,
@@ -690,6 +697,78 @@ const safeInvoiceAssetPath = (filePath?: string) => {
 };
 const isCloudFileRef = (value?: string) => String(value || "").startsWith("cloud:");
 const cloudFileId = (value?: string) => isCloudFileRef(value) ? String(value).slice("cloud:".length) : "";
+const GOOGLE_DRIVE_SECRET_KEY = "googleDriveClientSecret";
+const GOOGLE_DRIVE_SECRET_CIPHERTEXT_KEY = "googleDriveClientSecretCiphertext";
+
+const encryptedDriveSecret = (secret: string) => {
+  const text = secret.trim();
+  if (!text) return "";
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error("Secure Google Drive secret storage is not available on this Windows account.");
+  }
+  return `safe:${safeStorage.encryptString(text).toString("base64")}`;
+};
+
+const decryptedDriveSecret = (value: string) => {
+  const text = value.trim();
+  if (!text) return "";
+  if (!text.startsWith("safe:")) return text;
+  if (!safeStorage.isEncryptionAvailable()) {
+    throw new Error("Secure Google Drive secret storage is not available on this Windows account.");
+  }
+  return safeStorage.decryptString(Buffer.from(text.slice(5), "base64"));
+};
+
+const clearPlainGoogleDriveSecret = () => {
+  if (database.getLocalSettingValue(GOOGLE_DRIVE_SECRET_KEY)) {
+    database.saveLocalSettingValue(GOOGLE_DRIVE_SECRET_KEY, "");
+  }
+};
+
+const saveSecureGoogleDriveSecret = (secret: string) => {
+  const ciphertext = encryptedDriveSecret(secret);
+  if (!ciphertext) return;
+  database.saveLocalSettingValue(GOOGLE_DRIVE_SECRET_CIPHERTEXT_KEY, ciphertext);
+  clearPlainGoogleDriveSecret();
+};
+
+const readSecureGoogleDriveSecret = () => {
+  const ciphertext = database.getLocalSettingValue(GOOGLE_DRIVE_SECRET_CIPHERTEXT_KEY);
+  if (ciphertext) return decryptedDriveSecret(ciphertext);
+  const legacy = database.getLocalSettingValue(GOOGLE_DRIVE_SECRET_KEY).trim();
+  if (!legacy) return "";
+  if (legacy.startsWith("safe:")) {
+    database.saveLocalSettingValue(GOOGLE_DRIVE_SECRET_CIPHERTEXT_KEY, legacy);
+    clearPlainGoogleDriveSecret();
+    return decryptedDriveSecret(legacy);
+  }
+  saveSecureGoogleDriveSecret(legacy);
+  return legacy;
+};
+
+const migrateGoogleDriveSecretStorage = () => {
+  const legacy = database.getLocalSettingValue(GOOGLE_DRIVE_SECRET_KEY).trim();
+  if (!legacy) return;
+  if (legacy.startsWith("safe:")) {
+    database.saveLocalSettingValue(GOOGLE_DRIVE_SECRET_CIPHERTEXT_KEY, legacy);
+    clearPlainGoogleDriveSecret();
+    logAppEvent("info", "Google Drive client secret moved to local secure storage");
+    return;
+  }
+  saveSecureGoogleDriveSecret(legacy);
+  logAppEvent("info", "Google Drive client secret migrated to local secure storage");
+};
+
+const publicSettings = (settings: BusinessSettings): BusinessSettings => ({
+  ...settings,
+  googleDriveClientSecret: ""
+});
+
+const cloudSafeSettings = (settings: Partial<BusinessSettings>): Partial<BusinessSettings> => {
+  const next = { ...settings };
+  delete next.googleDriveClientSecret;
+  return next;
+};
 
 const safeInvoiceAssetSettings = (settings: Partial<BusinessSettings>) => {
   const next: Partial<BusinessSettings> = { ...settings };
@@ -701,7 +780,11 @@ const safeInvoiceAssetSettings = (settings: Partial<BusinessSettings>) => {
       : value || "";
   });
   if ("googleDriveClientId" in settings) next.googleDriveClientId = settings.googleDriveClientId?.trim() || "";
-  if ("googleDriveClientSecret" in settings) next.googleDriveClientSecret = settings.googleDriveClientSecret?.trim() || "";
+  if ("googleDriveClientSecret" in settings) {
+    const secret = settings.googleDriveClientSecret?.trim() || "";
+    if (secret) saveSecureGoogleDriveSecret(secret);
+    next.googleDriveClientSecret = "";
+  }
   return next;
 };
 
@@ -717,7 +800,7 @@ const settingsWithSafeAssets = () => {
       next[key] = "";
     }
   });
-  return next;
+  return publicSettings(next);
 };
 
 const queueCloudSync = (
@@ -907,7 +990,7 @@ const driveCredentials = () => {
   const settings = database.getSettings();
   return {
     clientId: settings.googleDriveClientId.trim(),
-    clientSecret: settings.googleDriveClientSecret.trim()
+    clientSecret: readSecureGoogleDriveSecret()
   };
 };
 
@@ -1223,7 +1306,7 @@ const registerIpcHandlers = () => {
     }
   }));
   ipcMain.handle("dashboard:get", permitted("dashboard.view", () => cloudData().dashboard()));
-  ipcMain.handle("settings:get", authenticated(() => cloudData().getSettings(settingsWithSafeAssets())));
+  ipcMain.handle("settings:get", authenticated(async () => publicSettings(await cloudData().getSettings(settingsWithSafeAssets()))));
   ipcMain.handle("settings:save", permitted("settings.manage", async (_user, settings: Partial<BusinessSettings>) => {
     const nextSettings = safeInvoiceAssetSettings(settings);
     if (nextSettings.invoiceLogoPath && !isCloudFileRef(nextSettings.invoiceLogoPath)) {
@@ -1235,8 +1318,18 @@ const registerIpcHandlers = () => {
     if (nextSettings.invoiceWatermarkPath && !isCloudFileRef(nextSettings.invoiceWatermarkPath)) {
       nextSettings.invoiceWatermarkPath = await cloudData().uploadInvoiceAsset(nextSettings.invoiceWatermarkPath, "watermark");
     }
-    const saved = await cloudData().saveSettings({ ...(await cloudData().getSettings(settingsWithSafeAssets())), ...nextSettings });
-    return saved;
+    if ("googleDriveClientId" in nextSettings || "googleDriveClientSecret" in nextSettings) {
+      database.saveSettings({
+        googleDriveClientId: nextSettings.googleDriveClientId ?? database.getSettings().googleDriveClientId,
+        googleDriveClientSecret: ""
+      });
+      clearPlainGoogleDriveSecret();
+    }
+    const saved = await cloudData().saveSettings({
+      ...(await cloudData().getSettings(settingsWithSafeAssets())),
+      ...cloudSafeSettings(nextSettings)
+    });
+    return publicSettings(saved);
   }));
   ipcMain.handle("settings:pickAsset", permitted("settings.manage", async (_user, requestedKind?: string) => {
     const kind = normalizeInvoiceAssetKind(requestedKind);
@@ -1535,8 +1628,10 @@ const registerIpcHandlers = () => {
   }));
   ipcMain.handle("drive:status", permitted("backup.manage", () => driveCloud().getStatus(driveCredentials())));
   ipcMain.handle("drive:connect", permitted("backup.manage", async (_user, clientId: string, clientSecret: string) => {
-    const saved = database.saveSettings(safeInvoiceAssetSettings({ googleDriveClientId: clientId, googleDriveClientSecret: clientSecret }));
-    const status = await driveCloud().connect({ clientId: saved.googleDriveClientId, clientSecret: saved.googleDriveClientSecret });
+    const nextSettings = safeInvoiceAssetSettings({ googleDriveClientId: clientId, googleDriveClientSecret: clientSecret });
+    const saved = database.saveSettings({ ...nextSettings, googleDriveClientSecret: "" });
+    const secret = readSecureGoogleDriveSecret();
+    const status = await driveCloud().connect({ clientId: saved.googleDriveClientId, clientSecret: secret });
     logAppEvent("info", "Google Drive connected", { accountEmail: status.accountEmail, folderId: status.folderId });
     return status;
   }));
@@ -1599,8 +1694,9 @@ const registerIpcHandlers = () => {
   ipcMain.handle("sharing:openWhatsAppShare", permitted("sharing.whatsapp", async (_user, input: WhatsAppShareInput) => {
     const phone = normalizeIndianPhone(input.phone || "");
     const message = buildWhatsAppMessage(input);
-    const url = `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
-    await shell.openExternal(url);
+    const url = new URL(`https://wa.me/${phone}`);
+    url.searchParams.set("text", message);
+    await shell.openExternal(url.toString());
     logAppEvent("info", "WhatsApp share opened", { kind: input.kind, phone });
     return { ok: true, message: "WhatsApp message opened." };
   }));

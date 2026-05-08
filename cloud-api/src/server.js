@@ -3,6 +3,7 @@
 const crypto = require("node:crypto");
 const fs = require("node:fs");
 const http = require("node:http");
+const net = require("node:net");
 const path = require("node:path");
 const { URL } = require("node:url");
 const mysql = require("mysql2/promise");
@@ -28,6 +29,30 @@ const PORT = Number(process.env.PORT || 8080);
 const REGISTRATION_KEY = process.env.SYNC_REGISTRATION_KEY || "";
 const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || path.join(__dirname, "..", "uploads"));
 const API_VERSION = "v1";
+const envPositiveInt = (name, fallback) => {
+  const value = Number(process.env[name] || "");
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
+};
+const MAX_BODY_BYTES = envPositiveInt("MAX_BODY_BYTES", 24 * 1024 * 1024);
+const AUTH_RATE_LIMIT_WINDOW_MS = envPositiveInt("AUTH_RATE_LIMIT_WINDOW_MS", 15 * 60 * 1000);
+const AUTH_RATE_LIMIT_MAX = envPositiveInt("AUTH_RATE_LIMIT_MAX", 10);
+const DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS = envPositiveInt("DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS", 15 * 60 * 1000);
+const DEVICE_REGISTRATION_RATE_LIMIT_MAX = envPositiveInt("DEVICE_REGISTRATION_RATE_LIMIT_MAX", 10);
+const TOKEN_HASH_SECRET = process.env.TOKEN_HASH_SECRET || "";
+const TRUSTED_PROXY_IPS = new Set(
+  String(process.env.TRUSTED_PROXY_IPS || "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+);
+const rateLimitBuckets = new Map();
+
+const SECURITY_HEADERS = {
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+  "referrer-policy": "no-referrer",
+  "strict-transport-security": "max-age=31536000; includeSubDomains"
+};
 
 const pool = mysql.createPool({
   host: process.env.DB_HOST || "localhost",
@@ -42,6 +67,7 @@ const pool = mysql.createPool({
 
 const json = (res, status, body, headers = {}) => {
   res.writeHead(status, {
+    ...SECURITY_HEADERS,
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     ...headers
@@ -51,7 +77,24 @@ const json = (res, status, body, headers = {}) => {
 
 const ok = (res, data, status = 200, headers = {}) => json(res, status, { data }, headers);
 const error = (res, status, code, message, details) => json(res, status, { error: { code, message, details } });
+const errorFromThrown = (res, err) => {
+  const status = Number.isInteger(err?.status) ? err.status : 500;
+  const code = err?.code || (status === 400 ? "invalid_request" : status === 413 ? "request_body_too_large" : status === 429 ? "rate_limited" : "internal_error");
+  const message = status >= 500 ? "Unexpected API error." : err?.message || "Request could not be processed.";
+  return error(res, status, code, message);
+};
+const noContent = (res) => {
+  res.writeHead(204, SECURITY_HEADERS);
+  res.end();
+};
 const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
+const hmacSha256 = (value) => crypto.createHmac("sha256", TOKEN_HASH_SECRET).update(value).digest("hex");
+const hashToken = (value) => TOKEN_HASH_SECRET ? hmacSha256(value) : sha256(value);
+const tokenHashCandidates = (value) => {
+  const primary = hashToken(value);
+  const legacy = sha256(value);
+  return primary === legacy ? [primary] : [primary, legacy];
+};
 const token = () => crypto.randomBytes(32).toString("base64url");
 const uuid = () => crypto.randomUUID();
 const isUuid = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(value || ""));
@@ -125,6 +168,8 @@ const DEVICE_APPROVAL_STATUS = {
   REVOKED: "REVOKED"
 };
 const DOCUMENT_EXTENSIONS = new Set([".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]);
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]);
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES = 15 * 1024 * 1024;
 const QUOTATION_STATUSES = new Set(["draft", "sent", "accepted", "rejected", "expired", "converted"]);
 const ENQUIRY_STATUSES = new Set(["new", "contacted", "follow_up", "visited", "converted", "lost"]);
@@ -289,10 +334,42 @@ const normalizeDeviceApprovalStatus = (device = {}) => {
   if (Object.values(DEVICE_APPROVAL_STATUS).includes(status)) return status;
   return device.is_revoked || device.isRevoked ? DEVICE_APPROVAL_STATUS.REVOKED : DEVICE_APPROVAL_STATUS.APPROVED;
 };
+const normalizeIp = (value) => String(value || "").trim().replace(/^::ffff:/, "").slice(0, 45);
+const isPlausibleIp = (value) => net.isIP(value) > 0;
 const getRequestIp = (req) => {
-  const forwarded = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
-  return (forwarded || req.socket.remoteAddress || "").slice(0, 45);
+  const remote = normalizeIp(req.socket.remoteAddress || "");
+  if (remote && TRUSTED_PROXY_IPS.has(remote)) {
+    const forwarded = normalizeIp(String(req.headers["x-forwarded-for"] || "").split(",")[0]);
+    if (forwarded && isPlausibleIp(forwarded)) return forwarded;
+  }
+  return remote;
 };
+const throwHttpError = (status, code, message) => {
+  throw Object.assign(new Error(message), { status, code });
+};
+const rateLimitKey = (scope, req) => `${scope}:${getRequestIp(req) || "unknown"}`;
+const enforceRateLimit = (req, scope, options = {}) => {
+  const limit = options.limit || AUTH_RATE_LIMIT_MAX;
+  const windowMs = options.windowMs || AUTH_RATE_LIMIT_WINDOW_MS;
+  const now = Date.now();
+  const key = rateLimitKey(scope, req);
+  const current = rateLimitBuckets.get(key);
+  if (!current || current.resetAt <= now) {
+    rateLimitBuckets.set(key, { count: 1, resetAt: now + windowMs });
+    return;
+  }
+  current.count += 1;
+  if (current.count > limit) {
+    throwHttpError(429, "rate_limited", "Too many attempts. Try again later.");
+  }
+};
+const cleanupRateLimits = () => {
+  const now = Date.now();
+  for (const [key, bucket] of rateLimitBuckets.entries()) {
+    if (bucket.resetAt <= now) rateLimitBuckets.delete(key);
+  }
+};
+setInterval(cleanupRateLimits, 5 * 60 * 1000).unref?.();
 
 function validateFinalInvoicePayload(payload) {
   requiredText(payload.customer?.name || payload.customerName, "Customer name");
@@ -319,7 +396,7 @@ const normalizePermissions = (permissions) => {
 };
 const validatePassword = (password) => {
   const text = String(password || "");
-  if (text.length < 6) throw Object.assign(new Error("Password must be at least 6 characters."), { status: 422 });
+  if (text.length < 8) throw Object.assign(new Error("Password must be at least 8 characters."), { status: 422 });
   return text;
 };
 const hashPassword = (password, salt = crypto.randomBytes(16).toString("hex")) => ({
@@ -406,12 +483,96 @@ const calculateInvoiceTotals = (invoiceMode, taxScope, items, rawDiscount) => {
 };
 
 async function readBody(req) {
+  const rawContentLength = req.headers["content-length"];
+  if (rawContentLength !== undefined) {
+    const contentLength = Number(rawContentLength);
+    if (!Number.isFinite(contentLength) || contentLength < 0) {
+      throwHttpError(400, "invalid_request", "Invalid Content-Length header.");
+    }
+    if (contentLength > MAX_BODY_BYTES) {
+      throwHttpError(413, "request_body_too_large", "Request body is too large.");
+    }
+  }
+  let total = 0;
   const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
+  for await (const chunk of req) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.length;
+    if (total > MAX_BODY_BYTES) {
+      throwHttpError(413, "request_body_too_large", "Request body is too large.");
+    }
+    chunks.push(buffer);
+  }
   if (!chunks.length) return {};
   const text = Buffer.concat(chunks).toString("utf8");
-  return text ? JSON.parse(text) : {};
+  try {
+    return text ? JSON.parse(text) : {};
+  } catch {
+    throwHttpError(400, "invalid_json", "Request body must be valid JSON.");
+  }
 }
+
+const detectUploadSignature = (data) => {
+  if (data.length >= 5 && data.subarray(0, 5).toString("ascii") === "%PDF-") {
+    return { mimeType: "application/pdf", extensions: new Set([".pdf"]) };
+  }
+  if (
+    data.length >= 8 &&
+    data[0] === 0x89 &&
+    data[1] === 0x50 &&
+    data[2] === 0x4e &&
+    data[3] === 0x47 &&
+    data[4] === 0x0d &&
+    data[5] === 0x0a &&
+    data[6] === 0x1a &&
+    data[7] === 0x0a
+  ) {
+    return { mimeType: "image/png", extensions: new Set([".png"]) };
+  }
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+    return { mimeType: "image/jpeg", extensions: new Set([".jpg", ".jpeg"]) };
+  }
+  if (
+    data.length >= 12 &&
+    data.subarray(0, 4).toString("ascii") === "RIFF" &&
+    data.subarray(8, 12).toString("ascii") === "WEBP"
+  ) {
+    return { mimeType: "image/webp", extensions: new Set([".webp"]) };
+  }
+  if (data.length >= 6) {
+    const gifHeader = data.subarray(0, 6).toString("ascii");
+    if (gifHeader === "GIF87a" || gifHeader === "GIF89a") {
+      return { mimeType: "image/gif", extensions: new Set([".gif"]) };
+    }
+  }
+  if (data.length >= 2 && data[0] === 0x42 && data[1] === 0x4d) {
+    return { mimeType: "image/bmp", extensions: new Set([".bmp"]) };
+  }
+  return null;
+};
+
+const validateUpload = (fileType, originalName, data) => {
+  const ext = path.extname(String(originalName || "")).toLowerCase();
+  const allowedExtensions = fileType === "DOCUMENT" ? DOCUMENT_EXTENSIONS : IMAGE_EXTENSIONS;
+  const label = fileType === "DOCUMENT" ? "Only PDF and image purchase documents are allowed." : "Only image files are allowed.";
+  if (!ext || !allowedExtensions.has(ext)) {
+    throwHttpError(422, "validation_error", label);
+  }
+  if (fileType === "DOCUMENT" && data.length > MAX_DOCUMENT_BYTES) {
+    throwHttpError(422, "validation_error", "Purchase document must be 15 MB or smaller.");
+  }
+  if (fileType !== "DOCUMENT" && data.length > MAX_IMAGE_BYTES) {
+    throwHttpError(422, "validation_error", "Image upload must be 10 MB or smaller.");
+  }
+  const signature = detectUploadSignature(data);
+  if (!signature || !signature.extensions.has(ext)) {
+    throwHttpError(422, "validation_error", "Uploaded file content does not match an allowed file type.");
+  }
+  if (fileType !== "DOCUMENT" && signature.mimeType === "application/pdf") {
+    throwHttpError(422, "validation_error", "Only image files are allowed.");
+  }
+  return { ext, mimeType: signature.mimeType };
+};
 
 async function ensureColumn(connection, table, column, definition) {
   const [rows] = await connection.query(
@@ -473,13 +634,19 @@ async function authenticate(req, options = {}) {
   const header = req.headers.authorization || "";
   const match = /^Bearer\s+(.+)$/i.exec(header);
   if (!match) return null;
-  const tokenHash = sha256(match[1]);
+  const tokenHash = hashToken(match[1]);
+  const candidates = tokenHashCandidates(match[1]);
+  const placeholders = candidates.map(() => "?").join(", ");
   const [rows] = await pool.query(
-    "SELECT * FROM devices WHERE token_hash = ? LIMIT 1",
-    [tokenHash]
+    `SELECT * FROM devices WHERE token_hash IN (${placeholders}) LIMIT 1`,
+    candidates
   );
   const device = rows[0] || null;
   if (!device) return null;
+  if (TOKEN_HASH_SECRET && device.token_hash !== tokenHash) {
+    await pool.query("UPDATE devices SET token_hash = ? WHERE id = ?", [tokenHash, device.id]);
+    device.token_hash = tokenHash;
+  }
   const approvalStatus = normalizeDeviceApprovalStatus(device);
   device.approval_status = approvalStatus;
   const revoked = Boolean(device.is_revoked) || approvalStatus === DEVICE_APPROVAL_STATUS.REVOKED;
@@ -513,7 +680,7 @@ async function handleCurrentDeviceDisconnect(req, res) {
        WHERE id = ?`,
       [device.id]
     );
-    return res.writeHead(204).end();
+    return noContent(res);
   }
   await pool.query(
     `UPDATE devices
@@ -526,7 +693,7 @@ async function handleCurrentDeviceDisconnect(req, res) {
      WHERE id = ?`,
     [device.id]
   );
-  return res.writeHead(204).end();
+  return noContent(res);
 }
 
 function operationKind(type, existed) {
@@ -1568,7 +1735,7 @@ async function handleRecordDelete(req, res, device, entity, recordId) {
     await connection.beginTransaction();
     await persistBusinessRecord(connection, device, req, entity, recordId, { id: recordId, deleted: true }, "DELETE");
     await connection.commit();
-    res.writeHead(204).end();
+    noContent(res);
   } catch (err) {
     await connection.rollback();
     error(res, err.status || 500, err.status === 422 ? "validation_error" : "internal_error", err.message || "Unable to delete cloud record.");
@@ -2162,6 +2329,10 @@ async function canonicalizeOperation(connection, businessId, op) {
 }
 
 async function handleDeviceRegistration(req, res) {
+  enforceRateLimit(req, "device-registration", {
+    limit: DEVICE_REGISTRATION_RATE_LIMIT_MAX,
+    windowMs: DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS
+  });
   const body = await readBody(req);
   const requestIp = getRequestIp(req);
   if (!REGISTRATION_KEY) {
@@ -2227,7 +2398,7 @@ async function handleDeviceRegistration(req, res) {
              last_seen_at = CURRENT_TIMESTAMP,
              registration_ip = ?
          WHERE id = ? AND business_id = 1`,
-        [deviceName, deviceCode, sha256(rawToken), requestIp, deviceId]
+        [deviceName, deviceCode, hashToken(rawToken), requestIp, deviceId]
       );
       const [updatedRows] = await connection.query("SELECT * FROM devices WHERE id = ? AND business_id = 1 LIMIT 1", [deviceId]);
       const device = publicDeviceFromRow(updatedRows[0] || existing);
@@ -2271,7 +2442,7 @@ async function handleDeviceRegistration(req, res) {
         deviceId,
         deviceName,
         deviceCode,
-        sha256(rawToken),
+        hashToken(rawToken),
         revoked,
         shouldApprove ? new Date() : null,
         approvalStatus,
@@ -2463,6 +2634,7 @@ async function handleCloudAuthStatus(req, res, device) {
 }
 
 async function handleCloudSetupOwner(req, res, device) {
+  enforceRateLimit(req, "auth-setup-owner");
   const body = await readBody(req);
   const displayName = requiredText(body.displayName, "Display name").slice(0, 100);
   const username = normalizeUsername(body.username);
@@ -2501,6 +2673,7 @@ async function handleCloudSetupOwner(req, res, device) {
 }
 
 async function handleCloudLogin(req, res, device) {
+  enforceRateLimit(req, "auth-login");
   const body = await readBody(req);
   const username = normalizeUsername(body.username);
   const password = String(body.password || "");
@@ -2588,7 +2761,7 @@ async function handleCloudUserDeactivate(req, res, device, userId) {
     }
     await persistBusinessRecord(connection, device, req, "users", userId, { ...current.data, active: false, updatedAt: nowIso() }, "UPSERT", "USER_DEACTIVATED");
     await connection.commit();
-    res.writeHead(204).end();
+    noContent(res);
   } catch (err) {
     await connection.rollback();
     error(res, err.status || 500, err.status === 404 ? "not_found" : err.status === 422 ? "validation_error" : "internal_error", err.message || "Unable to deactivate user.");
@@ -2687,7 +2860,7 @@ async function handleCloudRoleDeactivate(req, res, device, roleId) {
     if (assigned.length) throw Object.assign(new Error("This role is assigned to active staff. Move those users to another role first."), { status: 422 });
     await persistBusinessRecord(connection, device, req, "access_roles", roleId, { ...current.data, active: false, updatedAt: nowIso() }, "UPSERT", "ACCESS_ROLE_DEACTIVATED");
     await connection.commit();
-    res.writeHead(204).end();
+    noContent(res);
   } catch (err) {
     await connection.rollback();
     error(res, err.status || 500, err.status === 404 ? "not_found" : err.status === 422 ? "validation_error" : "internal_error", err.message || "Unable to deactivate role.");
@@ -2843,16 +3016,17 @@ async function handleInvoiceFinalize(req, res, device) {
 
 async function handleFileUpload(req, res, device) {
   const body = await readBody(req);
-  const data = Buffer.from(String(body.dataBase64 || ""), "base64");
+  const dataBase64 = String(body.dataBase64 || "").replace(/\s/g, "");
+  if (!dataBase64) return error(res, 422, "validation_error", "dataBase64 is required.");
+  if (dataBase64.length % 4 === 1 || !/^[A-Za-z0-9+/]*={0,2}$/.test(dataBase64)) {
+    return error(res, 422, "validation_error", "dataBase64 must be valid base64.");
+  }
+  const data = Buffer.from(dataBase64, "base64");
   if (!data.length) return error(res, 422, "validation_error", "dataBase64 is required.");
   const fileType = String(body.fileType || "PHOTO").toUpperCase();
   if (!FILE_TYPES.has(fileType)) return error(res, 422, "validation_error", "Unsupported file type.");
   const fileId = uuid();
-  const ext = path.extname(String(body.originalName || "")) || ".bin";
-  if (fileType === "DOCUMENT") {
-    if (!DOCUMENT_EXTENSIONS.has(ext.toLowerCase())) return error(res, 422, "validation_error", "Only PDF and image purchase documents are allowed.");
-    if (data.length > MAX_DOCUMENT_BYTES) return error(res, 422, "validation_error", "Purchase document must be 15 MB or smaller.");
-  }
+  const { ext, mimeType } = validateUpload(fileType, body.originalName, data);
   const businessDir = path.join(UPLOAD_DIR, String(device.business_id));
   fs.mkdirSync(businessDir, { recursive: true });
   const storagePath = path.join(businessDir, `${fileId}${ext}`);
@@ -2873,14 +3047,14 @@ async function handleFileUpload(req, res, device) {
       String(body.entityId || ""),
       fileType,
       String(body.originalName || ""),
-      String(body.mimeType || "application/octet-stream"),
+      mimeType,
       data.length,
       digest,
       storagePath,
       device.id
     ]
   );
-  ok(res, { fileId, sha256: digest, sizeBytes: data.length, originalName: String(body.originalName || ""), mimeType: String(body.mimeType || "application/octet-stream") }, 201, { location: `/api/v1/files/${fileId}` });
+  ok(res, { fileId, sha256: digest, sizeBytes: data.length, originalName: String(body.originalName || ""), mimeType }, 201, { location: `/api/v1/files/${fileId}` });
 }
 
 async function handleFileDownload(res, device, fileId) {
@@ -2888,6 +3062,7 @@ async function handleFileDownload(res, device, fileId) {
   const file = rows[0];
   if (!file || !fs.existsSync(file.storage_path)) return error(res, 404, "not_found", "File was not found.");
   res.writeHead(200, {
+    ...SECURITY_HEADERS,
     "content-type": file.mime_type || "application/octet-stream",
     "x-file-sha256": file.sha256 || "",
     "cache-control": "private, no-store"
@@ -2968,7 +3143,7 @@ async function route(req, res) {
     if (req.method === "GET" && fileMatch) return handleFileDownload(res, device, fileMatch[1]);
     return error(res, 404, "not_found", "Endpoint was not found.");
   } catch (err) {
-    return error(res, 500, "internal_error", "Unexpected API error.");
+    return errorFromThrown(res, err);
   }
 }
 

@@ -183,6 +183,7 @@ const BACKUP_JOB_CARD_PHOTO_ROOT = "job-card-photos";
 const BACKUP_PURCHASE_DOCUMENT_ROOT = "purchase-documents";
 const BACKUP_CLOUD_SNAPSHOT_ENTRY = "cloud-data/cloud-snapshot.json";
 const DAILY_BACKUP_HOUR = 19;
+const LOCAL_ONLY_SETTING_KEYS = new Set(["googleDriveClientSecret", "googleDriveClientSecretCiphertext"]);
 const HARDWARE_ID_SCRIPT = `
 $ErrorActionPreference = 'SilentlyContinue'
 $ids = [ordered]@{}
@@ -641,7 +642,7 @@ export class AppDatabase {
       if (this.enqueueSyncOperation({ operationType: "UPSERT", entity, localId, payload })) queued += 1;
     };
 
-    queue("settings", BUSINESS_SETTINGS_SYNC_ID, this.getSettings() as unknown as Record<string, unknown>);
+    queue("settings", BUSINESS_SETTINGS_SYNC_ID, this.cloudSafeSettingsPayload(this.getSettings() as unknown as Record<string, unknown>));
     queue("settings", JOB_CARD_SETTINGS_SYNC_ID, this.getJobCardSettings() as Record<string, unknown>);
 
     DATA_TABLES.forEach((table) => {
@@ -960,7 +961,7 @@ export class AppDatabase {
 
     if (recordId && recordId !== BUSINESS_SETTINGS_SYNC_ID) return;
     const current = this.getSettings() as unknown as Record<string, unknown>;
-    const next = { ...current, ...data };
+    const next = this.cloudSafeSettingsPayload({ ...current, ...this.cloudSafeSettingsPayload(data) });
     Object.entries(next).forEach(([key, value]) => {
       this.requireDb().run("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", [key, String(value ?? "")]);
     });
@@ -1402,6 +1403,17 @@ export class AppDatabase {
       googleDriveClientId: settingText(values, defaults, "googleDriveClientId"),
       googleDriveClientSecret: settingText(values, defaults, "googleDriveClientSecret")
     };
+  }
+
+  getLocalSettingValue(key: string) {
+    this.validateSettingKey(key);
+    const row = this.select<Row>("SELECT value FROM settings WHERE key = ? LIMIT 1", [key])[0];
+    return rowText(row, "value");
+  }
+
+  saveLocalSettingValue(key: string, value: string) {
+    this.validateSettingKey(key);
+    this.runWrite("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", [key, value]);
   }
 
   saveSettings(input: Partial<BusinessSettings>) {
@@ -5766,6 +5778,14 @@ export class AppDatabase {
 
   private validatePassword(password: string) {
     if (password.trim().length < 4) throw new Error("Password or PIN must be at least 4 characters.");
+  }
+
+  private cloudSafeSettingsPayload(payload: Record<string, unknown>) {
+    return Object.fromEntries(Object.entries(payload).filter(([key]) => !LOCAL_ONLY_SETTING_KEYS.has(key)));
+  }
+
+  private validateSettingKey(key: string) {
+    if (!/^[A-Za-z0-9_.:-]{1,80}$/.test(key)) throw new Error("Invalid setting key.");
   }
 
   private runWrite(sql: string, params: unknown[] = []) {

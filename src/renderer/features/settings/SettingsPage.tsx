@@ -1350,7 +1350,7 @@ export function SettingsPage({
 
         <div className="form-grid two">
           <label className="wide-input">Google Drive OAuth Client ID<input value={form.googleDriveClientId} onChange={(event) => setForm({ ...form, googleDriveClientId: event.currentTarget.value })} placeholder="Desktop OAuth client ID" /></label>
-          <label className="wide-input">Google Drive OAuth Client Secret<input type="password" value={form.googleDriveClientSecret} onChange={(event) => setForm({ ...form, googleDriveClientSecret: event.currentTarget.value })} placeholder="Desktop OAuth client secret" /></label>
+          <label className="wide-input">Google Drive OAuth Client Secret<input type="password" value={form.googleDriveClientSecret} onChange={(event) => setForm({ ...form, googleDriveClientSecret: event.currentTarget.value })} placeholder={driveStatus.configured ? "Leave blank to keep the secure local secret" : "Desktop OAuth client secret"} /></label>
           <div className="inline-actions align-bottom">
             <button className="primary-action" disabled={Boolean(driveBusy)} onClick={connectDrive}><Plug size={18} /> {driveBusy === "connect" ? "Connecting..." : "Connect Drive"}</button>
             <button className="ghost-button" disabled={!driveStatus.connected || Boolean(driveBusy)} onClick={testDriveConnection}><Cloud size={18} /> Test</button>

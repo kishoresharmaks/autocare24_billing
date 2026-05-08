@@ -135,6 +135,11 @@ const sanitizeSnapshotData = (value: unknown): unknown =>
   JSON.parse(
     JSON.stringify(value ?? null, (key, currentValue) => (key && SNAPSHOT_SECRET_KEY.test(key) ? undefined : currentValue))
   );
+const cloudSafeSettingsPayload = (settings: Record<string, unknown>) => {
+  const next = { ...settings };
+  delete next.googleDriveClientSecret;
+  return next;
+};
 const fileMime = (filePath: string) => {
   const extension = path.extname(filePath).toLowerCase();
   if (extension === ".png") return "image/png";
@@ -390,14 +395,22 @@ export class CloudDataClient {
   async getSettings(fallback: BusinessSettings): Promise<BusinessSettings> {
     try {
       const settings = await this.list<BusinessSettings>("settings");
-      return { ...fallback, ...(settings.find((row) => (row as unknown as { id?: string }).id === BUSINESS_SETTINGS_SYNC_ID) || settings[0] || {}) };
+      const cloudSettings = settings.find((row) => (row as unknown as { id?: string }).id === BUSINESS_SETTINGS_SYNC_ID) || settings[0] || {};
+      return {
+        ...fallback,
+        ...cloudSafeSettingsPayload(cloudSettings as unknown as Record<string, unknown>),
+        googleDriveClientSecret: ""
+      } as BusinessSettings;
     } catch {
-      return fallback;
+      return { ...fallback, googleDriveClientSecret: "" };
     }
   }
 
   saveSettings(settings: Partial<BusinessSettings>) {
-    return this.save<BusinessSettings & { id: string }>("settings", { id: BUSINESS_SETTINGS_SYNC_ID, ...settings });
+    return this.save<BusinessSettings & { id: string }>(
+      "settings",
+      cloudSafeSettingsPayload({ id: BUSINESS_SETTINGS_SYNC_ID, ...settings }) as Partial<BusinessSettings> & { id: string }
+    );
   }
 
   listServices(includeInactive = false) {
