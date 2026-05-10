@@ -19,7 +19,7 @@ Autocare24 Billing is a Windows billing and operations system for a bike and car
 
 The application supports:
 
-- GST invoices and simple invoices
+- GST invoices and simple invoices (receipts)
 - Invoice drafts, final invoices, payments, cancellations, corrections, and add-ons
 - Customer and vehicle records
 - Services, packages, and consumable recipes
@@ -163,9 +163,9 @@ Important:
 
 Use a **GST invoice** when your business is issuing tax invoices and needs CGST/SGST or IGST amounts on the bill.
 
-Use a **Simple invoice** when GST is not required for that customer or for that specific sale.
+Use a **Simple invoice (receipt)** when GST is not required for that customer or for that specific sale.
 
-Ask the owner if you are unsure which mode is required for the customer.
+Ask the owner if you are unsure which mode is required for the customer. If there is any doubt, confirm with the business accountant or GST advisor.
 
 ### 6.1 Create A New Bill
 
@@ -719,7 +719,7 @@ After restore:
 
 ### 15.5 Diagnostic Export
 
-If support requests a diagnostic export, use the Diagnostic Export option from Settings. Share the file only through a trusted channel.
+If support requests a diagnostic export, use the Diagnostic Export option from Settings. Share the file only through a trusted channel such as a support portal, secure email, or in-person handover.
 
 ## 16. Cloud Sync
 
