@@ -1,8 +1,15 @@
-# Autocare24 Billing Customer Documentation
+# Autocare24 Billing Customer Documentation (Non-Technical)
 
 Customer-facing guide for the complete Autocare24 Billing project.
 
 This document is written for owners, managers, billing staff, stock staff, and support teams who use the application in daily business operations. It explains what each part of the system does, how normal workflows should be handled, what the important safety rules are, and what information to share when support is needed.
+
+## How To Use This Guide
+
+- Read the Product Overview once to understand the full system.
+- Use the Daily Navigation and workflow sections for day-to-day work.
+- Use the Troubleshooting and Support sections when something goes wrong.
+- Share the Safety Checklist with the owner before going live.
 
 For pure mathematical formulas, see [BILLING_CALCULATIONS.md](BILLING_CALCULATIONS.md).
 
@@ -12,7 +19,7 @@ Autocare24 Billing is a Windows billing and operations system for a bike and car
 
 The application supports:
 
-- GST invoices and simple receipts
+- GST invoices and simple invoices (receipts)
 - Invoice drafts, final invoices, payments, cancellations, corrections, and add-ons
 - Customer and vehicle records
 - Services, packages, and consumable recipes
@@ -151,6 +158,14 @@ Important:
 - Cancelled invoices are excluded from active revenue and dues.
 
 ## 6. Billing And Invoices
+
+### 6.0 GST Invoice Vs Simple Invoice
+
+Use a **GST invoice** when your business is issuing tax invoices and needs CGST/SGST or IGST amounts on the bill.
+
+Use a **Simple invoice (receipt)** when GST is not required for that customer or for that specific sale.
+
+Ask the owner if you are unsure which mode is required for the customer. If there is any doubt, confirm with the business accountant or GST advisor.
 
 ### 6.1 Create A New Bill
 
@@ -621,6 +636,23 @@ Important:
 
 For exact formulas, see [BILLING_CALCULATIONS.md](BILLING_CALCULATIONS.md).
 
+### 14.1 Record An Expense
+
+Use the Expenses screen to record any business cost such as rent, salaries, consumables, utilities, or vendor payments.
+
+Typical steps:
+
+1. Open Expenses.
+2. Select an expense category.
+3. Enter amount and date.
+4. Select payment mode if required.
+5. Add a short note if needed.
+6. Save.
+
+### 14.2 Expense Categories
+
+Keep categories consistent so profit reports remain accurate. If a new category is required, create it once and reuse it.
+
 ## 15. Backup And Restore
 
 Backup is one of the most important owner responsibilities.
@@ -684,6 +716,10 @@ After restore:
 - Check stock.
 - Check users and roles.
 - Check cloud sync status if used.
+
+### 15.5 Diagnostic Export
+
+If support requests a diagnostic export, use the Diagnostic Export option from Settings. The export can include sensitive business records such as invoices, customer details, and settings, so share it only through a trusted channel such as a support portal, secure email, or in-person handover. If you must email it, encrypt the file or use a secure share link.
 
 ## 16. Cloud Sync
 
@@ -757,19 +793,13 @@ If this happens:
 - Use HTTPS Cloud URL in production.
 - Do not share the registration key publicly.
 - Revoke unused or suspicious devices.
-- Keep cloud database credentials private.
-- Keep upload storage private and outside public web folders.
-- Do not manually create invoice numbers in cloud database.
+- Keep any cloud server passwords private.
+- Do not share cloud files or links with unknown people.
+- Do not manually edit invoice numbers in the cloud system, as this can cause numbering conflicts and compliance issues.
 
 ## 17. Android Reports App
 
 If the Android reports app is included in your deployment, use the standalone release APK.
-
-Development handoff path:
-
-```text
-E:\PROJECT WORKS\Billingsoftwarewindows\android\release\Autocare24-Reports-standalone.apk
-```
 
 Important:
 
@@ -797,6 +827,16 @@ Common settings:
 - Cloud sync
 
 Only owners or trusted managers should change settings.
+
+### 18.1 Users And Roles
+
+Owners can add or remove staff access from Settings > Users and Roles.
+
+Good practice:
+
+- Create a unique login for each staff member.
+- Disable users who no longer work in the business.
+- Reset a password immediately if a staff member forgets it or leaves.
 
 ## 19. Security And Access Control
 
@@ -974,7 +1014,7 @@ When asking for support, provide:
 Do not share:
 
 - Owner password
-- Cloud database password
+- Cloud server password
 - Registration key
 - Private backup files unless support specifically requests them through a trusted channel
 
@@ -1019,3 +1059,17 @@ Use this checklist before live production use:
 - [BILLING_CALCULATIONS.md](BILLING_CALCULATIONS.md): mathematical formula sheet for billing, GST, stock, reports, and profit.
 - `cloud-api/README.md`: cloud sync API setup guide for hosting/server deployment.
 - `cloud-api/schema.sql`: cloud database schema for technical deployment.
+
+## 26. Glossary
+
+- **Invoice**: The official bill given to a customer.
+- **Draft invoice**: A temporary bill saved before final approval.
+- **Quotation**: An estimate shared before billing.
+- **Job card**: A work tracker for service jobs, often converted to an invoice.
+- **GST invoice**: Tax invoice with GST amounts.
+- **Simple invoice**: Non-GST invoice without GST breakup, sometimes called a receipt.
+- **Stock purchase**: Entry that increases inventory quantity.
+- **Purchase record**: Supplier document reference that does not change stock.
+- **Expense**: Business cost recorded to calculate profit.
+- **Backup**: A copy of data used for safety and restore.
+- **Cloud sync**: Optional multi-PC data sharing and official invoice numbering.
