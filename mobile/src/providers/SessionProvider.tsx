@@ -6,7 +6,7 @@ import {
   loginOwner as loginOwnerRequest,
   registerDevice as registerDeviceRequest
 } from "../services/cloudApi";
-import { clearConnection, loadStoredSession, saveApprovalStatus, saveConnection } from "../services/sessionStorage";
+import { clearConnection, clearOwnerSession, loadStoredSession, saveApprovalStatus, saveConnection, saveOwnerSession } from "../services/sessionStorage";
 import type { CloudDeviceApprovalStatus, CloudDeviceSummary, CloudUser } from "../types/cloud";
 import { cleanBaseUrl } from "../utils/format";
 
@@ -31,7 +31,7 @@ interface SessionState {
   registerDevice: (input: { cloudUrl: string; deviceName: string; registrationKey: string }) => Promise<void>;
   refreshApproval: () => Promise<void>;
   loginOwner: (input: OwnerCredentials) => Promise<void>;
-  logoutOwner: () => void;
+  logoutOwner: () => Promise<void>;
   clearLocalConnection: () => Promise<void>;
 }
 
@@ -69,6 +69,10 @@ export function SessionProvider({ children }: PropsWithChildren) {
         setDeviceName(stored.deviceName);
         setToken(stored.token);
         setApprovalStatus(stored.approvalStatus as CloudDeviceApprovalStatus | "");
+        if (stored.token && stored.approvalStatus === "APPROVED" && stored.ownerUser && stored.ownerCredentials) {
+          setUser(stored.ownerUser);
+          setOwnerCredentials(stored.ownerCredentials);
+        }
       })
       .catch((error: Error) => {
         if (active) setLastError(error.message || "Unable to load saved mobile session.");
@@ -106,6 +110,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
         token: result.token,
         approvalStatus: result.approvalStatus
       });
+      await clearOwnerSession();
       setCloudUrl(normalizedUrl);
       setDeviceName(input.deviceName.trim() || deviceName);
       setToken(result.token);
@@ -127,6 +132,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
     setApprovalStatus(result.approvalStatus);
     setDevice(result.device);
     if (result.revoked) {
+      await clearOwnerSession();
       setUser(null);
       setOwnerCredentials(null);
     }
@@ -142,13 +148,16 @@ export function SessionProvider({ children }: PropsWithChildren) {
       if (result.user.role !== "owner") {
         throw new Error("Only owner accounts can use this mobile reports app.");
       }
+      const credentials = { username: input.username.trim(), password: input.password };
+      await saveOwnerSession({ user: result.user, credentials });
       setUser(result.user);
-      setOwnerCredentials({ username: input.username.trim(), password: input.password });
+      setOwnerCredentials(credentials);
     },
     [approvalStatus, cloudUrl, token]
   );
 
-  const logoutOwner = useCallback(() => {
+  const logoutOwner = useCallback(async () => {
+    await clearOwnerSession();
     setUser(null);
     setOwnerCredentials(null);
   }, []);

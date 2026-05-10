@@ -32,7 +32,7 @@ export function OwnerLoginScreen() {
     <AuthLayout>
       <StatusPill status={session.approvalStatus} />
       <Text style={styles.title}>Owner login</Text>
-      <Text style={styles.copy}>Owner credentials are required for dashboard, reports, and device activity. Password is kept only for this app session.</Text>
+      <Text style={styles.copy}>Owner credentials unlock dashboard, reports, and device activity. Login is saved securely on this phone until you logout.</Text>
       <FormField label="Owner username" value={username} onChangeText={setUsername} />
       <FormField label="Owner password / PIN" value={password} onChangeText={setPassword} secureTextEntry />
       {error ? <Text style={styles.error}>{error}</Text> : null}

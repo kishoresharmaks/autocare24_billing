@@ -4,7 +4,7 @@ import { Home } from "lucide-react-native";
 import { router } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useResponsiveLayout } from "../hooks/useResponsiveLayout";
-import { colors } from "../theme";
+import { colors, radius } from "../theme";
 
 interface ScreenProps extends PropsWithChildren {
   title: string;
@@ -13,9 +13,21 @@ interface ScreenProps extends PropsWithChildren {
   refreshing?: boolean;
   onRefresh?: () => void;
   showHome?: boolean;
+  hideHeader?: boolean;
+  fixedFooter?: ReactNode;
 }
 
-export function Screen({ title, subtitle, right, refreshing = false, onRefresh, showHome = false, children }: ScreenProps) {
+export function Screen({
+  title,
+  subtitle,
+  right,
+  refreshing = false,
+  onRefresh,
+  showHome = false,
+  hideHeader = false,
+  fixedFooter,
+  children
+}: ScreenProps) {
   const layout = useResponsiveLayout();
 
   return (
@@ -25,39 +37,57 @@ export function Screen({ title, subtitle, right, refreshing = false, onRefresh, 
           styles.content,
           {
             paddingHorizontal: layout.horizontalPadding,
-            paddingTop: layout.verticalPadding,
+            paddingTop: hideHeader ? 10 : layout.verticalPadding,
             gap: layout.sectionGap,
-            maxWidth: layout.contentMaxWidth
+            maxWidth: layout.contentMaxWidth,
+            paddingBottom: fixedFooter ? 190 : 126
           }
         ]}
         keyboardShouldPersistTaps="handled"
         refreshControl={onRefresh ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} /> : undefined}
       >
-        <View style={[styles.header, layout.isCompact ? styles.headerCompact : null]}>
-          <View style={styles.headerText}>
-            <Text style={styles.title} numberOfLines={2}>
-              {title}
-            </Text>
-            {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
-          </View>
-          {showHome || right ? (
-            <View style={[styles.headerRight, layout.isCompact ? styles.headerRightCompact : null]}>
-              {showHome ? (
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={() => router.replace("/dashboard")}
-                  style={({ pressed }) => [styles.homeButton, pressed ? styles.homeButtonPressed : null]}
-                >
-                  <Home color={colors.primaryDark} size={18} />
-                  <Text style={styles.homeButtonText}>Home</Text>
-                </Pressable>
-              ) : null}
-              {right}
+        {!hideHeader ? (
+          <View style={[styles.header, layout.isCompact ? styles.headerCompact : null]}>
+            <View style={styles.headerText}>
+              <Text style={styles.title} numberOfLines={2}>
+                {title}
+              </Text>
+              {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
             </View>
-          ) : null}
-        </View>
+            {showHome || right ? (
+              <View style={[styles.headerRight, layout.isCompact ? styles.headerRightCompact : null]}>
+                {showHome ? (
+                  <Pressable
+                    accessibilityRole="button"
+                    onPress={() => router.replace("/dashboard")}
+                    style={({ pressed }) => [styles.homeButton, pressed ? styles.homeButtonPressed : null]}
+                  >
+                    <Home color={colors.primary} size={18} />
+                    <Text style={styles.homeButtonText}>Home</Text>
+                  </Pressable>
+                ) : null}
+                {right}
+              </View>
+            ) : null}
+          </View>
+        ) : null}
         {children}
       </ScrollView>
+      {fixedFooter ? (
+        <View pointerEvents="box-none" style={styles.fixedFooterShell}>
+          <View
+            style={[
+              styles.fixedFooterInner,
+              {
+                paddingHorizontal: layout.horizontalPadding,
+                maxWidth: layout.contentMaxWidth
+              }
+            ]}
+          >
+            {fixedFooter}
+          </View>
+        </View>
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -71,8 +101,17 @@ const styles = StyleSheet.create({
     width: "100%",
     alignSelf: "center",
     padding: 16,
-    gap: 16,
-    paddingBottom: 32
+    gap: 16
+  },
+  fixedFooterShell: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 12,
+    alignItems: "center"
+  },
+  fixedFooterInner: {
+    width: "100%"
   },
   header: {
     flexDirection: "row",
@@ -106,7 +145,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     gap: 7,
-    borderRadius: 8,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surfaceStrong,
@@ -116,13 +155,13 @@ const styles = StyleSheet.create({
     transform: [{ scale: 0.99 }]
   },
   homeButtonText: {
-    color: colors.primaryDark,
+    color: colors.primary,
     fontSize: 13,
     fontWeight: "900"
   },
   title: {
     color: colors.text,
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: "900"
   },
   subtitle: {

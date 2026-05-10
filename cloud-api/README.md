@@ -123,7 +123,8 @@ Important:
 - `TOKEN_HASH_SECRET` protects stored device token hashes. Keep it stable after deployment.
 - `MAX_BODY_BYTES` defaults to 24 MB so the 15 MB document limit still has room for base64 JSON overhead.
 - Auth and device registration rate limits default to 10 attempts per 15 minutes per IP.
-- Leave `TRUSTED_PROXY_IPS` empty unless you know the exact reverse proxy IPs. If set, the API trusts `X-Forwarded-For` only from those IPs.
+- Loopback proxies (`127.0.0.1` and `::1`) are trusted for `X-Forwarded-For`/`X-Real-IP` so local hosting panels can show the real client IP instead of `127.0.0.1`.
+- Add only known reverse proxy IPs to `TRUSTED_PROXY_IPS`; the API trusts forwarded IP headers only from loopback or those configured proxy IPs.
 - `INVOICE_PREFIX` is optional. The desktop also sends its configured invoice prefix during finalization.
 - Keep HTTPS enabled through the hosting panel or a TLS-terminating reverse proxy. The desktop app rejects normal HTTP except for local development.
 

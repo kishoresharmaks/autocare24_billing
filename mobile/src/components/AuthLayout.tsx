@@ -2,7 +2,7 @@ import { PropsWithChildren } from "react";
 import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useResponsiveLayout } from "../hooks/useResponsiveLayout";
-import { colors } from "../theme";
+import { colors, radius } from "../theme";
 
 export function AuthLayout({ children }: PropsWithChildren) {
   const layout = useResponsiveLayout();
@@ -53,9 +53,14 @@ const styles = StyleSheet.create({
     width: "100%",
     alignSelf: "center",
     gap: 14,
-    borderRadius: 8,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
-    backgroundColor: colors.surface
+    backgroundColor: colors.surfaceStrong,
+    shadowColor: "#2f285f",
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.08,
+    shadowRadius: 18,
+    elevation: 3
   }
 });

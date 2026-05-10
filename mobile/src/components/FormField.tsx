@@ -1,5 +1,5 @@
 import { KeyboardTypeOptions, StyleSheet, Text, TextInput, View } from "react-native";
-import { colors } from "../theme";
+import { colors, radius } from "../theme";
 
 interface FormFieldProps {
   label: string;
@@ -42,16 +42,16 @@ const styles = StyleSheet.create({
     gap: 6
   },
   label: {
-    color: colors.text,
+    color: colors.primaryDark,
     fontSize: 13,
-    fontWeight: "700"
+    fontWeight: "800"
   },
   input: {
     minHeight: 48,
-    borderRadius: 8,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
-    backgroundColor: "#ffffff",
+    backgroundColor: colors.surface,
     color: colors.text,
     fontSize: 15,
     fontWeight: "600",

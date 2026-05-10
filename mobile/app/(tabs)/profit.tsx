@@ -99,7 +99,7 @@ const styles = StyleSheet.create({
     justifyContent: "space-between",
     gap: 12,
     borderTopWidth: 1,
-    borderTopColor: "#eee2d5",
+    borderTopColor: colors.divider,
     paddingTop: 10
   },
   rowText: {

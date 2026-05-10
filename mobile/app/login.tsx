@@ -20,7 +20,7 @@ export default function LoginRoute() {
   }
 
   if (session.user) {
-    return <Redirect href="/reports" />;
+    return <Redirect href="/dashboard" />;
   }
 
   return <OwnerLoginScreen />;

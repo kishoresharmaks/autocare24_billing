@@ -15,8 +15,8 @@ export default function SettingsTab() {
 
   if (guard) return guard;
 
-  function handleLogout() {
-    session.logoutOwner();
+  async function handleLogout() {
+    await session.logoutOwner();
     router.replace("/login");
   }
 
@@ -39,7 +39,7 @@ export default function SettingsTab() {
         <AppButton label="Logout owner" onPress={handleLogout} variant="secondary" style={layout.isTablet ? styles.actionWide : undefined} />
         <AppButton label="Reset phone connection" onPress={handleClear} variant="danger" style={layout.isTablet ? styles.actionWide : undefined} />
       </View>
-      <Text style={styles.note}>Logout returns to owner login. Reset phone connection removes this phone token from the app only and sends the app back to connection setup.</Text>
+      <Text style={styles.note}>Logout clears the saved owner login on this phone. Reset phone connection removes the cloud token, approval status, and saved owner session.</Text>
     </Screen>
   );
 }
@@ -67,7 +67,7 @@ const styles = StyleSheet.create({
   info: {
     gap: 3,
     borderTopWidth: 1,
-    borderTopColor: "#eee2d5",
+    borderTopColor: colors.divider,
     paddingTop: 10
   },
   infoLabel: {

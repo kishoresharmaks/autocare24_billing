@@ -1,6 +1,7 @@
 import { safeStorage } from "electron";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { AppDatabase } from "./database";
 import type {
@@ -29,6 +30,7 @@ const SYNC_INTERVAL_MS = 2 * 60 * 1000;
 const LOCAL_DEV_API_PATTERN = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i;
 
 const normalizeCloudUrl = (value: string) => value.trim().replace(/\/+$/, "");
+const PRIVATE_IPV4_PATTERN = /^(10\.|172\.(1[6-9]|2\d|3[0-1])\.|192\.168\.)/;
 
 const isAllowedCloudUrl = (value: string) => {
   try {
@@ -46,6 +48,21 @@ const cleanCloudConnectionError = (error: unknown) => {
     return "Cloud API is not reachable. Check internet connection and Cloud API URL, then try again.";
   }
   return message || "Cloud API is not reachable. Check internet connection and Cloud API URL, then try again.";
+};
+const getPrimarySystemIp = () => {
+  const privateIps: string[] = [];
+  const publicIps: string[] = [];
+  for (const entries of Object.values(os.networkInterfaces())) {
+    for (const entry of entries || []) {
+      const family = String(entry.family || "");
+      const address = String(entry.address || "").trim();
+      if (!address || entry.internal || address.startsWith("169.254.")) continue;
+      if (family !== "IPv4" && family !== "4") continue;
+      if (PRIVATE_IPV4_PATTERN.test(address)) privateIps.push(address);
+      else publicIps.push(address);
+    }
+  }
+  return privateIps[0] || publicIps[0] || "";
 };
 
 export class CloudSyncEngine {
@@ -101,7 +118,8 @@ export class CloudSyncEngine {
           deviceId: identity.deviceId,
           deviceCode: identity.deviceCode,
           deviceName: input.deviceName.trim() || identity.deviceCode,
-          registrationKey: input.registrationKey || ""
+          registrationKey: input.registrationKey || "",
+          reportedIp: getPrimarySystemIp()
         })
       });
     } catch (error) {

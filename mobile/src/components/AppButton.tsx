@@ -1,5 +1,5 @@
 import { ActivityIndicator, Pressable, StyleSheet, Text, ViewStyle } from "react-native";
-import { colors } from "../theme";
+import { colors, radius } from "../theme";
 
 interface AppButtonProps {
   label: string;
@@ -40,7 +40,7 @@ export function AppButton({ label, onPress, variant = "primary", disabled = fals
 const styles = StyleSheet.create({
   button: {
     minHeight: 48,
-    borderRadius: 8,
+    borderRadius: radius.pill,
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 16,
@@ -63,7 +63,7 @@ const styles = StyleSheet.create({
     color: "#ffffff"
   },
   secondaryText: {
-    color: colors.text
+    color: colors.primaryDark
   },
   dangerText: {
     color: "#ffffff"

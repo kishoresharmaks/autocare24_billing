@@ -191,15 +191,15 @@ const styles = StyleSheet.create({
     fontWeight: "900"
   },
   paid: {
-    backgroundColor: "#d9efe5",
+    backgroundColor: colors.greenSoft,
     color: colors.success
   },
   due: {
-    backgroundColor: "#f6ead1",
+    backgroundColor: colors.goldSoft,
     color: colors.warning
   },
   cancelled: {
-    backgroundColor: "#f4dddd",
+    backgroundColor: colors.redSoft,
     color: colors.danger
   },
   identityBlock: {

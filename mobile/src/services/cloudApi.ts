@@ -11,9 +11,11 @@ import type {
   InvoiceDetail,
   InvoiceSummary,
   LoginResult,
+  PurchaseRecord,
   ProfitReportData,
   ReportDateFilter,
-  ReportData
+  ReportData,
+  Supplier
 } from "../types/cloud";
 
 export class CloudApiError extends Error {
@@ -31,6 +33,12 @@ type RequestOptions = {
   method?: "GET" | "POST" | "DELETE";
   token?: string;
   body?: Record<string, unknown>;
+};
+
+type CloudRecordsResponse<T> = {
+  entity: string;
+  records: Array<{ recordId: string; data: T; revision: number }>;
+  items: T[];
 };
 
 async function request<T>(cloudUrl: string, path: string, options: RequestOptions = {}): Promise<T> {
@@ -140,6 +148,26 @@ export async function fetchProfit(cloudUrl: string, token: string, preset: DateR
 export async function fetchInventoryDashboard(cloudUrl: string, token: string): Promise<InventoryDashboardData> {
   const data = await request<{ dashboard: InventoryDashboardData }>(cloudUrl, "/api/v1/inventory/dashboard", { token });
   return data.dashboard;
+}
+
+async function fetchCloudRecords<T>(cloudUrl: string, token: string, entity: string, includeInactive = false): Promise<T[]> {
+  const params = includeInactive ? "?includeInactive=true" : "";
+  const data = await request<CloudRecordsResponse<T>>(cloudUrl, `/api/v1/records/${encodeURIComponent(entity)}${params}`, { token });
+  return data.items || [];
+}
+
+export async function fetchSuppliers(cloudUrl: string, token: string): Promise<Supplier[]> {
+  const suppliers = await fetchCloudRecords<Supplier>(cloudUrl, token, "suppliers");
+  return suppliers.sort((left, right) => String(left.name || "").localeCompare(String(right.name || "")));
+}
+
+export async function fetchPurchaseRecords(cloudUrl: string, token: string): Promise<PurchaseRecord[]> {
+  const records = await fetchCloudRecords<PurchaseRecord>(cloudUrl, token, "purchase_records", true);
+  return records.sort(
+    (left, right) =>
+      String(right.purchaseDate || right.createdAt || "").localeCompare(String(left.purchaseDate || left.createdAt || "")) ||
+      String(right.createdAt || "").localeCompare(String(left.createdAt || ""))
+  );
 }
 
 export async function fetchInvoices(cloudUrl: string, token: string, query: string): Promise<InvoiceSummary[]> {

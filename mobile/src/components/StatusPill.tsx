@@ -1,5 +1,5 @@
 import { StyleSheet, Text } from "react-native";
-import { colors } from "../theme";
+import { colors, radius } from "../theme";
 import type { CloudDeviceApprovalStatus } from "../types/cloud";
 
 export function StatusPill({ status }: { status: CloudDeviceApprovalStatus | "" }) {
@@ -16,7 +16,7 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
     flexShrink: 1,
     maxWidth: "100%",
-    borderRadius: 8,
+    borderRadius: radius.pill,
     overflow: "hidden",
     paddingHorizontal: 10,
     paddingVertical: 5,
@@ -24,15 +24,15 @@ const styles = StyleSheet.create({
     fontWeight: "800"
   },
   approved: {
-    backgroundColor: "#d9efe5",
+    backgroundColor: colors.greenSoft,
     color: colors.success
   },
   pending: {
-    backgroundColor: "#f6ead1",
+    backgroundColor: colors.goldSoft,
     color: colors.warning
   },
   revoked: {
-    backgroundColor: "#f4dddd",
+    backgroundColor: colors.redSoft,
     color: colors.danger
   }
 });

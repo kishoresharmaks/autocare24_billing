@@ -1,6 +1,7 @@
 export type DateRangePreset = "7d" | "30d" | "90d" | "all";
 export type ReportDateFilter = DateRangePreset | { fromDate?: string; toDate?: string; preset?: "" };
 export type CloudDeviceApprovalStatus = "APPROVED" | "PENDING" | "REVOKED";
+export type PaymentMode = "Cash" | "UPI" | "Card" | "Bank Transfer" | "Other";
 export type InventoryItemType = "consumable" | "retail";
 export type InventoryMovementType = "purchase" | "usage" | "sale" | "adjustment" | "return" | "damage" | "invoice_cancel_reversal";
 
@@ -198,6 +199,63 @@ export interface InventoryDashboardData {
   movements?: InventoryMovement[];
 }
 
+export interface Supplier {
+  id: string;
+  name: string;
+  phone: string;
+  gstin: string;
+  address: string;
+  createdAt: string;
+}
+
+export interface PurchaseRecordDocument {
+  id: string;
+  fileId: string;
+  originalName: string;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  uploadedAt: string;
+  localPath?: string;
+}
+
+export interface PurchaseRecord {
+  id: string;
+  purchaseDate: string;
+  supplierId: string;
+  supplierName: string;
+  vendorName: string;
+  billNumber: string;
+  amount: number;
+  paymentMode: PaymentMode;
+  notes: string;
+  documents: PurchaseRecordDocument[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EnquiryReportData {
+  total: number;
+  converted: number;
+  lost: number;
+  open: number;
+  byStatus: Array<{ status: string; count: number }>;
+  bySource: Array<{ source: string; count: number }>;
+}
+
+export interface JobCardReportData {
+  total: number;
+  open: number;
+  approvalPending: number;
+  inProgress: number;
+  completed: number;
+  cancelled: number;
+  billed: number;
+  billedRevenue: number;
+  averageTurnaroundDays: number;
+  byStatus: Array<{ status: string; count: number }>;
+}
+
 export interface ReportData {
   rangeLabel: string;
   revenue: number;
@@ -215,8 +273,8 @@ export interface ReportData {
   paymentModes: Array<{ mode: string; amount: number }>;
   salesTrend: Array<{ date: string; label: string; billedValue: number; paidAmount: number; balanceDue: number }>;
   inventory: InventoryDashboardData;
-  enquiries: Record<string, unknown>;
-  jobCards: Record<string, unknown>;
+  enquiries: EnquiryReportData;
+  jobCards: JobCardReportData;
 }
 
 export interface Expense {

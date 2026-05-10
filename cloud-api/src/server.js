@@ -39,12 +39,14 @@ const AUTH_RATE_LIMIT_MAX = envPositiveInt("AUTH_RATE_LIMIT_MAX", 10);
 const DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS = envPositiveInt("DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS", 15 * 60 * 1000);
 const DEVICE_REGISTRATION_RATE_LIMIT_MAX = envPositiveInt("DEVICE_REGISTRATION_RATE_LIMIT_MAX", 10);
 const TOKEN_HASH_SECRET = process.env.TOKEN_HASH_SECRET || "";
-const TRUSTED_PROXY_IPS = new Set(
-  String(process.env.TRUSTED_PROXY_IPS || "")
+const TRUSTED_PROXY_IPS = new Set([
+  "127.0.0.1",
+  "::1",
+  ...String(process.env.TRUSTED_PROXY_IPS || "")
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean)
-);
+]);
 const rateLimitBuckets = new Map();
 
 const SECURITY_HEADERS = {
@@ -336,13 +338,38 @@ const normalizeDeviceApprovalStatus = (device = {}) => {
 };
 const normalizeIp = (value) => String(value || "").trim().replace(/^::ffff:/, "").slice(0, 45);
 const isPlausibleIp = (value) => net.isIP(value) > 0;
+const firstForwardedIp = (req) => {
+  const candidates = [
+    String(req.headers["x-forwarded-for"] || "").split(",")[0],
+    req.headers["x-real-ip"],
+    req.headers["cf-connecting-ip"]
+  ];
+  for (const candidate of candidates) {
+    const ip = normalizeIp(candidate);
+    if (ip && isPlausibleIp(ip)) return ip;
+  }
+  return "";
+};
 const getRequestIp = (req) => {
   const remote = normalizeIp(req.socket.remoteAddress || "");
   if (remote && TRUSTED_PROXY_IPS.has(remote)) {
-    const forwarded = normalizeIp(String(req.headers["x-forwarded-for"] || "").split(",")[0]);
-    if (forwarded && isPlausibleIp(forwarded)) return forwarded;
+    const forwarded = firstForwardedIp(req);
+    if (forwarded) return forwarded;
   }
   return remote;
+};
+const firstReportedDeviceIp = (body) => {
+  const candidates = [
+    body.reportedIp,
+    body.clientIp,
+    body.systemIp,
+    ...(Array.isArray(body.reportedIps) ? body.reportedIps : [])
+  ];
+  for (const candidate of candidates) {
+    const ip = normalizeIp(candidate);
+    if (ip && isPlausibleIp(ip)) return ip;
+  }
+  return "";
 };
 const throwHttpError = (status, code, message) => {
   throw Object.assign(new Error(message), { status, code });
@@ -2335,6 +2362,7 @@ async function handleDeviceRegistration(req, res) {
   });
   const body = await readBody(req);
   const requestIp = getRequestIp(req);
+  const deviceDisplayIp = firstReportedDeviceIp(body) || requestIp;
   if (!REGISTRATION_KEY) {
     const connection = await pool.getConnection();
     try {
@@ -2398,7 +2426,7 @@ async function handleDeviceRegistration(req, res) {
              last_seen_at = CURRENT_TIMESTAMP,
              registration_ip = ?
          WHERE id = ? AND business_id = 1`,
-        [deviceName, deviceCode, hashToken(rawToken), requestIp, deviceId]
+        [deviceName, deviceCode, hashToken(rawToken), deviceDisplayIp, deviceId]
       );
       const [updatedRows] = await connection.query("SELECT * FROM devices WHERE id = ? AND business_id = 1 LIMIT 1", [deviceId]);
       const device = publicDeviceFromRow(updatedRows[0] || existing);
@@ -2447,7 +2475,7 @@ async function handleDeviceRegistration(req, res) {
         shouldApprove ? new Date() : null,
         approvalStatus,
         shouldApprove ? new Date() : null,
-        requestIp
+        deviceDisplayIp
       ]
     );
     const [rows] = await connection.query("SELECT * FROM devices WHERE id = ? AND business_id = 1 LIMIT 1", [deviceId]);

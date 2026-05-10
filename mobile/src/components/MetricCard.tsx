@@ -1,5 +1,5 @@
 import { StyleSheet, Text, View } from "react-native";
-import { colors } from "../theme";
+import { colors, radius } from "../theme";
 
 interface MetricCardProps {
   label: string;
@@ -22,7 +22,7 @@ const styles = StyleSheet.create({
   card: {
     width: "100%",
     minHeight: 88,
-    borderRadius: 8,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surfaceStrong,
@@ -42,15 +42,19 @@ const styles = StyleSheet.create({
   },
   default: {},
   success: {
-    borderColor: "#9fd0bb"
+    borderColor: "#bfe6ce",
+    backgroundColor: colors.greenSoft
   },
   warning: {
-    borderColor: "#dfbd82"
+    borderColor: "#efd49a",
+    backgroundColor: colors.goldSoft
   },
   danger: {
-    borderColor: "#dc9d9d"
+    borderColor: "#f0bcbc",
+    backgroundColor: colors.redSoft
   },
   info: {
-    borderColor: "#9ebde0"
+    borderColor: "#c7dcf3",
+    backgroundColor: colors.blueSoft
   }
 });

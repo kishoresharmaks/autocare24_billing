@@ -6,6 +6,11 @@
   "build": {
     "preview": {
       "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_CLOUD_API_PINNED_HOSTS": "sync.autocare24.in,sync.nexusnation.in",
+        "EXPO_PUBLIC_CLOUD_API_PUBLIC_KEY_HASHES": "8Wtl5po3Sp+GtUK/FT0CxkM5EqGhVbt+Nel3AclIkvE=,kZwN96eHtZftBWrOZUsd6cA4es80n3NzSk/XtYz2EqQ=,PG9X5IuFPYOpqWmqVEzKKutJuVZXx6h6Gjqxea9ifOk=,kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4=",
+        "EXPO_PUBLIC_REQUIRE_TLS_PINNING": "1"
+      },
       "android": {
         "buildType": "apk"
       },
@@ -20,6 +25,11 @@
       }
     },
     "production": {
+      "env": {
+        "EXPO_PUBLIC_CLOUD_API_PINNED_HOSTS": "sync.autocare24.in,sync.nexusnation.in",
+        "EXPO_PUBLIC_CLOUD_API_PUBLIC_KEY_HASHES": "8Wtl5po3Sp+GtUK/FT0CxkM5EqGhVbt+Nel3AclIkvE=,kZwN96eHtZftBWrOZUsd6cA4es80n3NzSk/XtYz2EqQ=,PG9X5IuFPYOpqWmqVEzKKutJuVZXx6h6Gjqxea9ifOk=,kIdp6NNEd8wsugYyyIYFsi1ylMCED3hZbSR8ZFsa/A4=",
+        "EXPO_PUBLIC_REQUIRE_TLS_PINNING": "1"
+      },
       "autoIncrement": true
     }
   }

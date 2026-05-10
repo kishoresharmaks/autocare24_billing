@@ -21,7 +21,7 @@ const styles = StyleSheet.create({
   grid: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 12,
+    gap: 10,
     justifyContent: "space-between"
   },
   item: {

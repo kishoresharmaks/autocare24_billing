@@ -1,6 +1,8 @@
 import { Alert, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import { router } from "expo-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { approveDevice, fetchDevices, isVisibleCloudDevice, revokeDevice, summarizeDeviceStatus } from "../../src/services/cloudApi";
+import { useEffect } from "react";
+import { CloudApiError, approveDevice, fetchDevices, isVisibleCloudDevice, revokeDevice, summarizeDeviceStatus } from "../../src/services/cloudApi";
 import { MetricCard } from "../../src/components/MetricCard";
 import { MetricGrid } from "../../src/components/MetricGrid";
 import { Screen } from "../../src/components/Screen";
@@ -50,6 +52,12 @@ export default function DevicesTab() {
       ),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: devicesQueryKey })
   });
+
+  useEffect(() => {
+    if (devicesQuery.error instanceof CloudApiError && devicesQuery.error.code === "owner_verification_failed") {
+      void session.logoutOwner().then(() => router.replace("/login"));
+    }
+  }, [devicesQuery.error, session]);
 
   if (guard) return guard;
 
@@ -241,7 +249,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
     borderTopWidth: 1,
-    borderTopColor: "#eee2d5",
+    borderTopColor: colors.divider,
     paddingTop: 10
   },
   actionButton: {

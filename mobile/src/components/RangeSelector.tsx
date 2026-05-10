@@ -1,6 +1,6 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useResponsiveLayout } from "../hooks/useResponsiveLayout";
-import { colors } from "../theme";
+import { colors, radius } from "../theme";
 import type { DateRangePreset } from "../types/cloud";
 
 export type RangeSelectorValue = DateRangePreset | "custom";
@@ -51,7 +51,7 @@ export function RangeSelector<T extends RangeSelectorValue = DateRangePreset>({
 const styles = StyleSheet.create({
   wrap: {
     flexDirection: "row",
-    borderRadius: 8,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
     overflow: "hidden",

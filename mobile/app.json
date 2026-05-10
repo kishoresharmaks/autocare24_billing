@@ -17,7 +17,7 @@
     "splash": {
       "image": "./assets/autocare24-logo.png",
       "resizeMode": "contain",
-      "backgroundColor": "#f7f2ea"
+      "backgroundColor": "#ffffff"
     },
     "assetBundlePatterns": [
       "**/*"
@@ -34,7 +34,7 @@
       "versionCode": 1,
       "adaptiveIcon": {
         "foregroundImage": "./assets/autocare24-icon.png",
-        "backgroundColor": "#f7f2ea"
+        "backgroundColor": "#ffffff"
       }
     },
     "plugins": [

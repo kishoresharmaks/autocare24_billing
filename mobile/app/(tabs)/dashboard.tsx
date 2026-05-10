@@ -3,63 +3,57 @@ import { router } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import {
-  AlertTriangle,
   BarChart3,
-  CheckCircle2,
+  CalendarDays,
   ChevronRight,
+  ClipboardList,
   CircleDollarSign,
   FileText,
-  HardDrive,
+  LogOut,
+  MonitorSmartphone,
   Package,
+  Plus,
+  RefreshCw,
   ReceiptText,
   Settings,
-  SlidersHorizontal,
   Wallet
 } from "lucide-react-native";
 import type { LucideIcon } from "lucide-react-native";
-import { fetchInventoryDashboard, fetchInvoices, fetchProfit, fetchReport } from "../../src/services/cloudApi";
 import {
-  dashboardKpiLimits,
-  defaultDashboardKpis,
-  loadDashboardKpis,
-  saveDashboardKpis,
-  type DashboardKpiId
-} from "../../src/services/dashboardPreferences";
+  fetchDevices,
+  fetchInventoryDashboard,
+  fetchInvoices,
+  fetchProfit,
+  fetchReport,
+  isVisibleCloudDevice,
+  summarizeDeviceStatus
+} from "../../src/services/cloudApi";
 import { Screen } from "../../src/components/Screen";
-import { SalesTrendChart } from "../../src/components/SalesTrendChart";
 import { StatusPill } from "../../src/components/StatusPill";
-import { colors } from "../../src/theme";
-import type { DateRangePreset, InvoiceSummary, InventoryDashboardData, ProfitReportData, ReportData } from "../../src/types/cloud";
+import { buildActionItems, filterVisibleActionItems, loadDismissedActionIds, type ActionItem } from "../../src/services/actionCenter";
+import { colors, radius } from "../../src/theme";
+import type { DateRangePreset, InvoiceSummary } from "../../src/types/cloud";
 import { formatCount, formatDate, formatMoney } from "../../src/utils/format";
 import { useRequireOwner } from "../../src/hooks/useRequireOwner";
-import { useResponsiveLayout } from "../../src/hooks/useResponsiveLayout";
 import { useSession } from "../../src/providers/SessionProvider";
 
 const dashboardPreset: DateRangePreset = "30d";
+const weekPreset: DateRangePreset = "7d";
 
-type KpiTone = "default" | "success" | "warning" | "danger" | "info";
-type KpiDefinition = {
-  id: DashboardKpiId;
-  label: string;
-  value: string;
-  hint: string;
-  tone: KpiTone;
-  icon: LucideIcon;
-};
+type DashboardRoute = "/action-center" | "/reports" | "/profit" | "/stock" | "/invoices" | "/devices" | "/settings";
+type TileTone = "green" | "red" | "blue" | "purple" | "gold" | "plain";
 
 export default function DashboardTab() {
   const guard = useRequireOwner();
   const session = useSession();
-  const layout = useResponsiveLayout();
-  const [selectedKpis, setSelectedKpis] = useState<DashboardKpiId[]>(defaultDashboardKpis);
-  const [customizing, setCustomizing] = useState(false);
-  const [preferenceNote, setPreferenceNote] = useState("");
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [dismissedActionIds, setDismissedActionIds] = useState<string[]>([]);
 
   useEffect(() => {
     let active = true;
-    loadDashboardKpis()
+    loadDismissedActionIds()
       .then((ids) => {
-        if (active) setSelectedKpis(ids);
+        if (active) setDismissedActionIds(ids);
       })
       .catch(() => undefined);
     return () => {
@@ -70,6 +64,11 @@ export default function DashboardTab() {
   const reportQuery = useQuery({
     queryKey: ["report", dashboardPreset, session.cloudUrl, session.token],
     queryFn: () => fetchReport(session.cloudUrl, session.token, dashboardPreset),
+    enabled: Boolean(session.user && session.token)
+  });
+  const weekReportQuery = useQuery({
+    queryKey: ["report", weekPreset, session.cloudUrl, session.token],
+    queryFn: () => fetchReport(session.cloudUrl, session.token, weekPreset),
     enabled: Boolean(session.user && session.token)
   });
   const profitQuery = useQuery({
@@ -87,402 +86,579 @@ export default function DashboardTab() {
     queryFn: () => fetchInvoices(session.cloudUrl, session.token, ""),
     enabled: Boolean(session.user && session.token && session.approvalStatus === "APPROVED")
   });
+  const devicesQuery = useQuery({
+    queryKey: ["devices-summary", session.cloudUrl, session.token, session.ownerCredentials?.username],
+    queryFn: () =>
+      fetchDevices(
+        session.cloudUrl,
+        session.token,
+        session.ownerCredentials?.username || "",
+        session.ownerCredentials?.password || ""
+      ),
+    enabled: Boolean(session.user && session.token && session.ownerCredentials)
+  });
 
   const report = reportQuery.data;
+  const weekReport = weekReportQuery.data;
   const profit = profitQuery.data;
   const inventory = inventoryQuery.data;
   const invoices = invoicesQuery.data || [];
-  const isRefreshing = reportQuery.isFetching || profitQuery.isFetching || inventoryQuery.isFetching || invoicesQuery.isFetching;
+  const isRefreshing =
+    reportQuery.isFetching || weekReportQuery.isFetching || profitQuery.isFetching || inventoryQuery.isFetching || invoicesQuery.isFetching || devicesQuery.isFetching;
 
-  const kpis = useMemo(() => buildKpis(report, profit, inventory), [report, profit, inventory]);
-  const visibleKpis = selectedKpis.map((id) => kpis.find((item) => item.id === id)).filter(Boolean) as KpiDefinition[];
-  const alerts = buildAlerts(report, profit, inventory, session.isOnline);
+  const transactions = useMemo(() => {
+    return [...invoices]
+      .sort((left, right) => {
+        const leftDue = Number(left.balanceDue || 0) > 0 ? 1 : 0;
+        const rightDue = Number(right.balanceDue || 0) > 0 ? 1 : 0;
+        if (leftDue !== rightDue) return rightDue - leftDue;
+        return new Date(right.invoiceDate || right.createdAt || 0).getTime() - new Date(left.invoiceDate || left.createdAt || 0).getTime();
+      })
+      .slice(0, 6);
+  }, [invoices]);
+
+  const visibleDevices = (devicesQuery.data?.devices || []).filter(isVisibleCloudDevice);
+  const deviceSummary = devicesQuery.data
+    ? summarizeDeviceStatus(visibleDevices)
+    : {
+        total: session.approvalStatus ? 1 : 0,
+        approved: session.approvalStatus === "APPROVED" ? 1 : 0,
+        pending: session.approvalStatus === "PENDING" ? 1 : 0
+      };
+  const firstError = [reportQuery.error, weekReportQuery.error, profitQuery.error, inventoryQuery.error, invoicesQuery.error, devicesQuery.error].find(Boolean);
+  const allActionItems = useMemo(
+    () =>
+      buildActionItems({
+        report,
+        inventory,
+        profit,
+        devices: devicesQuery.data,
+        isOnline: session.isOnline,
+        hasCloudError: Boolean(firstError)
+      }),
+    [devicesQuery.data, firstError, inventory, profit, report, session.isOnline]
+  );
+  const visibleActionItems = useMemo(() => filterVisibleActionItems(allActionItems, dismissedActionIds), [allActionItems, dismissedActionIds]);
 
   if (guard) return guard;
 
   async function refreshAll() {
-    await Promise.all([reportQuery.refetch(), profitQuery.refetch(), inventoryQuery.refetch(), invoicesQuery.refetch()]);
+    const refreshes: Array<Promise<unknown>> = [
+      reportQuery.refetch(),
+      weekReportQuery.refetch(),
+      profitQuery.refetch(),
+      inventoryQuery.refetch(),
+      invoicesQuery.refetch()
+    ];
+    if (session.ownerCredentials) refreshes.push(devicesQuery.refetch());
+    await Promise.all(refreshes);
   }
 
-  async function toggleKpi(id: DashboardKpiId) {
-    setPreferenceNote("");
-    const selected = selectedKpis.includes(id);
-    if (selected && selectedKpis.length <= dashboardKpiLimits.min) {
-      setPreferenceNote(`Select at least ${dashboardKpiLimits.min} KPI cards.`);
-      return;
-    }
-    if (!selected && selectedKpis.length >= dashboardKpiLimits.max) {
-      setPreferenceNote(`Select no more than ${dashboardKpiLimits.max} KPI cards.`);
-      return;
-    }
-    const next = selected ? selectedKpis.filter((item) => item !== id) : [...selectedKpis, id];
-    setSelectedKpis(next);
-    await saveDashboardKpis(next);
-  }
-
-  const firstError = [reportQuery.error, profitQuery.error, inventoryQuery.error, invoicesQuery.error].find(Boolean);
+  const quickFooter = (
+    <View style={styles.quickFooter}>
+      {quickOpen ? (
+        <View style={styles.quickSheet}>
+          <QuickSheetItem icon={ClipboardList} label="Action Center" route="/action-center" />
+          <QuickSheetItem icon={RefreshCw} label="Refresh all" onPress={() => void refreshAll()} />
+          <QuickSheetItem icon={Wallet} label="Pending dues" route="/reports" />
+          <QuickSheetItem icon={LogOut} label="Logout owner" onPress={() => void logoutOwner()} tone="danger" />
+        </View>
+      ) : null}
+      <View style={styles.quickBar}>
+        <Pressable accessibilityRole="button" onPress={() => router.push("/reports")} style={({ pressed }) => [styles.quickButton, styles.quickButtonDark, pressed ? styles.pressed : null]}>
+          <Text style={styles.quickButtonDarkText} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.78}>
+            View Dues
+          </Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" onPress={() => setQuickOpen((value) => !value)} style={({ pressed }) => [styles.plusButton, pressed ? styles.pressed : null]}>
+          <Plus color="#ffffff" size={28} />
+        </Pressable>
+        <Pressable accessibilityRole="button" onPress={() => router.push("/invoices")} style={({ pressed }) => [styles.quickButton, styles.quickButtonPrimary, pressed ? styles.pressed : null]}>
+          <Text style={styles.quickButtonPrimaryText} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+            Search Invoices
+          </Text>
+        </Pressable>
+      </View>
+    </View>
+  );
 
   return (
-    <Screen title="Dashboard" subtitle="Owner command center" refreshing={isRefreshing} onRefresh={refreshAll}>
-      <View style={styles.hero}>
-        <View style={styles.heroTop}>
-          <View style={styles.heroTitle}>
-            <Text style={styles.eyebrow}>Autocare24</Text>
-            <Text style={styles.heroHeading} numberOfLines={2}>
-              Welcome, {session.user?.displayName || session.user?.username || "Owner"}
+    <Screen title="Dashboard" hideHeader refreshing={isRefreshing} onRefresh={refreshAll} fixedFooter={quickFooter}>
+      <View style={styles.header}>
+        <View style={styles.brandButton}>
+          <View style={styles.brandText}>
+            <Text style={styles.brandName} numberOfLines={1}>
+              Autocare24
             </Text>
-            <Text style={styles.heroSub} numberOfLines={2}>
-              {report?.rangeLabel || "30 day"} business pulse with live cloud values.
+            <Text style={styles.brandSub} numberOfLines={1}>
+              {session.user?.displayName || session.user?.username || "Owner dashboard"}
             </Text>
           </View>
-          <StatusPill status={session.approvalStatus} />
         </View>
-        <View style={styles.heroStats}>
-          <HeroStat label="Network" value={session.isOnline ? "Online" : "Offline"} tone={session.isOnline ? "success" : "danger"} />
-          <HeroStat label="Phone" value={session.device?.deviceCode || session.deviceCode || "Ready"} />
-          <HeroStat label="Cached" value={isRefreshing ? "Syncing" : "Ready"} tone={firstError ? "warning" : "success"} />
-        </View>
+        <IconButton icon={Settings} route="/settings" label="Settings" />
       </View>
 
       {firstError ? (
         <Text style={styles.error}>{firstError instanceof Error ? firstError.message : "Some dashboard values could not be refreshed."}</Text>
       ) : null}
 
-      <View style={styles.section}>
-        <View style={styles.sectionHeader}>
-          <View style={styles.sectionTitleWrap}>
-            <Text style={styles.sectionTitle}>Live KPI values</Text>
-            <Text style={styles.sectionSub}>{visibleKpis.length} selected cards</Text>
-          </View>
-          <Pressable
-            accessibilityRole="button"
-            onPress={() => setCustomizing((value) => !value)}
-            style={({ pressed }) => [styles.smallButton, pressed ? styles.pressed : null]}
-          >
-            <SlidersHorizontal color={colors.primaryDark} size={17} />
-            <Text style={styles.smallButtonText}>{customizing ? "Done" : "Customize"}</Text>
-          </Pressable>
+      <View style={styles.kpiGrid}>
+        <KpiTile title="To Collect" value={formatMoney(report?.balanceDue)} subtitle="Pending dues" icon={Wallet} route="/reports" tone="green" />
+        <KpiTile title="Expenses" value={formatMoney(profit?.expenseTotal)} subtitle="This period" icon={FileText} route="/profit" tone="red" />
+        <KpiTile title="Stock Value" value={formatMoney(inventory?.totalStockValue)} subtitle="Value of items" icon={Package} tone="blue" />
+        <KpiTile title="This Week Sale" value={formatMoney(weekReport?.revenue)} subtitle="Last 7 days" icon={ReceiptText} tone="blue" />
+        <KpiTile
+          title="Cash Profit"
+          value={formatMoney(profit?.cashProfit)}
+          subtitle="Paid revenue less costs"
+          icon={CircleDollarSign}
+          route="/profit"
+          tone={(profit?.cashProfit || 0) >= 0 ? "plain" : "red"}
+        />
+        <KpiTile title="Invoices" value={formatCount(report?.invoiceCount)} subtitle="Final bills" icon={BarChart3} tone="purple" />
+      </View>
+
+      <ActionSummary actions={visibleActionItems.slice(0, 3)} totalCount={visibleActionItems.length} />
+
+      <Pressable accessibilityRole="button" onPress={() => router.push("/devices")} style={({ pressed }) => [styles.deviceRow, pressed ? styles.pressed : null]}>
+        <View style={styles.deviceIcon}>
+          <MonitorSmartphone color={colors.primary} size={22} />
         </View>
-        {customizing ? (
-          <View style={styles.customizer}>
-            {kpis.map((item) => (
-              <Pressable
-                accessibilityRole="checkbox"
-                accessibilityState={{ checked: selectedKpis.includes(item.id) }}
-                key={item.id}
-                onPress={() => void toggleKpi(item.id)}
-                style={({ pressed }) => [
-                  styles.kpiChoice,
-                  selectedKpis.includes(item.id) ? styles.kpiChoiceActive : null,
-                  pressed ? styles.pressed : null
-                ]}
-              >
-                <Text style={[styles.kpiChoiceText, selectedKpis.includes(item.id) ? styles.kpiChoiceTextActive : null]}>{item.label}</Text>
-              </Pressable>
-            ))}
-            <Text style={styles.customizerNote}>
-              Choose {dashboardKpiLimits.min}-{dashboardKpiLimits.max} live KPI cards for this phone.
-            </Text>
-            {preferenceNote ? <Text style={styles.warningText}>{preferenceNote}</Text> : null}
+        <View style={styles.deviceText}>
+          <Text style={styles.deviceTitle} numberOfLines={1}>
+            Manage multiple devices
+          </Text>
+          <Text style={styles.deviceSub} numberOfLines={1}>
+            {formatCount(deviceSummary.approved)} approved, {formatCount(deviceSummary.pending)} pending
+          </Text>
+        </View>
+        <StatusPill status={session.approvalStatus} />
+        <ChevronRight color={colors.primary} size={20} />
+      </Pressable>
+
+      <View style={styles.transactionsHeader}>
+        <View>
+          <Text style={styles.sectionTitle}>Transactions</Text>
+          <Text style={styles.sectionSub}>Recent synced invoices</Text>
+        </View>
+        <Pressable accessibilityRole="button" onPress={() => router.push("/reports")} style={({ pressed }) => [styles.rangeButton, pressed ? styles.pressed : null]}>
+          <CalendarDays color={colors.primary} size={18} />
+          <Text style={styles.rangeText}>LAST 30 DAYS</Text>
+        </Pressable>
+      </View>
+
+      <View style={styles.transactionPanel}>
+        {transactions.map((invoice) => (
+          <TransactionRow key={invoice.id} invoice={invoice} />
+        ))}
+        {!transactions.length ? (
+          <View style={styles.emptyState}>
+            <CalendarDays color="#d8d7df" size={74} strokeWidth={1.4} />
+            <Text style={styles.emptyTitle}>No Transactions Found</Text>
+            <Text style={styles.emptySub}>Synced cloud invoices will appear here after billing starts.</Text>
           </View>
         ) : null}
-        <View style={styles.kpiGrid}>
-          {visibleKpis.map((item) => (
-            <DashboardKpi key={item.id} item={item} />
-          ))}
-        </View>
       </View>
 
-      <View style={styles.navGrid}>
-        <NavTile icon={BarChart3} label="Reports" value={formatMoney(report?.paidAmount)} hint="Sales, GST and dues" route="/reports" tone="blue" />
-        <NavTile icon={CircleDollarSign} label="Profit" value={formatMoney(profit?.cashProfit)} hint="Revenue minus costs" route="/profit" tone="green" />
-        <NavTile icon={Package} label="Stock" value={formatMoney(inventory?.totalStockValue)} hint={`${formatCount(inventory?.lowStockCount)} low stock`} route="/stock" tone="gold" />
-        <NavTile icon={ReceiptText} label="Invoices" value={formatCount(invoices.length)} hint="Search cloud invoices" route="/invoices" tone="red" />
-        <NavTile icon={HardDrive} label="Devices" value={session.approvalStatus || "PENDING"} hint="Approve phones" route="/devices" tone="purple" />
-        <NavTile icon={Settings} label="Settings" value={session.isOnline ? "Online" : "Offline"} hint="Session and cloud" route="/settings" tone="plain" />
-      </View>
-
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Priority alerts</Text>
-        {alerts.map((alert) => (
-          <AlertRow key={alert.label} label={alert.label} detail={alert.detail} tone={alert.tone} />
-        ))}
-        {!alerts.length ? <AlertRow label="No urgent action" detail="Sales, dues, stock, and cloud status look clear." tone="success" /> : null}
-      </View>
-
-      <View style={[styles.split, layout.isTablet ? styles.splitWide : null]}>
-        <View style={[styles.section, layout.isTablet ? styles.splitItem : null]}>
-          <View style={styles.sectionTitleWrap}>
-            <Text style={styles.sectionTitle}>Daily Sales Trend</Text>
-            <Text style={styles.sectionSub}>Billed invoices vs paid collections</Text>
-          </View>
-          <SalesTrendChart points={report?.salesTrend || []} compact />
-        </View>
-        <View style={[styles.section, layout.isTablet ? styles.splitItem : null]}>
-          <Text style={styles.sectionTitle}>Top services</Text>
-          {(report?.topServices || []).slice(0, 5).map((service) => (
-            <ListRow key={service.name} title={service.name} subtitle={`${service.quantity} services`} value={formatMoney(service.revenue)} />
-          ))}
-          {!report?.topServices?.length ? <Text style={styles.empty}>No billed services in this range.</Text> : null}
-        </View>
-      </View>
-
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Pending dues</Text>
-        {(report?.dues || []).slice(0, 5).map((invoice) => (
-          <ListRow key={invoice.id} title={invoice.invoiceNumber || invoice.customerName} subtitle={invoice.customerName || invoice.vehicleNumber || invoice.invoiceDate} value={formatMoney(invoice.balanceDue)} />
-        ))}
-        {!report?.dues?.length ? <Text style={styles.empty}>No pending dues in this range.</Text> : null}
-      </View>
-
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Recent invoices</Text>
-        {invoices.slice(0, 5).map((invoice: InvoiceSummary) => (
-          <Pressable
-            accessibilityRole="button"
-            key={invoice.id}
-            onPress={() => router.push({ pathname: "/invoice/[id]", params: { id: invoice.id } })}
-            style={({ pressed }) => [styles.invoiceRow, pressed ? styles.pressed : null]}
-          >
-            <View style={styles.rowText}>
-              <Text style={styles.rowTitle} numberOfLines={1}>
-                {invoice.invoiceNumber || "Invoice"}
-              </Text>
-              <Text style={styles.rowSub} numberOfLines={1}>
-                {invoice.customerName || invoice.vehicleNumber || formatDate(invoice.invoiceDate)}
-              </Text>
-            </View>
-            <Text style={styles.amount} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
-              {formatMoney(invoice.grandTotal)}
-            </Text>
-          </Pressable>
-        ))}
-        {!invoices.length ? <Text style={styles.empty}>No invoices available.</Text> : null}
-      </View>
     </Screen>
   );
+
+  async function logoutOwner() {
+    setQuickOpen(false);
+    await session.logoutOwner();
+    router.replace("/login");
+  }
 }
 
-function buildKpis(report?: ReportData, profit?: ProfitReportData, inventory?: InventoryDashboardData): KpiDefinition[] {
-  return [
-    { id: "paidRevenue", label: "Paid Revenue", value: formatMoney(report?.paidAmount), hint: "Collected in 30 days", tone: "success", icon: Wallet },
-    { id: "cashProfit", label: "Cash Profit", value: formatMoney(profit?.cashProfit), hint: "After stock and expenses", tone: (profit?.cashProfit || 0) >= 0 ? "success" : "danger", icon: CircleDollarSign },
-    { id: "balanceDue", label: "Balance Due", value: formatMoney(report?.balanceDue), hint: "Payment follow-up", tone: report?.balanceDue ? "warning" : "default", icon: AlertTriangle },
-    { id: "invoices", label: "Invoices", value: formatCount(report?.invoiceCount), hint: "Finalized bills", tone: "info", icon: ReceiptText },
-    { id: "stockValue", label: "Stock Value", value: formatMoney(inventory?.totalStockValue), hint: "Live inventory", tone: "success", icon: Package },
-    { id: "lowStock", label: "Low Stock", value: formatCount(inventory?.lowStockCount), hint: "Needs refill check", tone: inventory?.lowStockCount ? "warning" : "default", icon: Package },
-    { id: "expiringBatches", label: "Expiring", value: formatCount(inventory?.expiringCount), hint: "Batches under watch", tone: inventory?.expiringCount ? "warning" : "default", icon: AlertTriangle },
-    { id: "profitMargin", label: "Margin", value: `${Number(profit?.profitMargin || 0).toFixed(2)}%`, hint: "Cash profit ratio", tone: (profit?.profitMargin || 0) >= 0 ? "info" : "danger", icon: BarChart3 },
-    { id: "expenses", label: "Expenses", value: formatMoney(profit?.expenseTotal), hint: "30 day spend", tone: profit?.expenseTotal ? "warning" : "default", icon: FileText }
-  ];
-}
-
-function buildAlerts(report?: ReportData, profit?: ProfitReportData, inventory?: InventoryDashboardData, isOnline = true) {
-  const alerts: Array<{ label: string; detail: string; tone: "success" | "warning" | "danger" }> = [];
-  if (!isOnline) alerts.push({ label: "Phone is offline", detail: "Showing cached dashboard values until cloud is reachable.", tone: "danger" });
-  if ((report?.balanceDue || 0) > 0) alerts.push({ label: "Pending dues", detail: `${formatMoney(report?.balanceDue)} needs payment follow-up.`, tone: "warning" });
-  if ((inventory?.lowStockCount || 0) > 0) alerts.push({ label: "Low stock", detail: `${formatCount(inventory?.lowStockCount)} item(s) are at or below alert level.`, tone: "warning" });
-  if ((inventory?.expiringCount || 0) > 0) alerts.push({ label: "Expiring stock", detail: `${formatCount(inventory?.expiringCount)} batch(es) expire soon.`, tone: "warning" });
-  if ((profit?.cashProfit || 0) < 0) alerts.push({ label: "Profit loss", detail: "Cash profit is negative for the selected period.", tone: "danger" });
-  return alerts.slice(0, 5);
-}
-
-function DashboardKpi({ item }: { item: KpiDefinition }) {
-  const Icon = item.icon;
+function ActionSummary({ actions, totalCount }: { actions: ActionItem[]; totalCount: number }) {
   return (
-    <View style={[styles.kpiCard, styles[`${item.tone}Card`]]}>
-      <View style={styles.kpiTop}>
-        <View style={[styles.kpiIcon, styles[`${item.tone}Icon`]]}>
-          <Icon color={kpiIconColor(item.tone)} size={20} />
+    <Pressable accessibilityRole="button" onPress={() => router.push("/action-center")} style={({ pressed }) => [styles.actionSummary, pressed ? styles.pressed : null]}>
+      <View style={styles.actionSummaryTop}>
+        <View style={styles.actionSummaryTitleWrap}>
+          <Text style={styles.actionSummaryTitle}>Today's actions</Text>
+          <Text style={styles.actionSummarySub} numberOfLines={1}>
+            {totalCount ? `${totalCount} item(s) need attention` : "No urgent action right now"}
+          </Text>
         </View>
-        <Text style={styles.kpiLabel} numberOfLines={1}>
-          {item.label}
-        </Text>
+        <View style={styles.actionSummaryBadge}>
+          <ClipboardList color={colors.primary} size={18} />
+          <Text style={styles.actionSummaryBadgeText}>Open</Text>
+        </View>
       </View>
-      <Text style={styles.kpiValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.68}>
-        {item.value}
-      </Text>
-      <Text style={styles.kpiHint} numberOfLines={2}>
-        {item.hint}
-      </Text>
-    </View>
-  );
-}
-
-function NavTile({
-  icon: Icon,
-  label,
-  value,
-  hint,
-  route,
-  tone
-}: {
-  icon: LucideIcon;
-  label: string;
-  value: string;
-  hint: string;
-  route: "/reports" | "/profit" | "/stock" | "/invoices" | "/devices" | "/settings";
-  tone: "green" | "gold" | "blue" | "red" | "purple" | "plain";
-}) {
-  return (
-    <Pressable accessibilityRole="button" onPress={() => router.push(route)} style={({ pressed }) => [styles.navTile, pressed ? styles.pressed : null]}>
-      <View style={[styles.navIcon, styles[`${tone}NavIcon`]]}>
-        <Icon color={navIconColor(tone)} size={23} />
-      </View>
-      <View style={styles.navText}>
-        <Text style={styles.navLabel} numberOfLines={1}>
-          {label}
-        </Text>
-        <Text style={styles.navValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.7}>
-          {value}
-        </Text>
-        <Text style={styles.navHint} numberOfLines={1}>
-          {hint}
-        </Text>
-      </View>
-      <ChevronRight color={colors.muted} size={18} />
+      {actions.length ? (
+        <View style={styles.actionMiniList}>
+          {actions.map((item) => (
+            <View key={item.id} style={styles.actionMiniRow}>
+              <View style={[styles.actionDot, item.severity === "critical" ? styles.actionDotCritical : item.severity === "warning" ? styles.actionDotWarning : styles.actionDotInfo]} />
+              <Text style={styles.actionMiniText} numberOfLines={1}>
+                {item.title}
+              </Text>
+            </View>
+          ))}
+        </View>
+      ) : (
+        <Text style={styles.actionClearText}>Dues, stock, devices, profit, and cloud health look clear.</Text>
+      )}
     </Pressable>
   );
 }
 
-function HeroStat({ label, value, tone = "default" }: { label: string; value: string; tone?: "default" | "success" | "danger" | "warning" }) {
+function IconButton({ icon: Icon, route, label }: { icon: LucideIcon; route: DashboardRoute; label: string }) {
   return (
-    <View style={styles.heroStat}>
-      <Text style={styles.heroStatLabel}>{label}</Text>
-      <Text style={[styles.heroStatValue, tone === "success" ? styles.successText : tone === "danger" ? styles.dangerText : tone === "warning" ? styles.warningText : null]} numberOfLines={1}>
-        {value}
-      </Text>
-    </View>
+    <Pressable accessibilityLabel={label} accessibilityRole="button" onPress={() => router.push(route)} style={({ pressed }) => [styles.iconButton, pressed ? styles.pressed : null]}>
+      <Icon color={colors.primary} size={22} />
+    </Pressable>
   );
 }
 
-function AlertRow({ label, detail, tone }: { label: string; detail: string; tone: "success" | "warning" | "danger" }) {
-  const Icon = tone === "success" ? CheckCircle2 : AlertTriangle;
-  return (
-    <View style={[styles.alertRow, tone === "success" ? styles.alertSuccess : tone === "danger" ? styles.alertDanger : styles.alertWarning]}>
-      <Icon color={tone === "success" ? colors.success : tone === "danger" ? colors.danger : colors.warning} size={20} />
-      <View style={styles.rowText}>
-        <Text style={styles.rowTitle} numberOfLines={1}>{label}</Text>
-        <Text style={styles.rowSub} numberOfLines={2}>{detail}</Text>
+function KpiTile({
+  title,
+  value,
+  subtitle,
+  icon: Icon,
+  route,
+  tone
+}: {
+  title: string;
+  value: string;
+  subtitle: string;
+  icon: LucideIcon;
+  route?: DashboardRoute;
+  tone: TileTone;
+}) {
+  const content = (
+    <>
+      <View style={styles.kpiText}>
+        <View style={styles.kpiTitleRow}>
+          <Icon color={tileColor(tone)} size={18} />
+          <Text style={styles.kpiValue} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.68}>
+            {value}
+          </Text>
+        </View>
+        <Text style={styles.kpiTitle} numberOfLines={1}>
+          {title}
+        </Text>
+        <Text style={styles.kpiSub} numberOfLines={1}>
+          {subtitle}
+        </Text>
       </View>
-    </View>
+      {route ? <ChevronRight color="#a5a1ad" size={22} /> : null}
+    </>
   );
-}
 
-function ListRow({ title, subtitle, value }: { title: string; subtitle: string; value: string }) {
+  if (!route) {
+    return <View style={[styles.kpiTile, styles[`${tone}Tile`]]}>{content}</View>;
+  }
+
   return (
-    <View style={styles.listRow}>
-      <View style={styles.rowText}>
-        <Text style={styles.rowTitle} numberOfLines={2}>{title || "Not available"}</Text>
-        <Text style={styles.rowSub} numberOfLines={1}>{subtitle || "Not available"}</Text>
-      </View>
-      <Text style={styles.amount} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
-        {value}
-      </Text>
-    </View>
+    <Pressable accessibilityRole="button" onPress={() => router.push(route)} style={({ pressed }) => [styles.kpiTile, styles[`${tone}Tile`], pressed ? styles.pressed : null]}>
+      {content}
+    </Pressable>
   );
 }
 
-function kpiIconColor(tone: KpiTone) {
-  if (tone === "success") return colors.success;
-  if (tone === "warning") return colors.warning;
-  if (tone === "danger") return colors.danger;
-  if (tone === "info") return colors.info;
-  return colors.primaryDark;
+function TransactionRow({ invoice }: { invoice: InvoiceSummary }) {
+  const due = Number(invoice.balanceDue || 0) > 0;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      onPress={() => router.push({ pathname: "/invoice/[id]", params: { id: invoice.id } })}
+      style={({ pressed }) => [styles.transactionRow, pressed ? styles.pressed : null]}
+    >
+      <View style={[styles.transactionIcon, due ? styles.transactionIconDue : null]}>
+        <ReceiptText color={due ? colors.warning : colors.primary} size={20} />
+      </View>
+      <View style={styles.transactionText}>
+        <Text style={styles.transactionTitle} numberOfLines={1}>
+          {invoice.invoiceNumber || invoice.customerName || "Invoice"}
+        </Text>
+        <Text style={styles.transactionSub} numberOfLines={1}>
+          {[invoice.customerName, invoice.vehicleNumber, formatDate(invoice.invoiceDate)].filter(Boolean).join(" | ")}
+        </Text>
+      </View>
+      <View style={styles.transactionAmount}>
+        <Text style={styles.transactionTotal} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+          {formatMoney(invoice.grandTotal)}
+        </Text>
+        <Text style={[styles.transactionStatus, due ? styles.dueText : styles.paidText]} numberOfLines={1}>
+          {due ? "Due" : "Paid"}
+        </Text>
+      </View>
+    </Pressable>
+  );
 }
 
-function navIconColor(tone: "green" | "gold" | "blue" | "red" | "purple" | "plain") {
-  if (tone === "gold") return colors.warning;
+function QuickSheetItem({
+  icon: Icon,
+  label,
+  route,
+  onPress,
+  tone = "default"
+}: {
+  icon: LucideIcon;
+  label: string;
+  route?: DashboardRoute;
+  onPress?: () => void;
+  tone?: "default" | "danger";
+}) {
+  function handlePress() {
+    if (onPress) {
+      onPress();
+      return;
+    }
+    if (route) router.push(route);
+  }
+
+  return (
+    <Pressable accessibilityRole="button" onPress={handlePress} style={({ pressed }) => [styles.quickSheetItem, tone === "danger" ? styles.quickSheetDanger : null, pressed ? styles.pressed : null]}>
+      <Icon color={tone === "danger" ? colors.danger : colors.primary} size={18} />
+      <Text style={[styles.quickSheetText, tone === "danger" ? styles.quickSheetDangerText : null]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function tileColor(tone: TileTone) {
+  if (tone === "green") return colors.success;
+  if (tone === "red") return colors.danger;
   if (tone === "blue") return colors.info;
-  if (tone === "red") return colors.accent;
-  if (tone === "purple") return "#6545a3";
-  if (tone === "plain") return colors.text;
+  if (tone === "gold") return colors.warning;
+  if (tone === "purple") return colors.primary;
   return colors.primaryDark;
 }
 
 const styles = StyleSheet.create({
-  hero: {
-    gap: 16,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: "#c9dddb",
-    backgroundColor: colors.surfaceStrong,
-    padding: 16
-  },
-  heroTop: {
+  header: {
+    minHeight: 58,
     flexDirection: "row",
+    alignItems: "center",
     justifyContent: "space-between",
-    alignItems: "flex-start",
-    gap: 12
+    gap: 10
   },
-  heroTitle: {
+  brandButton: {
     flex: 1,
     minWidth: 0,
-    gap: 3
-  },
-  eyebrow: {
-    color: colors.primary,
-    fontSize: 12,
-    fontWeight: "900",
-    textTransform: "uppercase"
-  },
-  heroHeading: {
-    color: colors.text,
-    fontSize: 24,
-    fontWeight: "900",
-    lineHeight: 30
-  },
-  heroSub: {
-    color: colors.muted,
-    fontSize: 13,
-    fontWeight: "700",
-    lineHeight: 19
-  },
-  heroStats: {
     flexDirection: "row",
-    flexWrap: "wrap",
+    alignItems: "center",
     gap: 8
   },
-  heroStat: {
-    flex: 1,
-    minWidth: 98,
-    borderRadius: 8,
-    backgroundColor: colors.surface,
-    padding: 10,
-    gap: 3
+  brandText: {
+    minWidth: 0,
+    gap: 2
   },
-  heroStatLabel: {
-    color: colors.muted,
-    fontSize: 11,
-    fontWeight: "800"
-  },
-  heroStatValue: {
+  brandName: {
     color: colors.text,
-    fontSize: 13,
+    fontSize: 22,
     fontWeight: "900"
   },
-  section: {
-    gap: 12,
-    borderRadius: 8,
+  brandSub: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  iconButton: {
+    width: 42,
+    height: 42,
+    borderRadius: radius.md,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.purpleSoft
+  },
+  error: {
+    color: colors.danger,
+    fontSize: 13,
+    fontWeight: "800"
+  },
+  kpiGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    gap: 12
+  },
+  kpiTile: {
+    width: "48%",
+    minHeight: 86,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 6,
+    borderRadius: radius.md,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surfaceStrong,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+    shadowColor: "#2f285f",
+    shadowOffset: { width: 0, height: 5 },
+    shadowOpacity: 0.08,
+    shadowRadius: 9,
+    elevation: 2
+  },
+  kpiText: {
+    flex: 1,
+    minWidth: 0,
+    gap: 4
+  },
+  kpiTitleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6
+  },
+  kpiValue: {
+    flex: 1,
+    color: colors.text,
+    fontSize: 16,
+    fontWeight: "900"
+  },
+  kpiTitle: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: "900"
+  },
+  kpiSub: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  greenTile: {
+    borderColor: "#bfe6ce",
+    backgroundColor: colors.greenSoft
+  },
+  redTile: {
+    borderColor: "#f0bcbc",
+    backgroundColor: colors.redSoft
+  },
+  blueTile: {
+    borderColor: "#c7dcf3",
+    backgroundColor: colors.blueSoft
+  },
+  purpleTile: {
+    borderColor: "#d6cdf8",
+    backgroundColor: colors.purpleSoft
+  },
+  goldTile: {
+    borderColor: "#efd49a",
+    backgroundColor: colors.goldSoft
+  },
+  plainTile: {},
+  actionSummary: {
+    gap: 10,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: "#d6cdf8",
+    backgroundColor: colors.purpleSoft,
     padding: 12
   },
-  sectionHeader: {
+  actionSummaryTop: {
     flexDirection: "row",
-    alignItems: "flex-start",
+    alignItems: "center",
     justifyContent: "space-between",
-    gap: 12
+    gap: 10
   },
-  sectionTitleWrap: {
+  actionSummaryTitleWrap: {
     flex: 1,
     minWidth: 0,
     gap: 2
   },
-  sectionTitle: {
+  actionSummaryTitle: {
     color: colors.text,
     fontSize: 16,
+    fontWeight: "900"
+  },
+  actionSummarySub: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  actionSummaryBadge: {
+    minHeight: 34,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surfaceStrong,
+    paddingHorizontal: 10
+  },
+  actionSummaryBadgeText: {
+    color: colors.primary,
+    fontSize: 12,
+    fontWeight: "900"
+  },
+  actionMiniList: {
+    gap: 7
+  },
+  actionMiniRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8
+  },
+  actionDot: {
+    width: 8,
+    height: 8,
+    borderRadius: radius.pill
+  },
+  actionDotCritical: {
+    backgroundColor: colors.danger
+  },
+  actionDotWarning: {
+    backgroundColor: colors.warning
+  },
+  actionDotInfo: {
+    backgroundColor: colors.info
+  },
+  actionMiniText: {
+    flex: 1,
+    color: colors.primaryDark,
+    fontSize: 12,
+    fontWeight: "900"
+  },
+  actionClearText: {
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 17,
+    fontWeight: "700"
+  },
+  deviceRow: {
+    minHeight: 68,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderTopWidth: 1,
+    borderBottomWidth: 1,
+    borderColor: colors.divider,
+    paddingVertical: 12
+  },
+  deviceIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: radius.md,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.goldSoft
+  },
+  deviceText: {
+    flex: 1,
+    minWidth: 0,
+    gap: 3
+  },
+  deviceTitle: {
+    color: colors.text,
+    fontSize: 15,
+    fontWeight: "900"
+  },
+  deviceSub: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  transactionsHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10
+  },
+  sectionTitle: {
+    color: colors.muted,
+    fontSize: 15,
     fontWeight: "900"
   },
   sectionSub: {
@@ -490,279 +666,195 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: "700"
   },
-  smallButton: {
-    minHeight: 38,
+  rangeButton: {
+    minHeight: 40,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    borderRadius: radius.md,
+    paddingHorizontal: 10,
+    backgroundColor: colors.purpleSoft
+  },
+  rangeText: {
+    color: colors.primary,
+    fontSize: 12,
+    fontWeight: "900"
+  },
+  transactionPanel: {
+    minHeight: 240,
+    gap: 10
+  },
+  transactionRow: {
+    minHeight: 70,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceStrong,
+    padding: 11
+  },
+  transactionIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: radius.md,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: colors.purpleSoft
+  },
+  transactionIconDue: {
+    backgroundColor: colors.goldSoft
+  },
+  transactionText: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2
+  },
+  transactionTitle: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: "900"
+  },
+  transactionSub: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: "700"
+  },
+  transactionAmount: {
+    width: "32%",
+    minWidth: 0,
+    alignItems: "flex-end",
+    gap: 2
+  },
+  transactionTotal: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "900",
+    maxWidth: "100%"
+  },
+  transactionStatus: {
+    fontSize: 11,
+    fontWeight: "900"
+  },
+  dueText: {
+    color: colors.warning
+  },
+  paidText: {
+    color: colors.success
+  },
+  emptyState: {
+    minHeight: 250,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10
+  },
+  emptyTitle: {
+    color: colors.muted,
+    fontSize: 15,
+    fontWeight: "900"
+  },
+  emptySub: {
+    maxWidth: 280,
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 18,
+    textAlign: "center",
+    fontWeight: "700"
+  },
+  quickSheet: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "center",
+    gap: 8,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceStrong,
+    padding: 10
+  },
+  quickSheetItem: {
+    minHeight: 40,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
     gap: 7,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
-    paddingHorizontal: 10
-  },
-  smallButtonText: {
-    color: colors.primaryDark,
-    fontSize: 12,
-    fontWeight: "900"
-  },
-  customizer: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-    borderRadius: 8,
-    backgroundColor: colors.surface,
-    padding: 10
-  },
-  kpiChoice: {
-    minHeight: 38,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: "#ffffff",
-    paddingHorizontal: 10,
-    justifyContent: "center"
-  },
-  kpiChoiceActive: {
-    borderColor: colors.primary,
-    backgroundColor: "#dff2eb"
-  },
-  kpiChoiceText: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: "900"
-  },
-  kpiChoiceTextActive: {
-    color: colors.primaryDark
-  },
-  customizerNote: {
-    width: "100%",
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: "700"
-  },
-  kpiGrid: {
-    flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 10,
-    justifyContent: "space-between"
-  },
-  kpiCard: {
-    width: "48%",
-    minHeight: 128,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: "#ffffff",
-    padding: 12,
-    gap: 9
-  },
-  kpiTop: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8
-  },
-  kpiIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 8,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.surface
-  },
-  kpiLabel: {
-    flex: 1,
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: "900"
-  },
-  kpiValue: {
-    color: colors.text,
-    fontSize: 21,
-    fontWeight: "900"
-  },
-  kpiHint: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: "700",
-    lineHeight: 17
-  },
-  successCard: {
-    borderColor: "#b5dac8"
-  },
-  warningCard: {
-    borderColor: "#dfbd82"
-  },
-  dangerCard: {
-    borderColor: "#dc9d9d"
-  },
-  infoCard: {
-    borderColor: "#9ebde0"
-  },
-  defaultCard: {},
-  successIcon: {
-    backgroundColor: "#d9efe5"
-  },
-  warningIcon: {
-    backgroundColor: "#f6ead1"
-  },
-  dangerIcon: {
-    backgroundColor: "#f4dddd"
-  },
-  infoIcon: {
-    backgroundColor: "#e3eefb"
-  },
-  defaultIcon: {},
-  navGrid: {
-    gap: 10
-  },
-  navTile: {
-    minHeight: 82,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    borderRadius: 8,
+    borderRadius: radius.pill,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surfaceStrong,
-    padding: 12
+    paddingHorizontal: 12
   },
-  navIcon: {
-    width: 46,
-    height: 46,
-    borderRadius: 8,
+  quickSheetText: {
+    color: colors.primaryDark,
+    fontSize: 12,
+    fontWeight: "900"
+  },
+  quickSheetDanger: {
+    borderColor: "#f0bcbc",
+    backgroundColor: colors.redSoft
+  },
+  quickSheetDangerText: {
+    color: colors.danger
+  },
+  quickFooter: {
+    gap: 8
+  },
+  quickBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceStrong,
+    padding: 6,
+    shadowColor: "#302d45",
+    shadowOffset: { width: 0, height: 9 },
+    shadowOpacity: 0.16,
+    shadowRadius: 14,
+    elevation: 5
+  },
+  quickButton: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 50,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: colors.surface
+    borderRadius: radius.pill,
+    paddingHorizontal: 10
   },
-  greenNavIcon: {
-    backgroundColor: "#d9efe5"
+  quickButtonDark: {
+    backgroundColor: colors.primaryDark
   },
-  goldNavIcon: {
-    backgroundColor: "#f6ead1"
+  quickButtonPrimary: {
+    backgroundColor: colors.primary
   },
-  blueNavIcon: {
-    backgroundColor: "#e3eefb"
-  },
-  redNavIcon: {
-    backgroundColor: "#f7e2da"
-  },
-  purpleNavIcon: {
-    backgroundColor: "#ece5fb"
-  },
-  plainNavIcon: {
-    backgroundColor: colors.surface
-  },
-  navText: {
-    flex: 1,
-    minWidth: 0,
-    gap: 2
-  },
-  navLabel: {
-    color: colors.text,
-    fontSize: 15,
-    fontWeight: "900"
-  },
-  navValue: {
-    color: colors.primaryDark,
-    fontSize: 16,
-    fontWeight: "900"
-  },
-  navHint: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: "700"
-  },
-  alertRow: {
-    minHeight: 58,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    borderRadius: 8,
-    padding: 10
-  },
-  alertSuccess: {
-    backgroundColor: "#edf8f1"
-  },
-  alertWarning: {
-    backgroundColor: "#fff6e4"
-  },
-  alertDanger: {
-    backgroundColor: "#fbe8e8"
-  },
-  split: {
-    gap: 12
-  },
-  splitWide: {
-    flexDirection: "row"
-  },
-  splitItem: {
-    flex: 1
-  },
-  listRow: {
-    minHeight: 52,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12,
-    borderTopWidth: 1,
-    borderTopColor: "#eee2d5",
-    paddingTop: 10
-  },
-  invoiceRow: {
-    minHeight: 52,
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 12,
-    borderTopWidth: 1,
-    borderTopColor: "#eee2d5",
-    paddingTop: 10
-  },
-  rowText: {
-    flex: 1,
-    minWidth: 0,
-    gap: 2
-  },
-  rowTitle: {
-    color: colors.text,
+  quickButtonDarkText: {
+    color: "#ffffff",
     fontSize: 14,
     fontWeight: "900"
   },
-  rowSub: {
-    color: colors.muted,
-    fontSize: 12,
-    fontWeight: "700",
-    lineHeight: 17
-  },
-  amount: {
-    color: colors.primaryDark,
+  quickButtonPrimaryText: {
+    color: "#ffffff",
     fontSize: 14,
-    fontWeight: "900",
-    maxWidth: "42%",
-    textAlign: "right"
+    fontWeight: "900"
   },
-  successText: {
-    color: colors.success
-  },
-  warningText: {
-    color: colors.warning
-  },
-  dangerText: {
-    color: colors.danger
+  plusButton: {
+    width: 54,
+    height: 54,
+    borderRadius: radius.pill,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#6fc587",
+    shadowColor: "#2f9d58",
+    shadowOffset: { width: 0, height: 7 },
+    shadowOpacity: 0.22,
+    shadowRadius: 12,
+    elevation: 4
   },
   pressed: {
     transform: [{ scale: 0.99 }]
-  },
-  empty: {
-    color: colors.muted,
-    fontSize: 13,
-    fontWeight: "700"
-  },
-  error: {
-    color: colors.danger,
-    fontSize: 13,
-    fontWeight: "800"
   }
 });
