@@ -719,7 +719,7 @@ After restore:
 
 ### 15.5 Diagnostic Export
 
-If support requests a diagnostic export, use the Diagnostic Export option from Settings. Share the file only through a trusted channel such as a support portal, secure email, or in-person handover.
+If support requests a diagnostic export, use the Diagnostic Export option from Settings. The export can include business records such as invoices, customer details, and settings, so share it only through a trusted channel such as a support portal, secure email, or in-person handover.
 
 ## 16. Cloud Sync
 
@@ -1067,7 +1067,7 @@ Use this checklist before live production use:
 - **Quotation**: An estimate shared before billing.
 - **Job card**: A work tracker for service jobs, often converted to an invoice.
 - **GST invoice**: Tax invoice with GST amounts.
-- **Simple invoice**: Non-GST invoice without GST breakup.
+- **Simple invoice**: Non-GST invoice without GST breakup, sometimes called a receipt.
 - **Stock purchase**: Entry that increases inventory quantity.
 - **Purchase record**: Supplier document reference that does not change stock.
 - **Expense**: Business cost recorded to calculate profit.
