@@ -719,7 +719,7 @@ After restore:
 
 ### 15.5 Diagnostic Export
 
-If support requests a diagnostic export, use the Diagnostic Export option from Settings. The export can include business records such as invoices, customer details, and settings, so share it only through a trusted channel such as a support portal, secure email, or in-person handover.
+If support requests a diagnostic export, use the Diagnostic Export option from Settings. The export can include sensitive business records such as invoices, customer details, and settings, so share it only through a trusted channel such as a support portal, secure email, or in-person handover. If you must email it, encrypt the file or use a secure share link.
 
 ## 16. Cloud Sync
 
@@ -795,7 +795,7 @@ If this happens:
 - Revoke unused or suspicious devices.
 - Keep any cloud server passwords private.
 - Do not share cloud files or links with unknown people.
-- Do not manually edit invoice numbers in the cloud system.
+- Do not manually edit invoice numbers in the cloud system, as this can cause numbering conflicts and compliance issues.
 
 ## 17. Android Reports App
 
