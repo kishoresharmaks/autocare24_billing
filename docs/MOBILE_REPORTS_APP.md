@@ -48,4 +48,12 @@ The mobile app is Android-only. Ignore the Expo web URL; web preview is disabled
 
 ## Final APK
 
+Before building a preview or production APK, configure TLS public-key pinning for the cloud API:
+
+`$env:EXPO_PUBLIC_CLOUD_API_PINNED_HOST="sync.autocare24.in"`
+
+`$env:EXPO_PUBLIC_CLOUD_API_PUBLIC_KEY_HASHES="PRIMARY_BASE64_SHA256_PIN,BACKUP_BASE64_SHA256_PIN"`
+
+Use base64 SHA-256 public-key hashes, separated by commas. Keep at least two pins so certificate/key rotation has a backup. Expo Go can still be used for LAN development, but the installable EAS build enforces native TLS pinning before cloud API calls.
+
 Open PowerShell in `mobile/` and run `npm.cmd run build:android:preview` to build the Android preview APK through EAS. This uses `npx eas-cli@latest`, so EAS CLI is downloaded only for the APK build and is not installed with normal mobile dependencies.

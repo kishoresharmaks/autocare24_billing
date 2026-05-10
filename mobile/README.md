@@ -23,6 +23,14 @@ Use the QR code in Expo Go and ignore the web URL printed by Expo.
 
 ## APK Build
 
+Production and preview builds now require TLS public-key pins for the cloud API host. Set these before the EAS build:
+
+`$env:EXPO_PUBLIC_CLOUD_API_PINNED_HOST="sync.autocare24.in"`
+
+`$env:EXPO_PUBLIC_CLOUD_API_PUBLIC_KEY_HASHES="PRIMARY_BASE64_SHA256_PIN,BACKUP_BASE64_SHA256_PIN"`
+
+Use at least two pins so iOS TrustKit and Android rotation both have a backup key. Expo Go is still for development only; native TLS pinning is enforced in a development build or production/preview EAS build.
+
 Use the preview APK profile:
 
 `npm.cmd run build:android:preview`

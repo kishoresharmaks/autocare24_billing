@@ -84,6 +84,32 @@ let dailyBackupTimer: NodeJS.Timeout | null = null;
 const DAILY_BACKUP_HOUR = 19;
 const DAILY_BACKUP_MINUTE = 0;
 const DAILY_BACKUP_LABEL = "7:00 PM";
+const PACKAGED_RENDERER_CSP = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob: file:",
+  "font-src 'self' data:",
+  "connect-src 'self' https:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-src 'none'",
+  "frame-ancestors 'none'"
+].join("; ");
+const DEVELOPMENT_RENDERER_CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob: file:",
+  "font-src 'self' data:",
+  "connect-src 'self' https: http://127.0.0.1:5173 ws://127.0.0.1:5173",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-src 'none'",
+  "frame-ancestors 'none'"
+].join("; ");
 const driveCloud = () => {
   driveCloudService ??= createDriveCloudService();
   return driveCloudService;
@@ -168,7 +194,10 @@ const createSplashWindow = () => {
     icon: brandingAssetPath("autocare24.ico"),
     webPreferences: {
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false
     }
   });
 
@@ -389,6 +418,20 @@ const isAllowedRendererNavigation = (targetUrl: string) => {
   }
 };
 
+const installRendererCsp = (window: BrowserWindow) => {
+  const csp = app.isPackaged ? PACKAGED_RENDERER_CSP : DEVELOPMENT_RENDERER_CSP;
+  window.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+    const responseHeaders = details.responseHeaders || {};
+    const cspHeader = Object.keys(responseHeaders).find((key) => key.toLowerCase() === "content-security-policy") || "Content-Security-Policy";
+    callback({
+      responseHeaders: {
+        ...responseHeaders,
+        [cspHeader]: [csp]
+      }
+    });
+  });
+};
+
 const createWindow = () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     if (mainWindow.isMinimized()) mainWindow.restore();
@@ -408,9 +451,13 @@ const createWindow = () => {
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false
     }
   });
+  installRendererCsp(mainWindow);
 
   const showMainWindow = () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;

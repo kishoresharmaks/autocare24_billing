@@ -1,4 +1,5 @@
 import { cleanBaseUrl } from "../utils/format";
+import { ensureCloudApiTransportSecurity, getLastTlsPinningFailureHost } from "./transportSecurity";
 import type {
   ApiEnvelope,
   CloudDeviceSummary,
@@ -33,7 +34,18 @@ type RequestOptions = {
 };
 
 async function request<T>(cloudUrl: string, path: string, options: RequestOptions = {}): Promise<T> {
-  const url = `${cleanBaseUrl(cloudUrl)}${path}`;
+  const baseUrl = cleanBaseUrl(cloudUrl);
+  try {
+    await ensureCloudApiTransportSecurity(baseUrl);
+  } catch (error) {
+    throw new CloudApiError(
+      error instanceof Error ? error.message : "Cloud API transport security check failed.",
+      "transport_security_error",
+      0
+    );
+  }
+
+  const url = `${baseUrl}${path}`;
   let response: Response;
 
   try {
@@ -46,6 +58,10 @@ async function request<T>(cloudUrl: string, path: string, options: RequestOption
       body: options.body ? JSON.stringify(options.body) : undefined
     });
   } catch (error) {
+    const pinnedHost = getLastTlsPinningFailureHost();
+    if (pinnedHost) {
+      throw new CloudApiError(`Secure connection blocked. TLS certificate pinning failed for ${pinnedHost}.`, "tls_pinning_failed", 0);
+    }
     throw new CloudApiError("Cloud API is not reachable. Check internet connection and cloud URL.", "network_error", 0);
   }
 
