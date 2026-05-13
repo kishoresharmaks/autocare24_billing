@@ -39,6 +39,10 @@ const AUTH_RATE_LIMIT_MAX = envPositiveInt("AUTH_RATE_LIMIT_MAX", 10);
 const DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS = envPositiveInt("DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS", 15 * 60 * 1000);
 const DEVICE_REGISTRATION_RATE_LIMIT_MAX = envPositiveInt("DEVICE_REGISTRATION_RATE_LIMIT_MAX", 10);
 const TOKEN_HASH_SECRET = process.env.TOKEN_HASH_SECRET || "";
+const WHATSAPP_GRAPH_BASE_URL = String(process.env.WHATSAPP_API_BASE_URL || "https://graph.facebook.com").replace(/\/+$/, "");
+const WHATSAPP_GRAPH_VERSION = String(process.env.WHATSAPP_GRAPH_VERSION || "v20.0").replace(/^\/+/, "");
+const WHATSAPP_CUSTOMER_WINDOW_MS = 24 * 60 * 60 * 1000;
+const WHATSAPP_DOCUMENT_MAX_BYTES = envPositiveInt("WHATSAPP_DOCUMENT_MAX_BYTES", 18 * 1024 * 1024);
 const TRUSTED_PROXY_IPS = new Set([
   "127.0.0.1",
   "::1",
@@ -509,7 +513,7 @@ const calculateInvoiceTotals = (invoiceMode, taxScope, items, rawDiscount) => {
   };
 };
 
-async function readBody(req) {
+async function readRawBody(req) {
   const rawContentLength = req.headers["content-length"];
   if (rawContentLength !== undefined) {
     const contentLength = Number(rawContentLength);
@@ -530,8 +534,13 @@ async function readBody(req) {
     }
     chunks.push(buffer);
   }
-  if (!chunks.length) return {};
-  const text = Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks);
+}
+
+async function readBody(req) {
+  const raw = await readRawBody(req);
+  if (!raw.length) return {};
+  const text = raw.toString("utf8");
   try {
     return text ? JSON.parse(text) : {};
   } catch {
@@ -1140,6 +1149,9 @@ async function reserveStockForReference(connection, device, payload, req, refere
           type: part.type,
           quantity: used,
           unitCost: money(batch.data.unitCost),
+          saleAmount: 0,
+          saleUnitPrice: 0,
+          paymentMode: "",
           reference,
           notes,
           movementDate: movementDate || localDate(),
@@ -1197,6 +1209,9 @@ async function reverseStockForCancelledInvoice(connection, device, req, invoice)
       type: "invoice_cancel_reversal",
       quantity,
       unitCost: money(movement.unitCost),
+      saleAmount: 0,
+      saleUnitPrice: 0,
+      paymentMode: "",
       reference: invoiceNumber,
       notes: `Stock reversal for cancelled invoice ${invoiceNumber}`,
       movementDate: localDate(),
@@ -1230,7 +1245,10 @@ async function buildInventorySnapshot(connection, businessId) {
       ...movement,
       itemName: movement.itemName || item.name || "",
       itemType: movement.itemType || item.type || "consumable",
-      itemUnit: movement.itemUnit || item.unit || ""
+      itemUnit: movement.itemUnit || item.unit || "",
+      saleAmount: money(movement.saleAmount),
+      saleUnitPrice: money(movement.saleUnitPrice),
+      paymentMode: movement.paymentMode || ""
     };
   }).sort((a, b) => String(b.movementDate || "").localeCompare(String(a.movementDate || "")) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
   const expiryLimit = new Date();
@@ -1469,12 +1487,38 @@ async function buildJobCardDashboard(connection, businessId) {
   };
 }
 
-function buildSalesTrend(invoices, payments) {
+function quickStockSaleMovements(movements, range) {
+  return movements.filter((movement) => movement.type === "stock_sale" && money(movement.saleAmount) > 0 && inDateRange(movement.movementDate, range));
+}
+
+function stockSaleRevenue(movements) {
+  return money(movements.reduce((sum, movement) => sum + money(movement.saleAmount), 0));
+}
+
+function stockSaleCost(movements) {
+  return money(movements.reduce((sum, movement) => sum + money(movement.quantity) * money(movement.unitCost), 0));
+}
+
+function buildPaymentModeTotals(payments, stockSales) {
+  const totals = new Map();
+  const add = (mode, amount) => {
+    const paymentMode = normalizePaymentMode(mode || "Cash");
+    totals.set(paymentMode, money((totals.get(paymentMode) || 0) + money(amount)));
+  };
+  payments.forEach((payment) => add(payment.mode, payment.amount));
+  stockSales.forEach((movement) => add(movement.paymentMode || "Cash", movement.saleAmount));
+  return [...totals.entries()]
+    .map(([mode, amount]) => ({ mode, amount }))
+    .filter((row) => row.amount > 0)
+    .sort((a, b) => b.amount - a.amount || a.mode.localeCompare(b.mode));
+}
+
+function buildSalesTrend(invoices, payments, stockSales = []) {
   const rows = new Map();
   const ensure = (date) => {
     const key = dateOnly(date);
     if (!key) return null;
-    if (!rows.has(key)) rows.set(key, { date: key, label: key.slice(5), billedValue: 0, paidAmount: 0, balanceDue: 0 });
+    if (!rows.has(key)) rows.set(key, { date: key, label: key.slice(5), billedValue: 0, quickStockSales: 0, totalSales: 0, paidAmount: 0, balanceDue: 0 });
     return rows.get(key);
   };
   invoices
@@ -1490,7 +1534,50 @@ function buildSalesTrend(invoices, payments) {
     if (!row) return;
     row.paidAmount = money(row.paidAmount + money(payment.amount));
   });
-  return [...rows.values()].sort((a, b) => a.date.localeCompare(b.date));
+  stockSales.forEach((movement) => {
+    const row = ensure(movement.movementDate);
+    if (!row) return;
+    const amount = money(movement.saleAmount);
+    row.quickStockSales = money(row.quickStockSales + amount);
+    row.paidAmount = money(row.paidAmount + amount);
+  });
+  return [...rows.values()]
+    .map((row) => ({ ...row, totalSales: money(row.billedValue + row.quickStockSales) }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function buildProfitTrend(payments, invoiceStockMovements, expenses, stockSales) {
+  const rows = new Map();
+  const ensure = (date) => {
+    const key = dateOnly(date);
+    if (!key) return null;
+    if (!rows.has(key)) rows.set(key, { date: key, label: key.slice(5), paidRevenue: 0, stockCost: 0, expenses: 0, cashProfit: 0 });
+    return rows.get(key);
+  };
+  payments.forEach((payment) => {
+    const row = ensure(payment.paymentDate);
+    if (!row) return;
+    row.paidRevenue = money(row.paidRevenue + money(payment.amount));
+  });
+  invoiceStockMovements.forEach((movement) => {
+    const row = ensure(movement.movementDate);
+    if (!row) return;
+    row.stockCost = money(row.stockCost + money(movement.quantity) * money(movement.unitCost));
+  });
+  stockSales.forEach((movement) => {
+    const row = ensure(movement.movementDate);
+    if (!row) return;
+    row.paidRevenue = money(row.paidRevenue + money(movement.saleAmount));
+    row.stockCost = money(row.stockCost + money(movement.quantity) * money(movement.unitCost));
+  });
+  expenses.forEach((expense) => {
+    const row = ensure(expense.expenseDate);
+    if (!row) return;
+    row.expenses = money(row.expenses + money(expense.amount));
+  });
+  return [...rows.values()]
+    .map((row) => ({ ...row, cashProfit: money(row.paidRevenue - row.stockCost - row.expenses) }))
+    .sort((a, b) => a.date.localeCompare(b.date));
 }
 
 async function buildEnquiryReport(connection, businessId, range) {
@@ -2101,6 +2188,9 @@ async function handleInventoryPurchase(req, res, device) {
       type: "purchase",
       quantity,
       unitCost,
+      saleAmount: 0,
+      saleUnitPrice: 0,
+      paymentMode: "",
       reference: batch.billNumber,
       notes: "Purchase stock added",
       movementDate: batch.purchaseDate,
@@ -2125,13 +2215,15 @@ async function handleInventoryMovement(req, res, device) {
     await connection.beginTransaction();
     const itemId = requiredText(body.itemId, "Inventory item");
     const type = String(body.type || "");
-    if (!["usage", "adjustment", "return", "damage"].includes(type)) throw Object.assign(new Error("Unsupported manual stock movement."), { status: 422 });
+    if (!["usage", "stock_sale", "adjustment", "return", "damage"].includes(type)) throw Object.assign(new Error("Unsupported manual stock movement."), { status: 422 });
     const quantity = money(positiveNumber(body.quantity, "Quantity"));
     const item = (await loadBusinessRecord(connection, device.business_id, "inventory_items", itemId))?.data;
     if (!item) throw Object.assign(new Error("Inventory item not found."), { status: 404 });
     const movementDate = String(body.movementDate || localDate());
     const reference = String(body.reference || "");
     const notes = String(body.notes || "");
+    const saleAmount = type === "stock_sale" ? money(positiveNumber(body.saleAmount, "Sale amount")) : 0;
+    const paymentMode = type === "stock_sale" ? normalizePaymentMode(body.paymentMode || "Cash") : "";
     const batches = await loadBusinessRecords(connection, device.business_id, "inventory_batches", true);
     const itemBatches = batches
       .filter((row) => String(row.data.itemId || "") === itemId && money(row.data.quantityRemaining) > 0)
@@ -2152,6 +2244,9 @@ async function handleInventoryMovement(req, res, device) {
         type,
         quantity,
         unitCost: money(batch.data.unitCost),
+        saleAmount: 0,
+        saleUnitPrice: 0,
+        paymentMode: "",
         reference,
         notes,
         movementDate,
@@ -2163,10 +2258,15 @@ async function handleInventoryMovement(req, res, device) {
       const available = money(itemBatches.reduce((sum, row) => sum + money(row.data.quantityRemaining), 0));
       if (available < quantity) throw Object.assign(new Error(`Stock not available for ${item.name || itemId}. Available: ${available} ${item.unit || "unit"}, requested: ${quantity} ${item.unit || "unit"}.`), { status: 422 });
       let remaining = quantity;
+      let remainingSaleAmount = saleAmount;
       for (const batch of itemBatches) {
         if (remaining <= 0) break;
         const used = money(Math.min(money(batch.data.quantityRemaining), remaining));
         remaining = money(remaining - used);
+        const movementSaleAmount = type === "stock_sale"
+          ? money(remaining <= 0 ? remainingSaleAmount : Math.min(remainingSaleAmount, money((saleAmount * used) / quantity)))
+          : 0;
+        remainingSaleAmount = money(remainingSaleAmount - movementSaleAmount);
         await persistBusinessRecord(connection, device, req, "inventory_batches", batch.recordId, {
           ...batch.data,
           quantityRemaining: money(money(batch.data.quantityRemaining) - used)
@@ -2181,6 +2281,9 @@ async function handleInventoryMovement(req, res, device) {
           type,
           quantity: used,
           unitCost: money(batch.data.unitCost),
+          saleAmount: movementSaleAmount,
+          saleUnitPrice: used > 0 ? money(movementSaleAmount / used) : 0,
+          paymentMode,
           reference,
           notes,
           movementDate,
@@ -2210,10 +2313,13 @@ async function handleDashboard(res, device) {
     const activeInvoiceIds = new Set(active.map((invoice) => String(invoice.id || "")));
     const payments = rowList(await loadBusinessRecords(connection, device.business_id, "payments"))
       .filter((payment) => activeInvoiceIds.has(String(payment.invoiceId || "")));
+    const movements = rowList(await loadBusinessRecords(connection, device.business_id, "inventory_movements"));
+    const todayQuickStockSales = stockSaleRevenue(quickStockSaleMovements(movements, { fromDate: today, toDate: today }));
+    const monthQuickStockSales = stockSaleRevenue(quickStockSaleMovements(movements, { fromDate: monthStart, toDate: "" }));
     ok(res, {
       dashboard: {
-        todayRevenue: money(payments.filter((payment) => payment.paymentDate === today).reduce((sum, payment) => sum + money(payment.amount), 0)),
-        monthRevenue: money(payments.filter((payment) => String(payment.paymentDate || "") >= monthStart).reduce((sum, payment) => sum + money(payment.amount), 0)),
+        todayRevenue: money(payments.filter((payment) => payment.paymentDate === today).reduce((sum, payment) => sum + money(payment.amount), 0) + todayQuickStockSales),
+        monthRevenue: money(payments.filter((payment) => String(payment.paymentDate || "") >= monthStart).reduce((sum, payment) => sum + money(payment.amount), 0) + monthQuickStockSales),
         pendingDues: money(active.reduce((sum, invoice) => sum + money(invoice.balanceDue), 0)),
         todayInvoices: active.filter((invoice) => invoice.invoiceDate === today).length,
         recentInvoices: invoices.slice(0, 8),
@@ -2270,17 +2376,21 @@ async function handleReports(req, res, device) {
     const allActiveInvoiceIds = new Set(allInvoices.filter((invoice) => invoice.invoiceStatus !== "cancelled").map((invoice) => String(invoice.id || "")));
     const payments = rowList(await loadBusinessRecords(connection, device.business_id, "payments"))
       .filter((payment) => allActiveInvoiceIds.has(String(payment.invoiceId || "")) && inDateRange(payment.paymentDate, range));
-    const paymentModes = [...PAYMENT_MODES].map((mode) => ({
-      mode,
-      amount: money(payments.filter((payment) => payment.mode === mode).reduce((sum, payment) => sum + money(payment.amount), 0))
-    })).filter((row) => row.amount > 0);
+    const movements = rowList(await loadBusinessRecords(connection, device.business_id, "inventory_movements"));
+    const stockSales = quickStockSaleMovements(movements, range);
+    const quickStockSales = stockSaleRevenue(stockSales);
+    const invoiceRevenue = money(active.reduce((sum, invoice) => sum + money(invoice.grandTotal), 0));
+    const paymentModes = buildPaymentModeTotals(payments, stockSales);
     const inventory = await buildInventorySnapshot(connection, device.business_id);
     ok(res, {
       report: {
         rangeLabel: range.label,
-        revenue: money(active.reduce((sum, invoice) => sum + money(invoice.grandTotal), 0)),
+        revenue: invoiceRevenue,
+        invoiceRevenue,
+        quickStockSales,
+        totalSales: money(invoiceRevenue + quickStockSales),
         invoiceCount: active.length,
-        paidAmount: money(payments.reduce((sum, payment) => sum + money(payment.amount), 0)),
+        paidAmount: money(payments.reduce((sum, payment) => sum + money(payment.amount), 0) + quickStockSales),
         balanceDue: money(active.reduce((sum, invoice) => sum + money(invoice.balanceDue), 0)),
         taxableValue: money(active.reduce((sum, invoice) => sum + money(invoice.taxableValue), 0)),
         cgst: money(active.reduce((sum, invoice) => sum + money(invoice.cgst), 0)),
@@ -2291,7 +2401,7 @@ async function handleReports(req, res, device) {
         dues: active.filter((invoice) => money(invoice.balanceDue) > 0),
         topServices: await buildTopServices(connection, device.business_id, active),
         paymentModes,
-        salesTrend: buildSalesTrend(active, payments),
+        salesTrend: buildSalesTrend(active, payments, stockSales),
         inventory,
         enquiries: await buildEnquiryReport(connection, device.business_id, range),
         jobCards: await buildJobCardReport(connection, device.business_id, range, active)
@@ -2313,11 +2423,15 @@ async function handleProfit(req, res, device) {
     const activeInvoiceNumbers = new Set(invoices.filter((invoice) => invoice.invoiceStatus !== "cancelled").map((invoice) => String(invoice.invoiceNumber || "")));
     const payments = rowList(await loadBusinessRecords(connection, device.business_id, "payments"))
       .filter((payment) => activeInvoiceIds.has(String(payment.invoiceId || "")) && inDateRange(payment.paymentDate, range));
-    const movements = rowList(await loadBusinessRecords(connection, device.business_id, "inventory_movements"))
+    const allMovements = rowList(await loadBusinessRecords(connection, device.business_id, "inventory_movements"));
+    const movements = allMovements
       .filter((movement) => activeInvoiceNumbers.has(String(movement.reference || "")) && inDateRange(movement.movementDate, range));
+    const stockSales = quickStockSaleMovements(allMovements, range);
     const expenses = rowList(await loadBusinessRecords(connection, device.business_id, "expenses")).filter((expense) => inDateRange(expense.expenseDate, range));
-    const paidRevenue = money(payments.reduce((sum, payment) => sum + money(payment.amount), 0));
-    const stockCost = money(movements.filter((movement) => ["sale", "usage"].includes(String(movement.type || ""))).reduce((sum, movement) => sum + money(movement.quantity) * money(movement.unitCost), 0));
+    const paidRevenue = money(payments.reduce((sum, payment) => sum + money(payment.amount), 0) + stockSaleRevenue(stockSales));
+    const invoiceStockMovements = movements.filter((movement) => ["sale", "usage"].includes(String(movement.type || "")));
+    const invoiceStockCost = money(invoiceStockMovements.reduce((sum, movement) => sum + money(movement.quantity) * money(movement.unitCost), 0));
+    const stockCost = money(invoiceStockCost + stockSaleCost(stockSales));
     const expenseTotal = money(expenses.reduce((sum, expense) => sum + money(expense.amount), 0));
     const cashProfit = money(paidRevenue - stockCost - expenseTotal);
     const categories = new Map();
@@ -2330,7 +2444,7 @@ async function handleProfit(req, res, device) {
         expenseTotal,
         cashProfit,
         profitMargin: paidRevenue > 0 ? money((cashProfit / paidRevenue) * 100) : 0,
-        trend: [],
+        trend: buildProfitTrend(payments, invoiceStockMovements, expenses, stockSales),
         expensesByCategory: [...categories.entries()].map(([category, amount]) => ({ category, amount })).sort((a, b) => b.amount - a.amount),
         expenses
       }
@@ -3098,12 +3212,822 @@ async function handleFileDownload(res, device, fileId) {
   fs.createReadStream(file.storage_path).pipe(res);
 }
 
+const textResponse = (res, status, body, headers = {}) => {
+  res.writeHead(status, {
+    ...SECURITY_HEADERS,
+    "content-type": "text/plain; charset=utf-8",
+    "cache-control": "no-store",
+    ...headers
+  });
+  res.end(String(body ?? ""));
+};
+
+const isTruthyEnv = (value) => ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+const whatsappRuntimeConfig = () => {
+  const enabled = isTruthyEnv(process.env.WHATSAPP_ENABLED);
+  const accessToken = String(process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
+  const phoneNumberId = String(process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
+  const businessAccountId = String(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || "").trim();
+  const verifyToken = String(process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || "").trim();
+  const appSecret = String(process.env.WHATSAPP_APP_SECRET || "").trim();
+  return {
+    enabled,
+    configured: enabled && Boolean(accessToken && phoneNumberId),
+    webhookReady: enabled && Boolean(verifyToken && appSecret),
+    accessToken,
+    phoneNumberId,
+    businessAccountId,
+    verifyToken,
+    appSecret,
+    graphVersion: WHATSAPP_GRAPH_VERSION,
+    graphBaseUrl: WHATSAPP_GRAPH_BASE_URL,
+    displayPhoneNumber: String(process.env.WHATSAPP_DISPLAY_PHONE_NUMBER || "").trim()
+  };
+};
+
+const normalizeWhatsAppPhone = (phone) => {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (digits.length === 10) return `91${digits}`;
+  if (digits.length >= 8 && digits.length <= 15) return digits;
+  throwHttpError(422, "validation_error", "A valid WhatsApp phone number is required.");
+};
+
+const normalizeWhatsAppPhoneOptional = (phone) => {
+  try {
+    return normalizeWhatsAppPhone(phone);
+  } catch {
+    return "";
+  }
+};
+
+const whatsappDateIso = (value) => dateColumnIso(value);
+const mysqlDateFromUnix = (value) => {
+  const seconds = Number(value || 0);
+  return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : new Date();
+};
+
+const canSendWhatsAppFreeform = (lastInboundAt) => {
+  if (!lastInboundAt) return false;
+  const time = new Date(lastInboundAt).getTime();
+  return Number.isFinite(time) && Date.now() - time <= WHATSAPP_CUSTOMER_WINDOW_MS;
+};
+
+const mapWhatsAppConversation = (row = {}, customer = null) => ({
+  id: String(row.id || ""),
+  customerId: String(row.customer_id || row.customerId || customer?.id || ""),
+  customerName: String(customer?.name || row.display_name || ""),
+  phone: String(row.phone || ""),
+  displayName: String(row.display_name || customer?.name || row.phone || ""),
+  lastMessagePreview: String(row.last_message_preview || ""),
+  lastMessageAt: whatsappDateIso(row.last_message_at),
+  lastInboundAt: whatsappDateIso(row.last_inbound_at),
+  unreadCount: Number(row.unread_count || 0),
+  status: String(row.status || "open"),
+  canSendFreeform: canSendWhatsAppFreeform(row.last_inbound_at),
+  createdAt: whatsappDateIso(row.created_at),
+  updatedAt: whatsappDateIso(row.updated_at)
+});
+
+const mapWhatsAppMessage = (row = {}) => ({
+  id: String(row.id || ""),
+  conversationId: String(row.conversation_id || ""),
+  whatsappMessageId: String(row.whatsapp_message_id || ""),
+  direction: String(row.direction || "outbound"),
+  messageType: String(row.message_type || "text"),
+  status: String(row.status || "queued"),
+  phone: String(row.phone || ""),
+  textBody: String(row.text_body || ""),
+  templateName: String(row.template_name || ""),
+  sourceType: String(row.source_type || ""),
+  sourceId: String(row.source_id || ""),
+  errorMessage: String(row.error_message || ""),
+  payload: parseJsonColumn(row.payload, {}),
+  timestamp: whatsappDateIso(row.timestamp),
+  createdAt: whatsappDateIso(row.created_at),
+  updatedAt: whatsappDateIso(row.updated_at)
+});
+
+const mapWhatsAppTemplate = (row = {}) => ({
+  name: String(row.name || ""),
+  languageCode: String(row.language_code || row.languageCode || ""),
+  status: String(row.status || ""),
+  category: String(row.category || ""),
+  components: parseJsonColumn(row.components, []),
+  updatedAt: whatsappDateIso(row.updated_at)
+});
+
+async function ensureWhatsAppSettings(connection, businessId) {
+  const config = whatsappRuntimeConfig();
+  await connection.query(
+    `INSERT INTO whatsapp_settings
+       (business_id, enabled, phone_number_id, business_account_id, display_phone_number, graph_version)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON DUPLICATE KEY UPDATE
+       enabled = VALUES(enabled),
+       phone_number_id = VALUES(phone_number_id),
+       business_account_id = VALUES(business_account_id),
+       display_phone_number = VALUES(display_phone_number),
+       graph_version = VALUES(graph_version)`,
+    [
+      businessId,
+      config.enabled,
+      config.phoneNumberId,
+      config.businessAccountId,
+      config.displayPhoneNumber,
+      config.graphVersion
+    ]
+  );
+  const [rows] = await connection.query("SELECT * FROM whatsapp_settings WHERE business_id = ? LIMIT 1", [businessId]);
+  return rows[0] || null;
+}
+
+async function whatsappCustomerByPhone(connection, businessId, phone) {
+  const customers = await loadBusinessRecords(connection, businessId, "customers");
+  for (const row of customers) {
+    if (normalizeWhatsAppPhoneOptional(row.data?.phone) === phone) return row.data;
+  }
+  return null;
+}
+
+async function getWhatsAppConversationById(connection, businessId, conversationId) {
+  const [rows] = await connection.query(
+    "SELECT * FROM whatsapp_conversations WHERE business_id = ? AND id = ? LIMIT 1",
+    [businessId, conversationId]
+  );
+  return rows[0] || null;
+}
+
+async function getOrCreateWhatsAppConversation(connection, businessId, input, options = {}) {
+  const phone = normalizeWhatsAppPhone(input.phone);
+  const customer = input.customerId ? (await loadBusinessRecord(connection, businessId, "customers", input.customerId))?.data : await whatsappCustomerByPhone(connection, businessId, phone);
+  const customerId = String(input.customerId || customer?.id || "");
+  const displayName = String(input.displayName || input.customerName || customer?.name || phone).slice(0, 160);
+  const lock = options.forUpdate ? "FOR UPDATE" : "";
+  const [rows] = await connection.query(
+    `SELECT * FROM whatsapp_conversations WHERE business_id = ? AND phone = ? LIMIT 1 ${lock}`,
+    [businessId, phone]
+  );
+  if (!rows.length) {
+    const id = uuid();
+    await connection.query(
+      `INSERT INTO whatsapp_conversations (id, business_id, customer_id, phone, display_name)
+       VALUES (?, ?, ?, ?, ?)`,
+      [id, businessId, customerId, phone, displayName]
+    );
+    const [created] = await connection.query("SELECT * FROM whatsapp_conversations WHERE id = ? LIMIT 1", [id]);
+    return { row: created[0], customer };
+  }
+  const row = rows[0];
+  const nextCustomerId = row.customer_id || customerId;
+  const nextDisplayName = row.display_name || displayName;
+  if (nextCustomerId !== row.customer_id || nextDisplayName !== row.display_name) {
+    await connection.query(
+      "UPDATE whatsapp_conversations SET customer_id = ?, display_name = ? WHERE id = ?",
+      [nextCustomerId, nextDisplayName, row.id]
+    );
+    row.customer_id = nextCustomerId;
+    row.display_name = nextDisplayName;
+  }
+  return { row, customer };
+}
+
+const normalizeWhatsAppMessageStatus = (value) => {
+  const status = String(value || "").toLowerCase();
+  return ["queued", "sent", "delivered", "read", "failed", "received"].includes(status) ? status : "sent";
+};
+
+const whatsAppMessagePreview = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 500);
+const inboundWhatsAppText = (message = {}) => {
+  if (message.text?.body) return String(message.text.body);
+  if (message.button?.text) return String(message.button.text);
+  if (message.interactive?.button_reply?.title) return String(message.interactive.button_reply.title);
+  if (message.interactive?.list_reply?.title) return String(message.interactive.list_reply.title);
+  if (message.document?.filename) return `Document: ${message.document.filename}`;
+  if (message.image?.caption) return String(message.image.caption);
+  if (message.type) return `[${message.type} message]`;
+  return "[WhatsApp message]";
+};
+
+async function resolveApprovedWhatsAppTemplate(connection, businessId, templateName, languageCode) {
+  const name = String(templateName || "").trim();
+  if (!name) throwHttpError(422, "validation_error", "WhatsApp template is required.");
+  const requestedLanguage = String(languageCode || "").trim();
+  const [rows] = await connection.query(
+    `SELECT * FROM whatsapp_templates
+     WHERE business_id = ? AND name = ? AND UPPER(status) = 'APPROVED'
+     ORDER BY CASE WHEN language_code = ? THEN 0 WHEN language_code IN ('en', 'en_US') THEN 1 ELSE 2 END
+     LIMIT 1`,
+    [businessId, name, requestedLanguage]
+  );
+  if (!rows.length) throwHttpError(422, "template_not_configured", `Approved WhatsApp template "${name}" is not synced for this business.`);
+  return mapWhatsAppTemplate(rows[0]);
+}
+
+const safeWhatsAppFileName = (value, fallback = "autocare24-document.pdf") => {
+  const cleaned = String(value || "")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+  const name = cleaned || fallback;
+  return name.toLowerCase().endsWith(".pdf") ? name : `${name}.pdf`;
+};
+
+const normalizeWhatsAppDocumentMedia = (media) => {
+  if (!media || typeof media !== "object") return null;
+  const mimeType = String(media.mimeType || "").trim().toLowerCase();
+  if (mimeType !== "application/pdf") throwHttpError(422, "validation_error", "Only PDF documents can be sent through this WhatsApp flow.");
+  const base64 = String(media.base64 || "").replace(/\s+/g, "");
+  const maxBase64Length = Math.ceil((WHATSAPP_DOCUMENT_MAX_BYTES * 4) / 3) + 4;
+  if (!base64 || base64.length > maxBase64Length || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) {
+    throwHttpError(422, "validation_error", "A valid PDF document payload is required.");
+  }
+  const buffer = Buffer.from(base64, "base64");
+  const declaredSize = Number(media.sizeBytes || 0);
+  if (!buffer.length || buffer.length > WHATSAPP_DOCUMENT_MAX_BYTES) {
+    throwHttpError(413, "whatsapp_document_too_large", "PDF is too large for this WhatsApp send flow.");
+  }
+  if (declaredSize > 0 && declaredSize !== buffer.length) {
+    throwHttpError(422, "validation_error", "PDF document size does not match the supplied payload.");
+  }
+  if (buffer.subarray(0, 5).toString("ascii") !== "%PDF-") {
+    throwHttpError(422, "validation_error", "The supplied WhatsApp document is not a valid PDF.");
+  }
+  return {
+    fileName: safeWhatsAppFileName(media.fileName),
+    mimeType,
+    sizeBytes: buffer.length,
+    buffer
+  };
+};
+
+const whatsappMediaMetadata = (media) => media ? { fileName: media.fileName, mimeType: media.mimeType, sizeBytes: media.sizeBytes } : null;
+
+const templateHasDocumentHeader = (template) =>
+  Array.isArray(template?.components) &&
+  template.components.some((component) =>
+    String(component?.type || "").toUpperCase() === "HEADER" && String(component?.format || "").toUpperCase() === "DOCUMENT"
+  );
+
+function buildWhatsAppTemplatePayload(phone, template, variables, documentMedia) {
+  const parameters = (Array.isArray(variables) ? variables : [])
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean)
+    .slice(0, 20)
+    .map((text) => ({ type: "text", text: text.slice(0, 1024) }));
+  const components = [];
+  if (documentMedia?.id) {
+    components.push({
+      type: "header",
+      parameters: [
+        {
+          type: "document",
+          document: {
+            id: documentMedia.id,
+            filename: documentMedia.fileName
+          }
+        }
+      ]
+    });
+  }
+  if (parameters.length) components.push({ type: "body", parameters });
+  return {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: phone,
+    type: "template",
+    template: {
+      name: template.name,
+      language: { code: template.languageCode || "en" },
+      ...(components.length ? { components } : {})
+    }
+  };
+}
+
+function buildWhatsAppTextPayload(phone, text) {
+  return {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: phone,
+    type: "text",
+    text: {
+      preview_url: false,
+      body: String(text || "").trim().slice(0, 4096)
+    }
+  };
+}
+
+function buildWhatsAppDocumentPayload(phone, documentMedia, caption) {
+  return {
+    messaging_product: "whatsapp",
+    recipient_type: "individual",
+    to: phone,
+    type: "document",
+    document: {
+      id: documentMedia.id,
+      filename: documentMedia.fileName,
+      caption: String(caption || "").trim().slice(0, 1024)
+    }
+  };
+}
+
+async function fetchWhatsAppGraph(config, pathName, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(`${config.graphBaseUrl}/${config.graphVersion}/${pathName.replace(/^\/+/, "")}`, {
+      method: options.method || "GET",
+      headers: {
+        authorization: `Bearer ${config.accessToken}`,
+        ...(options.body ? { "content-type": "application/json" } : {})
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+      signal: controller.signal
+    });
+    const text = await response.text();
+    let body = {};
+    try {
+      body = text ? JSON.parse(text) : {};
+    } catch {
+      body = { message: text };
+    }
+    if (!response.ok) {
+      const metaMessage = body?.error?.message || body?.message || `WhatsApp API failed with HTTP ${response.status}.`;
+      throw Object.assign(new Error(metaMessage), { status: response.status, meta: body });
+    }
+    return body;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function uploadWhatsAppDocumentMedia(config, media) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const form = new FormData();
+    form.append("messaging_product", "whatsapp");
+    form.append("type", media.mimeType);
+    form.append("file", new Blob([media.buffer], { type: media.mimeType }), media.fileName);
+    const response = await fetch(`${config.graphBaseUrl}/${config.graphVersion}/${config.phoneNumberId}/media`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.accessToken}` },
+      body: form,
+      signal: controller.signal
+    });
+    const text = await response.text();
+    let body = {};
+    try {
+      body = text ? JSON.parse(text) : {};
+    } catch {
+      body = { message: text };
+    }
+    if (!response.ok || !body.id) {
+      const metaMessage = body?.error?.message || body?.message || `WhatsApp media upload failed with HTTP ${response.status}.`;
+      throw Object.assign(new Error(metaMessage), { status: response.status, meta: body });
+    }
+    return {
+      id: String(body.id),
+      fileName: media.fileName,
+      mimeType: media.mimeType,
+      sizeBytes: media.sizeBytes
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function sendWhatsAppCloudMessage(config, phone, payload) {
+  return fetchWhatsAppGraph(config, `${config.phoneNumberId}/messages`, { method: "POST", body: payload });
+}
+
+async function handleWhatsAppStatus(res, device) {
+  const connection = await pool.getConnection();
+  try {
+    const settings = await ensureWhatsAppSettings(connection, device.business_id);
+    const [templateCountRows] = await connection.query("SELECT COUNT(*) AS total FROM whatsapp_templates WHERE business_id = ?", [device.business_id]);
+    const config = whatsappRuntimeConfig();
+    return ok(res, {
+      status: {
+        enabled: config.enabled,
+        configured: config.configured,
+        webhookReady: config.webhookReady,
+        phoneNumberId: config.phoneNumberId,
+        businessAccountId: config.businessAccountId,
+        displayPhoneNumber: settings?.display_phone_number || config.displayPhoneNumber,
+        graphVersion: config.graphVersion,
+        templatesCount: Number(templateCountRows[0]?.total || 0),
+        lastTemplateSyncAt: whatsappDateIso(settings?.last_template_sync_at),
+        webhookVerifiedAt: whatsappDateIso(settings?.webhook_verified_at),
+        message: config.configured
+          ? "WhatsApp Business API is connected through the cloud API."
+          : "WhatsApp Business API not configured. Set WHATSAPP_ENABLED, WHATSAPP_ACCESS_TOKEN, and WHATSAPP_PHONE_NUMBER_ID on cloud-api."
+      }
+    });
+  } finally {
+    connection.release();
+  }
+}
+
+async function handleWhatsAppTemplatesList(res, device) {
+  const [rows] = await pool.query(
+    "SELECT * FROM whatsapp_templates WHERE business_id = ? ORDER BY name ASC, language_code ASC",
+    [device.business_id]
+  );
+  return ok(res, { templates: rows.map(mapWhatsAppTemplate) });
+}
+
+async function handleWhatsAppTemplatesSync(res, device) {
+  const config = whatsappRuntimeConfig();
+  if (!config.configured || !config.businessAccountId) {
+    return error(res, 422, "whatsapp_not_configured", "Set WhatsApp Business Account ID, phone number ID, and access token before syncing templates.");
+  }
+  const templates = [];
+  let nextPath = `${config.businessAccountId}/message_templates?fields=name,language,status,category,components&limit=100`;
+  let pageCount = 0;
+  while (nextPath && pageCount < 10) {
+    const body = nextPath.startsWith("http")
+      ? await fetch(nextPath, { headers: { authorization: `Bearer ${config.accessToken}` } }).then(async (response) => {
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) throw Object.assign(new Error(payload?.error?.message || "Unable to sync WhatsApp templates."), { status: response.status });
+          return payload;
+        })
+      : await fetchWhatsAppGraph(config, nextPath);
+    for (const item of Array.isArray(body.data) ? body.data : []) {
+      templates.push({
+        name: String(item.name || ""),
+        languageCode: String(item.language || ""),
+        status: String(item.status || ""),
+        category: String(item.category || ""),
+        components: Array.isArray(item.components) ? item.components : []
+      });
+    }
+    nextPath = body.paging?.next || "";
+    pageCount += 1;
+  }
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    await ensureWhatsAppSettings(connection, device.business_id);
+    for (const template of templates.filter((item) => item.name && item.languageCode)) {
+      await connection.query(
+        `INSERT INTO whatsapp_templates (business_id, name, language_code, status, category, components)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE status = VALUES(status), category = VALUES(category), components = VALUES(components)`,
+        [device.business_id, template.name, template.languageCode, template.status, template.category, JSON.stringify(template.components)]
+      );
+    }
+    await connection.query("UPDATE whatsapp_settings SET last_template_sync_at = CURRENT_TIMESTAMP WHERE business_id = ?", [device.business_id]);
+    await connection.commit();
+  } catch (err) {
+    await connection.rollback();
+    throw err;
+  } finally {
+    connection.release();
+  }
+  return ok(res, { templates, syncedCount: templates.length });
+}
+
+async function handleWhatsAppConversationsList(res, device, url) {
+  const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit") || 60)));
+  const q = String(url.searchParams.get("q") || "").trim();
+  const like = `%${q}%`;
+  const params = q
+    ? [device.business_id, like, like, like, limit]
+    : [device.business_id, limit];
+  const [rows] = await pool.query(
+    q
+      ? `SELECT * FROM whatsapp_conversations
+         WHERE business_id = ? AND (phone LIKE ? OR display_name LIKE ? OR last_message_preview LIKE ?)
+         ORDER BY COALESCE(last_message_at, created_at) DESC
+         LIMIT ?`
+      : `SELECT * FROM whatsapp_conversations
+         WHERE business_id = ?
+         ORDER BY COALESCE(last_message_at, created_at) DESC
+         LIMIT ?`,
+    params
+  );
+  const connection = await pool.getConnection();
+  try {
+    const customers = await loadBusinessRecords(connection, device.business_id, "customers");
+    const byId = new Map(customers.map((row) => [row.recordId, row.data]));
+    const byPhone = new Map(customers.map((row) => [normalizeWhatsAppPhoneOptional(row.data?.phone), row.data]).filter(([phone]) => phone));
+    const conversations = rows.map((row) => mapWhatsAppConversation(row, byId.get(row.customer_id) || byPhone.get(row.phone) || null));
+    return ok(res, { conversations });
+  } finally {
+    connection.release();
+  }
+}
+
+async function handleWhatsAppMessagesList(res, device, conversationId, url) {
+  const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit") || 100)));
+  const connection = await pool.getConnection();
+  try {
+    const conversation = await getWhatsAppConversationById(connection, device.business_id, conversationId);
+    if (!conversation) return error(res, 404, "not_found", "WhatsApp conversation was not found.");
+    const customer = conversation.customer_id
+      ? (await loadBusinessRecord(connection, device.business_id, "customers", conversation.customer_id))?.data
+      : await whatsappCustomerByPhone(connection, device.business_id, conversation.phone);
+    const [rows] = await connection.query(
+      `SELECT * FROM whatsapp_messages
+       WHERE business_id = ? AND conversation_id = ?
+       ORDER BY COALESCE(timestamp, created_at) DESC
+       LIMIT ?`,
+      [device.business_id, conversationId, limit]
+    );
+    await connection.query("UPDATE whatsapp_conversations SET unread_count = 0 WHERE business_id = ? AND id = ?", [device.business_id, conversationId]);
+    return ok(res, {
+      conversation: mapWhatsAppConversation({ ...conversation, unread_count: 0 }, customer),
+      messages: rows.reverse().map(mapWhatsAppMessage)
+    });
+  } finally {
+    connection.release();
+  }
+}
+
+async function handleWhatsAppMessageSend(req, res, device) {
+  const config = whatsappRuntimeConfig();
+  if (!config.configured) return error(res, 503, "whatsapp_not_configured", "WhatsApp Business API not configured on cloud-api.");
+  const body = await readBody(req);
+  const phone = normalizeWhatsAppPhone(body.phone);
+  const mode = body.mode === "text" ? "text" : "template";
+  const source = typeof body.source === "object" && body.source ? body.source : {};
+  const documentMedia = normalizeWhatsAppDocumentMedia(body.media || body.document);
+  const documentMetadata = whatsappMediaMetadata(documentMedia);
+  const connection = await pool.getConnection();
+  let conversation;
+  let template = null;
+  let messageId = "";
+  let textBody = "";
+  let metaPayload;
+  try {
+    await connection.beginTransaction();
+    await ensureWhatsAppSettings(connection, device.business_id);
+    const conversationResult = await getOrCreateWhatsAppConversation(connection, device.business_id, {
+      phone,
+      customerId: body.customerId,
+      customerName: body.customerName,
+      displayName: body.customerName
+    }, { forUpdate: true });
+    conversation = conversationResult.row;
+    if (mode === "text") {
+      textBody = String(body.text || "").trim();
+      if (!textBody) throwHttpError(422, "validation_error", "Message text is required.");
+      if (!canSendWhatsAppFreeform(conversation.last_inbound_at)) {
+        throwHttpError(422, "template_required", "Use an approved WhatsApp template first. Freeform replies are allowed only after the customer messages you.");
+      }
+      metaPayload = documentMetadata ? { pendingDocument: documentMetadata, caption: textBody } : buildWhatsAppTextPayload(phone, textBody);
+    } else {
+      template = await resolveApprovedWhatsAppTemplate(connection, device.business_id, body.templateName, body.languageCode);
+      if (documentMetadata && !templateHasDocumentHeader(template)) {
+        throwHttpError(
+          422,
+          "template_document_header_required",
+          `Approved WhatsApp template "${template.name}" must include a document header before PDF sharing can send the PDF.`
+        );
+      }
+      textBody = String(body.text || `Template: ${template.name}`).trim();
+      metaPayload = documentMetadata
+        ? { pendingTemplateDocument: { templateName: template.name, languageCode: template.languageCode, media: documentMetadata }, variables: body.variables || [] }
+        : buildWhatsAppTemplatePayload(phone, template, body.variables);
+    }
+    messageId = uuid();
+    await connection.query(
+      `INSERT INTO whatsapp_messages
+         (id, business_id, conversation_id, direction, message_type, status, phone, text_body, template_name, source_type, source_id, payload, timestamp)
+       VALUES (?, ?, ?, 'outbound', ?, 'queued', ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+      [
+        messageId,
+        device.business_id,
+        conversation.id,
+        documentMetadata ? "document" : mode,
+        phone,
+        textBody,
+        template?.name || "",
+        String(source.type || body.sourceType || "").slice(0, 40),
+        String(source.id || body.sourceId || "").slice(0, 80),
+        JSON.stringify({ request: metaPayload, variables: body.variables || [] })
+      ]
+    );
+    await connection.query(
+      `UPDATE whatsapp_conversations
+       SET last_message_preview = ?, last_message_at = CURRENT_TIMESTAMP, customer_id = COALESCE(NULLIF(?, ''), customer_id)
+       WHERE business_id = ? AND id = ?`,
+      [whatsAppMessagePreview(textBody), String(body.customerId || ""), device.business_id, conversation.id]
+    );
+    await connection.commit();
+  } catch (err) {
+    await connection.rollback();
+    connection.release();
+    throw err;
+  }
+  try {
+    let uploadedDocument = null;
+    if (documentMedia) uploadedDocument = await uploadWhatsAppDocumentMedia(config, documentMedia);
+    if (uploadedDocument) {
+      metaPayload = mode === "text"
+        ? buildWhatsAppDocumentPayload(phone, uploadedDocument, textBody)
+        : buildWhatsAppTemplatePayload(phone, template, body.variables, uploadedDocument);
+    }
+    const metaResponse = await sendWhatsAppCloudMessage(config, phone, metaPayload);
+    const whatsappMessageId = String(metaResponse?.messages?.[0]?.id || "");
+    await pool.query(
+      `UPDATE whatsapp_messages
+       SET whatsapp_message_id = ?, status = 'sent', payload = ?
+       WHERE business_id = ? AND id = ?`,
+      [
+        whatsappMessageId || null,
+        JSON.stringify({ request: metaPayload, response: metaResponse, variables: body.variables || [], media: uploadedDocument ? whatsappMediaMetadata(uploadedDocument) : documentMetadata }),
+        device.business_id,
+        messageId
+      ]
+    );
+    await pool.query(
+      `INSERT INTO whatsapp_message_events (business_id, message_id, whatsapp_message_id, event_type, status, payload, occurred_at)
+       VALUES (?, ?, ?, 'send', 'sent', ?, CURRENT_TIMESTAMP)`,
+      [device.business_id, messageId, whatsappMessageId, JSON.stringify(metaResponse)]
+    );
+    const [messageRows] = await pool.query("SELECT * FROM whatsapp_messages WHERE business_id = ? AND id = ? LIMIT 1", [device.business_id, messageId]);
+    const [conversationRows] = await pool.query("SELECT * FROM whatsapp_conversations WHERE business_id = ? AND id = ? LIMIT 1", [device.business_id, conversation.id]);
+    return ok(res, {
+      message: mapWhatsAppMessage(messageRows[0]),
+      conversation: mapWhatsAppConversation(conversationRows[0])
+    }, 201, { location: `/api/v1/whatsapp/conversations/${conversation.id}/messages` });
+  } catch (err) {
+    const failureMessage = err instanceof Error ? err.message : "Unable to send WhatsApp message.";
+    await pool.query(
+      "UPDATE whatsapp_messages SET status = 'failed', error_message = ? WHERE business_id = ? AND id = ?",
+      [failureMessage.slice(0, 500), device.business_id, messageId]
+    );
+    throwHttpError(502, "whatsapp_send_failed", failureMessage);
+  } finally {
+    connection.release();
+  }
+}
+
+const verifyMetaWebhookSignature = (raw, signature) => {
+  const config = whatsappRuntimeConfig();
+  if (!config.appSecret) return false;
+  const expected = `sha256=${crypto.createHmac("sha256", config.appSecret).update(raw).digest("hex")}`;
+  const received = String(signature || "");
+  const expectedBuffer = Buffer.from(expected);
+  const receivedBuffer = Buffer.from(received);
+  return expectedBuffer.length === receivedBuffer.length && crypto.timingSafeEqual(expectedBuffer, receivedBuffer);
+};
+
+async function resolveMetaWebhookBusinessId(connection, phoneNumberId) {
+  const id = String(phoneNumberId || "").trim();
+  if (!id) return null;
+  const [rows] = await connection.query("SELECT business_id FROM whatsapp_settings WHERE phone_number_id = ? LIMIT 1", [id]);
+  if (rows.length) return Number(rows[0].business_id || 0) || null;
+  const config = whatsappRuntimeConfig();
+  if (config.phoneNumberId && config.phoneNumberId === id) {
+    await ensureWhatsAppSettings(connection, 1);
+    return 1;
+  }
+  return null;
+}
+
+async function storeInboundWhatsAppMessage(connection, businessId, value, message) {
+  const phone = normalizeWhatsAppPhoneOptional(message.from);
+  if (!phone || !message.id) return;
+  const contact = (Array.isArray(value.contacts) ? value.contacts : []).find((row) => normalizeWhatsAppPhoneOptional(row.wa_id) === phone) || {};
+  const displayName = contact.profile?.name || phone;
+  const textBody = inboundWhatsAppText(message);
+  const timestamp = mysqlDateFromUnix(message.timestamp);
+  const conversationResult = await getOrCreateWhatsAppConversation(connection, businessId, {
+    phone,
+    displayName
+  }, { forUpdate: true });
+  const [existing] = await connection.query(
+    "SELECT id FROM whatsapp_messages WHERE business_id = ? AND whatsapp_message_id = ? LIMIT 1",
+    [businessId, message.id]
+  );
+  if (!existing.length) {
+    await connection.query(
+      `INSERT INTO whatsapp_messages
+         (id, business_id, conversation_id, whatsapp_message_id, direction, message_type, status, phone, text_body, payload, timestamp)
+       VALUES (?, ?, ?, ?, 'inbound', ?, 'received', ?, ?, ?, ?)`,
+      [
+        uuid(),
+        businessId,
+        conversationResult.row.id,
+        String(message.id),
+        ["text", "image", "document", "template"].includes(message.type) ? message.type : "unknown",
+        phone,
+        textBody,
+        JSON.stringify(message),
+        timestamp
+      ]
+    );
+    await connection.query(
+      `UPDATE whatsapp_conversations
+       SET display_name = COALESCE(NULLIF(display_name, ''), ?),
+           last_message_preview = ?,
+           last_message_at = ?,
+           last_inbound_at = ?,
+           unread_count = unread_count + 1
+       WHERE business_id = ? AND id = ?`,
+      [displayName, whatsAppMessagePreview(textBody), timestamp, timestamp, businessId, conversationResult.row.id]
+    );
+  }
+  await connection.query(
+    `INSERT INTO whatsapp_message_events (business_id, whatsapp_message_id, event_type, status, payload, occurred_at)
+     VALUES (?, ?, 'message', 'received', ?, ?)`,
+    [businessId, String(message.id), JSON.stringify(message), timestamp]
+  );
+}
+
+async function storeWhatsAppStatusEvent(connection, businessId, status) {
+  const whatsappMessageId = String(status.id || "");
+  if (!whatsappMessageId) return;
+  const normalizedStatus = normalizeWhatsAppMessageStatus(status.status);
+  const timestamp = mysqlDateFromUnix(status.timestamp);
+  const errorMessage = Array.isArray(status.errors) && status.errors.length
+    ? String(status.errors[0]?.message || status.errors[0]?.title || "WhatsApp delivery failed.").slice(0, 500)
+    : "";
+  const [messages] = await connection.query(
+    "SELECT id, conversation_id FROM whatsapp_messages WHERE business_id = ? AND whatsapp_message_id = ? LIMIT 1",
+    [businessId, whatsappMessageId]
+  );
+  const messageId = messages[0]?.id || null;
+  if (messageId) {
+    await connection.query(
+      "UPDATE whatsapp_messages SET status = ?, error_message = ? WHERE business_id = ? AND id = ?",
+      [normalizedStatus, errorMessage, businessId, messageId]
+    );
+  }
+  await connection.query(
+    `INSERT INTO whatsapp_message_events (business_id, message_id, whatsapp_message_id, event_type, status, payload, occurred_at)
+     VALUES (?, ?, ?, 'status', ?, ?, ?)`,
+    [businessId, messageId, whatsappMessageId, normalizedStatus, JSON.stringify(status), timestamp]
+  );
+}
+
+async function handleMetaWebhookVerify(req, res, url) {
+  const config = whatsappRuntimeConfig();
+  const mode = url.searchParams.get("hub.mode");
+  const tokenValue = url.searchParams.get("hub.verify_token");
+  const challenge = url.searchParams.get("hub.challenge") || "";
+  if (!config.enabled || !config.verifyToken) return error(res, 503, "whatsapp_not_configured", "WhatsApp webhook verify token is not configured.");
+  if (mode !== "subscribe" || tokenValue !== config.verifyToken) return error(res, 403, "forbidden", "WhatsApp webhook verification failed.");
+  const connection = await pool.getConnection();
+  try {
+    await ensureWhatsAppSettings(connection, 1);
+    await connection.query("UPDATE whatsapp_settings SET webhook_verified_at = CURRENT_TIMESTAMP WHERE business_id = 1");
+  } finally {
+    connection.release();
+  }
+  return textResponse(res, 200, challenge);
+}
+
+async function handleMetaWebhookPost(req, res) {
+  const config = whatsappRuntimeConfig();
+  if (!config.webhookReady) return error(res, 503, "whatsapp_not_configured", "WhatsApp webhook signature secret is not configured.");
+  const raw = await readRawBody(req);
+  if (!verifyMetaWebhookSignature(raw, req.headers["x-hub-signature-256"])) {
+    return error(res, 401, "invalid_signature", "WhatsApp webhook signature is invalid.");
+  }
+  let body = {};
+  try {
+    body = raw.length ? JSON.parse(raw.toString("utf8")) : {};
+  } catch {
+    return error(res, 400, "invalid_json", "Request body must be valid JSON.");
+  }
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    for (const entry of Array.isArray(body.entry) ? body.entry : []) {
+      for (const change of Array.isArray(entry.changes) ? entry.changes : []) {
+        const value = change.value || {};
+        const businessId = await resolveMetaWebhookBusinessId(connection, value.metadata?.phone_number_id);
+        if (!businessId) continue;
+        for (const message of Array.isArray(value.messages) ? value.messages : []) {
+          await storeInboundWhatsAppMessage(connection, businessId, value, message);
+        }
+        for (const status of Array.isArray(value.statuses) ? value.statuses : []) {
+          await storeWhatsAppStatusEvent(connection, businessId, status);
+        }
+      }
+    }
+    await connection.commit();
+  } catch (err) {
+    await connection.rollback();
+    throw err;
+  } finally {
+    connection.release();
+  }
+  return ok(res, { received: true });
+}
+
 async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   try {
     if (req.method === "GET" && url.pathname === "/api/v1/health") {
       return ok(res, { ok: true, version: API_VERSION, serverTime: new Date().toISOString() });
     }
+    if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/webhook") return handleMetaWebhookVerify(req, res, url);
+    if (req.method === "POST" && url.pathname === "/api/v1/whatsapp/webhook") return handleMetaWebhookPost(req, res);
     if (req.method === "POST" && url.pathname === "/api/v1/auth/devices") return handleDeviceRegistration(req, res);
     if (req.method === "GET" && url.pathname === "/api/v1/auth/devices/current/status") return handleCurrentDeviceApprovalStatus(req, res);
     if (req.method === "DELETE" && url.pathname === "/api/v1/auth/devices/current") return handleCurrentDeviceDisconnect(req, res);
@@ -3139,6 +4063,13 @@ async function route(req, res) {
     if (req.method === "GET" && url.pathname === "/api/v1/dashboard") return handleDashboard(res, device);
     if (req.method === "GET" && url.pathname === "/api/v1/reports") return handleReports(req, res, device);
     if (req.method === "GET" && url.pathname === "/api/v1/profit") return handleProfit(req, res, device);
+    if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/status") return handleWhatsAppStatus(res, device);
+    if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/conversations") return handleWhatsAppConversationsList(res, device, url);
+    const whatsappMessagesMatch = /^\/api\/v1\/whatsapp\/conversations\/([^/]+)\/messages$/.exec(url.pathname);
+    if (whatsappMessagesMatch && req.method === "GET") return handleWhatsAppMessagesList(res, device, whatsappMessagesMatch[1], url);
+    if (req.method === "POST" && url.pathname === "/api/v1/whatsapp/messages") return handleWhatsAppMessageSend(req, res, device);
+    if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/templates") return handleWhatsAppTemplatesList(res, device);
+    if (req.method === "POST" && url.pathname === "/api/v1/whatsapp/templates/sync") return handleWhatsAppTemplatesSync(res, device);
     if (req.method === "GET" && url.pathname === "/api/v1/invoices") return handleInvoicesList(req, res, device, url);
     if (req.method === "POST" && url.pathname === "/api/v1/invoices/finalize") return handleInvoiceFinalize(req, res, device);
     const invoiceMatch = /^\/api\/v1\/invoices\/([^/]+)$/.exec(url.pathname);

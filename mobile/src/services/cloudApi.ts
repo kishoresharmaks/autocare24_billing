@@ -2,8 +2,8 @@ import { cleanBaseUrl } from "../utils/format";
 import { ensureCloudApiTransportSecurity, getLastTlsPinningFailureHost } from "./transportSecurity";
 import type {
   ApiEnvelope,
+  BusinessSettings,
   CloudDeviceSummary,
-  DateRangePreset,
   DeviceApprovalStatusResult,
   DeviceRegistrationResult,
   DevicesListResult,
@@ -17,6 +17,8 @@ import type {
   ReportData,
   Supplier
 } from "../types/cloud";
+
+const BUSINESS_SETTINGS_RECORD_ID = "00000000-0000-4000-8000-000000000001";
 
 export class CloudApiError extends Error {
   code: string;
@@ -123,25 +125,25 @@ export async function loginOwner(cloudUrl: string, token: string, username: stri
   });
 }
 
-function reportFilterPath(filter: ReportDateFilter): string {
+function reportFilterPath(endpoint: "reports" | "profit", filter: ReportDateFilter): string {
   if (typeof filter === "string") {
-    return `/api/v1/reports?preset=${encodeURIComponent(filter)}`;
+    return `/api/v1/${endpoint}?preset=${encodeURIComponent(filter)}`;
   }
   const payload = {
     preset: filter.preset || "",
     fromDate: filter.fromDate || "",
     toDate: filter.toDate || ""
   };
-  return `/api/v1/reports?filterJson=${encodeURIComponent(JSON.stringify(payload))}`;
+  return `/api/v1/${endpoint}?filterJson=${encodeURIComponent(JSON.stringify(payload))}`;
 }
 
 export async function fetchReport(cloudUrl: string, token: string, filter: ReportDateFilter): Promise<ReportData> {
-  const data = await request<{ report: ReportData }>(cloudUrl, reportFilterPath(filter), { token });
+  const data = await request<{ report: ReportData }>(cloudUrl, reportFilterPath("reports", filter), { token });
   return data.report;
 }
 
-export async function fetchProfit(cloudUrl: string, token: string, preset: DateRangePreset): Promise<ProfitReportData> {
-  const data = await request<{ profit: ProfitReportData }>(cloudUrl, `/api/v1/profit?preset=${encodeURIComponent(preset)}`, { token });
+export async function fetchProfit(cloudUrl: string, token: string, filter: ReportDateFilter): Promise<ProfitReportData> {
+  const data = await request<{ profit: ProfitReportData }>(cloudUrl, reportFilterPath("profit", filter), { token });
   return data.profit;
 }
 
@@ -168,6 +170,11 @@ export async function fetchPurchaseRecords(cloudUrl: string, token: string): Pro
       String(right.purchaseDate || right.createdAt || "").localeCompare(String(left.purchaseDate || left.createdAt || "")) ||
       String(right.createdAt || "").localeCompare(String(left.createdAt || ""))
   );
+}
+
+export async function fetchBusinessSettings(cloudUrl: string, token: string): Promise<BusinessSettings> {
+  const settings = await fetchCloudRecords<BusinessSettings>(cloudUrl, token, "settings", true);
+  return settings.find((row) => row.id === BUSINESS_SETTINGS_RECORD_ID) || settings[0] || {};
 }
 
 export async function fetchInvoices(cloudUrl: string, token: string, query: string): Promise<InvoiceSummary[]> {

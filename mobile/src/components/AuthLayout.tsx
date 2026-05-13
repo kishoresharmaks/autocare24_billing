@@ -1,6 +1,7 @@
 import { PropsWithChildren } from "react";
 import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { DeveloperCredit } from "./DeveloperCredit";
 import { useResponsiveLayout } from "../hooks/useResponsiveLayout";
 import { colors, radius } from "../theme";
 
@@ -30,6 +31,16 @@ export function AuthLayout({ children }: PropsWithChildren) {
             ]}
           >
             {children}
+          </View>
+          <View
+            style={[
+              styles.creditWrap,
+              {
+                maxWidth: layout.authMaxWidth
+              }
+            ]}
+          >
+            <DeveloperCredit />
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -62,5 +73,10 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.08,
     shadowRadius: 18,
     elevation: 3
+  },
+  creditWrap: {
+    width: "100%",
+    alignSelf: "center",
+    marginTop: 12
   }
 });

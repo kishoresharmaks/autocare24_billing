@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
   AppInfo,
+  AppUpdateStatus,
   BackupResult,
   BackupScheduleStatus,
   BusinessSettings,
@@ -12,6 +13,8 @@ import type {
   DataHealthReport,
   DateRangePreset,
   DeveloperDiagnostics,
+  DailyReportBackupResult,
+  DailyReportBackupStatus,
   DriveBackupResult,
   DriveConnectionStatus,
   EnquiryFollowupInput,
@@ -47,6 +50,7 @@ import type {
   SetupOwnerInput,
   Supplier,
   VehicleType,
+  WhatsAppSendMessageInput,
   WhatsAppShareInput
 } from "../shared/types";
 
@@ -152,12 +156,19 @@ contextBridge.exposeInMainWorld("autocare", {
   profit: (filter: DateRangePreset | ReportDateFilter) => ipcRenderer.invoke("profit:get", filter),
   reports: (filter: DateRangePreset | ReportDateFilter) => ipcRenderer.invoke("reports:get", filter),
   exportReportCsv: (input: { kind: ReportExportKind; filter: DateRangePreset | ReportDateFilter; fileName?: string }) => ipcRenderer.invoke("reports:exportCsv", input),
+  dailyReportBackupStatus: () => ipcRenderer.invoke("dailyReports:status") as Promise<DailyReportBackupStatus>,
+  generateDailyReportBackup: () => ipcRenderer.invoke("dailyReports:generate") as Promise<DailyReportBackupResult>,
+  openDailyReportBackupFolder: () => ipcRenderer.invoke("dailyReports:openFolder"),
   getDeveloperDiagnostics: () => ipcRenderer.invoke("developer:getDiagnostics"),
   scanDataHealth: () => ipcRenderer.invoke("developer:scanDataHealth"),
   runSafeRepair: (input: { repairCode: SafeRepairCode }) => ipcRenderer.invoke("developer:runSafeRepair", input),
   getDeveloperLogs: () => ipcRenderer.invoke("developer:getLogs"),
   exportDiagnosticBundle: () => ipcRenderer.invoke("developer:exportDiagnosticBundle"),
   getAppInfo: () => ipcRenderer.invoke("app:getInfo") as Promise<AppInfo>,
+  getUpdateStatus: () => ipcRenderer.invoke("updates:status") as Promise<AppUpdateStatus>,
+  checkForUpdates: () => ipcRenderer.invoke("updates:check") as Promise<AppUpdateStatus>,
+  downloadUpdate: () => ipcRenderer.invoke("updates:download") as Promise<AppUpdateStatus>,
+  installUpdate: () => ipcRenderer.invoke("updates:install") as Promise<AppUpdateStatus>,
   openExternal: (url: string) => ipcRenderer.invoke("app:openExternal", url),
   showItemInFolder: (filePath: string) => ipcRenderer.invoke("app:showItemInFolder", filePath),
   print: (input?: PrintInput) => ipcRenderer.invoke("app:print", input),
@@ -188,6 +199,12 @@ contextBridge.exposeInMainWorld("autocare", {
     ipcRenderer.on("sync:status", listener);
     return () => ipcRenderer.removeListener("sync:status", listener);
   },
+  getWhatsAppStatus: () => ipcRenderer.invoke("whatsapp:status"),
+  listWhatsAppConversations: (query?: string) => ipcRenderer.invoke("whatsapp:conversations", query),
+  listWhatsAppMessages: (conversationId: string) => ipcRenderer.invoke("whatsapp:messages", conversationId),
+  listWhatsAppTemplates: () => ipcRenderer.invoke("whatsapp:templates"),
+  syncWhatsAppTemplates: () => ipcRenderer.invoke("whatsapp:templatesSync"),
+  sendWhatsAppMessage: (input: WhatsAppSendMessageInput) => ipcRenderer.invoke("whatsapp:sendMessage", input),
   openWhatsAppShare: (input: WhatsAppShareInput) => ipcRenderer.invoke("sharing:openWhatsAppShare", input),
   exportCsv: (kind: "invoices" | "customers" | "services" | "inventory" | "enquiries" | "jobCards") => ipcRenderer.invoke("export:csv", kind),
   onDatabaseRestored: (callback: () => void) => {
@@ -199,5 +216,10 @@ contextBridge.exposeInMainWorld("autocare", {
     const listener = (_event: Electron.IpcRendererEvent, status: BackupScheduleStatus) => callback(status);
     ipcRenderer.on("backup:schedule-status", listener);
     return () => ipcRenderer.removeListener("backup:schedule-status", listener);
+  },
+  onUpdateStatus: (callback: (status: AppUpdateStatus) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, status: AppUpdateStatus) => callback(status);
+    ipcRenderer.on("updates:status", listener);
+    return () => ipcRenderer.removeListener("updates:status", listener);
   }
 });

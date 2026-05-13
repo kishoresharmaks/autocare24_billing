@@ -3,11 +3,13 @@ import { router } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { fetchInvoices } from "../../src/services/cloudApi";
+import { ExportActions } from "../../src/components/ExportActions";
 import { FormField } from "../../src/components/FormField";
 import { MetricCard } from "../../src/components/MetricCard";
 import { MetricGrid } from "../../src/components/MetricGrid";
 import { Screen } from "../../src/components/Screen";
 import { colors } from "../../src/theme";
+import { exportInvoicesDocument, type ExportFormat } from "../../src/services/reportExport";
 import { formatCount, formatDate, formatMoney, titleCase } from "../../src/utils/format";
 import { useRequireOwner } from "../../src/hooks/useRequireOwner";
 import { useSession } from "../../src/providers/SessionProvider";
@@ -58,6 +60,12 @@ export default function InvoicesTab() {
       ? "This phone is not approved for cloud invoice viewing. Check approval status from Settings."
       : "";
 
+  async function exportInvoices(format: ExportFormat) {
+    if (approvalError) throw new Error(approvalError);
+    if (invoicesQuery.error) throw new Error("Refresh invoices before exporting.");
+    await exportInvoicesDocument({ invoices, query: debouncedQuery, totals, format });
+  }
+
   return (
     <Screen
       title="Invoices"
@@ -70,6 +78,7 @@ export default function InvoicesTab() {
       {invoicesQuery.error ? (
         <Text style={styles.error}>{invoicesQuery.error instanceof Error ? invoicesQuery.error.message : "Unable to load invoices."}</Text>
       ) : null}
+      <ExportActions disabled={Boolean(approvalError || invoicesQuery.error) || invoicesQuery.isFetching} onExport={exportInvoices} />
       <FormField
         label="Search invoices"
         onChangeText={setQuery}

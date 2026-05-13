@@ -419,7 +419,7 @@ export function JobCardsPage({
       });
       notify(result.message);
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Unable to open WhatsApp.");
+      notify(error instanceof Error ? error.message : "Unable to send WhatsApp message.");
     }
   };
 
@@ -455,7 +455,7 @@ export function JobCardsPage({
         notify(pdf.message || "Unable to create job card PDF.");
         return;
       }
-      await window.autocare.openWhatsAppShare({
+      const result = await window.autocare.openWhatsAppShare({
         kind: "job_card_pdf",
         phone: detail.customerPhone,
         customerName: detail.customerName,
@@ -464,11 +464,12 @@ export function JobCardsPage({
         vehicleNumber: detail.vehicleNumber,
         grandTotal: detail.grandTotal,
         expectedDeliveryDate: detail.expectedDeliveryDate,
-        expectedDeliveryTime: detail.expectedDeliveryTime
+        expectedDeliveryTime: detail.expectedDeliveryTime,
+        documentPath: pdf.path,
+        documentFileName: jobCardPdfFileName(detail)
       });
-      await window.autocare.showItemInFolder(pdf.path);
       setPdfSharePath(pdf.path);
-      notify("WhatsApp opened. Attach the highlighted PDF file before sending.");
+      notify(`${result.message} Job card PDF saved locally.`);
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to send job card PDF on WhatsApp.");
     } finally {
@@ -581,7 +582,7 @@ export function JobCardsPage({
               {canPrintPdf && canShareWhatsapp && detail && (
                 <button className="primary-action" disabled={sharingPdf} onClick={() => void shareJobCardPdf()}>
                   <MessageCircle size={18} />
-                  {sharingPdf ? "Preparing PDF..." : "Send PDF on WhatsApp"}
+                  {sharingPdf ? "Preparing PDF..." : "Send WhatsApp template"}
                 </button>
               )}
               {canShareWhatsapp && detail && <button className="ghost-button" onClick={() => void shareJobCardStatus()}><MessageCircle size={18} /> WhatsApp status</button>}
@@ -593,8 +594,8 @@ export function JobCardsPage({
           <>
             {pdfSharePath && (
               <div className="success-box no-print">
-                <strong>WhatsApp opened</strong>
-                <span>Attach the highlighted PDF file before sending.</span>
+                <strong>WhatsApp Business message sent</strong>
+                <span>Job card PDF was saved locally for your records.</span>
                 <button className="ghost-button small" onClick={() => void window.autocare.showItemInFolder(pdfSharePath)}>
                   Show PDF
                 </button>

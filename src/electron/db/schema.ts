@@ -230,6 +230,9 @@
         type TEXT NOT NULL,
         quantity REAL NOT NULL,
         unitCost REAL NOT NULL,
+        saleAmount REAL NOT NULL DEFAULT 0,
+        saleUnitPrice REAL NOT NULL DEFAULT 0,
+        paymentMode TEXT,
         reference TEXT,
         notes TEXT,
         movementDate TEXT NOT NULL,
@@ -525,6 +528,9 @@ export const SCHEMA_COLUMNS = [
   { table: "backups", column: "cloudSnapshotRecordCount", definition: "INTEGER NOT NULL DEFAULT 0" },
   { table: "backups", column: "cloudSnapshotInvoiceCount", definition: "INTEGER NOT NULL DEFAULT 0" },
   { table: "backups", column: "cloudSnapshotError", definition: "TEXT" },
+  { table: "inventory_movements", column: "saleAmount", definition: "REAL NOT NULL DEFAULT 0" },
+  { table: "inventory_movements", column: "saleUnitPrice", definition: "REAL NOT NULL DEFAULT 0" },
+  { table: "inventory_movements", column: "paymentMode", definition: "TEXT" },
   { table: "sync_device", column: "approvalStatus", definition: "TEXT NOT NULL DEFAULT 'APPROVED'" }
 ] as const;
 

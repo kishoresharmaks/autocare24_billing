@@ -1,6 +1,6 @@
 ﻿import { FileText, Printer, Search } from "lucide-react";
 import { useEffect, useState } from "react";
-import { MessageCircle } from "lucide-react";
+import { Copy, MessageCircle } from "lucide-react";
 import { hasPermission } from "../../../shared/access-control";
 import type { AppUser, BusinessSettings, InventoryItem, InvoiceDetail, InvoiceItemInput, InvoiceSummary, PaymentMode, ServiceItem, VehicleType } from "../../../shared/types";
 import { InvoicePreview } from "./InvoicePreview";
@@ -22,6 +22,56 @@ const statusLabel = (status: string) =>
     .replace(/[_-]/g, " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 const vehicleTypeLabel = (type?: VehicleType | string) => (type === "bike" ? "Bike" : type === "other" ? "Other" : "Car");
+const fileNamePart = (value: string | undefined, fallback: string) => {
+  const safe = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 44);
+  return safe || fallback;
+};
+const invoicePdfFileName = (invoice: InvoiceDetail) =>
+  `${fileNamePart(invoice.invoiceNumber, "invoice")}-${fileNamePart(invoice.customerName || invoice.customer.name, "customer")}.pdf`;
+const normalizeWhatsAppPhone = (phone: string) => {
+  const digits = String(phone || "").replace(/\D/g, "");
+  if (digits.length === 10) return { valid: true, display: digits, value: digits };
+  if (digits.length === 12 && digits.startsWith("91")) return { valid: true, display: digits.slice(2), value: digits };
+  return { valid: false, display: "", value: "" };
+};
+const wait = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+async function waitForInvoiceTemplateReady(timeoutMs = 3500) {
+  const start = Date.now();
+  let documentNode: Element | null = null;
+  while (Date.now() - start < timeoutMs) {
+    documentNode = document.querySelector(".premium-invoice-document");
+    if (documentNode) break;
+    await wait(80);
+  }
+  if (!documentNode) throw new Error("Invoice template is still loading. Try again in a moment.");
+
+  await wait(150);
+  const images = Array.from(documentNode.querySelectorAll("img"));
+  await Promise.all(images.map((image) => waitForImageReady(image, Math.max(500, timeoutMs - (Date.now() - start)))));
+}
+
+async function waitForImageReady(image: HTMLImageElement, timeoutMs: number) {
+  if (image.complete && image.naturalWidth > 0) {
+    await image.decode?.().catch(() => undefined);
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    const timer = window.setTimeout(resolve, timeoutMs);
+    const done = () => {
+      window.clearTimeout(timer);
+      resolve();
+    };
+    image.addEventListener("load", done, { once: true });
+    image.addEventListener("error", done, { once: true });
+  });
+  await image.decode?.().catch(() => undefined);
+}
 
 const emptyItem = (settings?: BusinessSettings): DraftItem => ({
   key: crypto.randomUUID(),
@@ -64,12 +114,15 @@ export function InvoicesPage({
   const [appendItem, setAppendItem] = useState<DraftItem>(emptyItem(settings));
   const [updatingInvoice, setUpdatingInvoice] = useState(false);
   const [repairingCloudInvoice, setRepairingCloudInvoice] = useState(false);
+  const [sharingPdf, setSharingPdf] = useState(false);
+  const [pdfSharePath, setPdfSharePath] = useState("");
   const canManageInvoices = hasPermission(currentUser, "billing.manageInvoices");
   const canCancelInvoices = hasPermission(currentUser, "billing.cancelInvoices");
   const canRecordPayments = hasPermission(currentUser, "billing.recordPayments");
   const canPrintPdf = hasPermission(currentUser, "documents.printPdf");
   const canShareWhatsapp = hasPermission(currentUser, "sharing.whatsapp");
   const invoiceNeedsCloudNumber = Boolean(invoice && (invoice.cloudSyncStatus === "pending_cloud" || invoice.cloudSyncStatus === "failed" || invoice.invoiceNumber.startsWith("LOCAL-")));
+  const whatsappPhone = normalizeWhatsAppPhone(invoice?.customerPhone || invoice?.customer.phone || "");
 
   const loadInvoices = () =>
     window.autocare
@@ -109,6 +162,7 @@ export function InvoicesPage({
     setCancelReason("");
     setShowAddItemPanel(false);
     setAppendItem(emptyItem(settings));
+    setPdfSharePath("");
     window.autocare.getInvoice(selectedId).then(setInvoice).catch((error) => notify(error.message));
   }, [selectedId]);
 
@@ -124,6 +178,7 @@ export function InvoicesPage({
         paymentDate: todayLocal()
       });
       setInvoice(updated);
+      setPdfSharePath("");
       setPaymentAmount(0);
       setPaymentReference("");
       notify("Payment recorded.");
@@ -134,10 +189,16 @@ export function InvoicesPage({
   };
 
   const savePdf = async () => {
+    if (!invoice) return;
     if (!canPrintPdf) return notify("Print/PDF access is not enabled for this role.");
     if (invoiceNeedsCloudNumber) return notify("Sync this invoice first. Official print and PDF are locked until cloud assigns the final number.");
-    const result = await window.autocare.savePdf();
-    notify(result.message);
+    try {
+      await waitForInvoiceTemplateReady();
+      const result = await window.autocare.savePdf({ defaultFileName: invoicePdfFileName(invoice) });
+      notify(result.message);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to save invoice PDF.");
+    }
   };
 
   const printInvoice = async () => {
@@ -146,14 +207,58 @@ export function InvoicesPage({
     await window.autocare.print();
   };
 
-  const shareInvoice = async (kind: "invoice" | "due_reminder") => {
+  const shareInvoicePdf = async () => {
+    if (!invoice) return;
+    if (!canPrintPdf) return notify("Print/PDF access is not enabled for this role.");
+    if (!canShareWhatsapp) return notify("WhatsApp sharing access is not enabled for this role.");
+    if (invoice.invoiceStatus === "cancelled") return notify("Cancelled invoices cannot be shared on WhatsApp.");
+    if (invoiceNeedsCloudNumber) return notify("Sync this invoice first. WhatsApp sharing is locked until cloud assigns the final number.");
+    if (!whatsappPhone.valid) return notify("A valid 10-digit customer phone number is required for WhatsApp sharing.");
+    setSharingPdf(true);
+    setPdfSharePath("");
+    try {
+      await waitForInvoiceTemplateReady();
+      const pdf = await window.autocare.savePdf({
+        saveMode: "documents",
+        documentsSubfolder: "Autocare24\\Invoice PDFs",
+        defaultFileName: invoicePdfFileName(invoice),
+        successMessage: "Invoice PDF ready."
+      });
+      if (!pdf.ok || !pdf.path) {
+        notify(pdf.message || "Unable to create invoice PDF.");
+        return;
+      }
+      const result = await window.autocare.openWhatsAppShare({
+        kind: "invoice_pdf",
+        phone: whatsappPhone.value,
+        customerName: invoice.customerName,
+        businessName: settings.businessName,
+        invoiceNumber: invoice.invoiceNumber,
+        invoiceDate: invoice.invoiceDate,
+        vehicleNumber: invoice.vehicleNumber,
+        grandTotal: invoice.grandTotal,
+        balanceDue: invoice.balanceDue,
+        documentPath: pdf.path,
+        documentFileName: invoicePdfFileName(invoice)
+      });
+      setPdfSharePath(pdf.path);
+      notify(`${result.message} Invoice PDF saved locally.`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to send invoice PDF on WhatsApp.");
+    } finally {
+      setSharingPdf(false);
+    }
+  };
+
+  const shareInvoice = async (kind: "due_reminder") => {
     if (!invoice) return;
     if (!canShareWhatsapp) return notify("WhatsApp sharing access is not enabled for this role.");
     if (invoiceNeedsCloudNumber) return notify("Sync this invoice first. WhatsApp sharing is locked until cloud assigns the final number.");
+    if (!whatsappPhone.valid) return notify("A valid 10-digit customer phone number is required for WhatsApp sharing.");
     try {
       const result = await window.autocare.openWhatsAppShare({
         kind,
-        phone: invoice.customerPhone || invoice.customer.phone,
+        phone: whatsappPhone.value,
         customerName: invoice.customerName,
         businessName: settings.businessName,
         invoiceNumber: invoice.invoiceNumber,
@@ -164,7 +269,17 @@ export function InvoicesPage({
       });
       notify(result.message);
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Unable to open WhatsApp.");
+      notify(error instanceof Error ? error.message : "Unable to send WhatsApp message.");
+    }
+  };
+
+  const copyPdfPath = async () => {
+    if (!pdfSharePath) return;
+    try {
+      await navigator.clipboard.writeText(pdfSharePath);
+      notify("Invoice PDF path copied.");
+    } catch {
+      notify("Unable to copy PDF path. Use Show PDF to open the folder.");
     }
   };
 
@@ -267,6 +382,7 @@ export function InvoicesPage({
     try {
       const updated = await window.autocare.appendInvoiceItem({ invoiceId: invoice.id, item });
       setInvoice(updated);
+      setPdfSharePath("");
       setAppendItem(emptyItem(settings));
       setShowAddItemPanel(false);
       notify("Item added to the same invoice.");
@@ -303,10 +419,23 @@ export function InvoicesPage({
         {invoice ? (
           <>
             <div className="invoice-actions no-print">
+              {canPrintPdf && canShareWhatsapp && !invoiceNeedsCloudNumber && invoice.invoiceStatus !== "cancelled" && (
+                <span className={`whatsapp-phone-chip ${whatsappPhone.valid ? "" : "missing"}`}>
+                  {whatsappPhone.valid ? `WhatsApp to: ${whatsappPhone.display}` : "Customer phone missing"}
+                </span>
+              )}
               {canPrintPdf && !invoiceNeedsCloudNumber && <button className="ghost-button" onClick={() => void printInvoice()}><Printer size={17} /> Print</button>}
               {canPrintPdf && !invoiceNeedsCloudNumber && <button className="ghost-button" onClick={savePdf}><FileText size={17} /> Save PDF</button>}
-              {canShareWhatsapp && !invoiceNeedsCloudNumber && invoice.invoiceStatus !== "cancelled" && <button className="ghost-button" onClick={() => void shareInvoice("invoice")}><MessageCircle size={17} /> WhatsApp invoice</button>}
-              {canShareWhatsapp && !invoiceNeedsCloudNumber && invoice.invoiceStatus !== "cancelled" && invoice.balanceDue > 0 && <button className="ghost-button" onClick={() => void shareInvoice("due_reminder")}><MessageCircle size={17} /> Due reminder</button>}
+              {canPrintPdf && canShareWhatsapp && !invoiceNeedsCloudNumber && invoice.invoiceStatus !== "cancelled" && (
+                <button className="primary-action" disabled={sharingPdf || !whatsappPhone.valid} onClick={() => void shareInvoicePdf()}>
+                  <MessageCircle size={17} />
+                  <FileText size={17} />
+                  {sharingPdf ? "Preparing PDF..." : "Send WhatsApp template"}
+                </button>
+              )}
+              {canShareWhatsapp && !invoiceNeedsCloudNumber && invoice.invoiceStatus !== "cancelled" && invoice.balanceDue > 0 && (
+                <button className="ghost-button" disabled={!whatsappPhone.valid} onClick={() => void shareInvoice("due_reminder")}><MessageCircle size={17} /> Due reminder</button>
+              )}
               {invoice.invoiceStatus !== "cancelled" && (canCancelInvoices || canManageInvoices) && (
                 <>
                   {canCancelInvoices && canManageInvoices && <button className="ghost-button danger-action" onClick={() => setShowCancelPanel((value) => !value)}>
@@ -318,6 +447,20 @@ export function InvoicesPage({
                 </>
               )}
             </div>
+            {pdfSharePath && invoice.invoiceStatus !== "cancelled" && (
+              <div className="success-box invoice-pdf-share-box no-print">
+                <strong>WhatsApp Business message sent</strong>
+                <span>Invoice PDF was saved locally for your records.</span>
+                <div className="inline-actions">
+                  <button className="ghost-button small" onClick={() => void window.autocare.showItemInFolder(pdfSharePath)}>
+                    <FileText size={14} /> Show PDF
+                  </button>
+                  <button className="ghost-button small" onClick={() => void copyPdfPath()}>
+                    <Copy size={14} /> Copy PDF path
+                  </button>
+                </div>
+              </div>
+            )}
             {invoiceNeedsCloudNumber && (
               <div className="success-box no-print">
                 <strong>Invoice needs internet to finalize</strong>

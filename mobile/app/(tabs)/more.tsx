@@ -2,6 +2,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import { router } from "expo-router";
 import { ChevronRight, CircleDollarSign, Cloud, LogOut, MonitorSmartphone, Settings, ShieldCheck } from "lucide-react-native";
 import type { LucideIcon } from "lucide-react-native";
+import { DeveloperCredit } from "../../src/components/DeveloperCredit";
 import { Screen } from "../../src/components/Screen";
 import { StatusPill } from "../../src/components/StatusPill";
 import { useRequireOwner } from "../../src/hooks/useRequireOwner";
@@ -53,6 +54,8 @@ export default function MoreTab() {
           </Text>
         </View>
       </View>
+
+      <DeveloperCredit />
 
       <Pressable accessibilityRole="button" onPress={() => void handleLogout()} style={({ pressed }) => [styles.logout, pressed ? styles.pressed : null]}>
         <LogOut color={colors.danger} size={18} />

@@ -4,25 +4,31 @@
   ClipboardList,
   Clock,
   Database,
+  Download,
   FileText,
   Home,
   Info,
   LayoutDashboard,
   LogOut,
+  MessageCircle,
   Package,
   PhoneCall,
   PlusCircle,
+  Power,
   ReceiptText,
+  RefreshCw,
   Settings,
   UploadCloud,
   UserCircle,
   Users,
   Wallet,
   Wrench,
+  X,
   type LucideIcon
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  AppUpdateStatus,
   AppUser,
   BusinessSettings,
   DashboardData,
@@ -41,6 +47,7 @@ import { JobCardsPage } from "../features/billing/JobCardsPage";
 import { NewBillPage } from "../features/billing/NewBillPage";
 import { QuotationsPage } from "../features/billing/QuotationsPage";
 import { ServicesPage } from "../features/billing/ServicesPage";
+import { WhatsAppConnectPage } from "../features/billing/WhatsAppConnectPage";
 import { DashboardPage } from "../features/reports/DashboardPage";
 import { ReportsPage } from "../features/reports/ReportsPage";
 import { SettingsPage } from "../features/settings/SettingsPage";
@@ -54,6 +61,7 @@ type PageId =
   | "quotations"
   | "job-cards"
   | "customers"
+  | "whatsapp-connect"
   | "enquiries"
   | "services"
   | "inventory"
@@ -86,6 +94,7 @@ type ModuleNavItem = {
   startNewEnquiry?: boolean;
   startNewQuotation?: boolean;
   permission?: PermissionKey;
+  allPermissions?: PermissionKey[];
 };
 
 const moduleLabels: Record<WorkModule, string> = {
@@ -139,6 +148,7 @@ const moduleNavItems: Record<WorkModule, ModuleNavItem[]> = {
     { key: "billing-invoices", label: "Invoices", icon: ReceiptText, page: "invoices", permission: "billing.view" },
     { key: "billing-quotations", label: "Quotations", icon: FileText, page: "quotations", permission: "quotations.view" },
     { key: "billing-customers", label: "Customers & Vehicles", icon: Users, page: "customers", permission: "customers.view" },
+    { key: "billing-whatsapp", label: "WhatsApp Connect", icon: MessageCircle, page: "whatsapp-connect", allPermissions: ["customers.view", "sharing.whatsapp"] },
     { key: "billing-services", label: "Services & Packages", icon: Wrench, page: "services", permission: "services.view" }
   ],
   stock: [
@@ -160,7 +170,7 @@ const moduleNavItems: Record<WorkModule, ModuleNavItem[]> = {
 };
 
 const modulePermissions: Record<WorkModule, PermissionKey[]> = {
-  billing: ["billing.view", "billing.create", "quotations.view", "quotations.manage", "quotations.convert", "jobCards.view", "customers.view", "services.view"],
+  billing: ["billing.view", "billing.create", "quotations.view", "quotations.manage", "quotations.convert", "jobCards.view", "customers.view", "sharing.whatsapp", "services.view"],
   stock: ["stock.view", "stock.purchase", "stock.adjust", "stock.suppliers"],
   enquiries: ["enquiries.view", "enquiries.manage"]
 };
@@ -193,7 +203,8 @@ const emptySidebarSyncStatus: SyncDeviceStatus = {
 
 const can = (user: AppUser | null | undefined, permission: PermissionKey) => hasPermission(user, permission);
 const canAny = (user: AppUser | null | undefined, permissions: PermissionKey[]) => hasAnyPermission(user, permissions);
-const canUseNavItem = (user: AppUser, item: ModuleNavItem) => !item.permission || can(user, item.permission);
+const canUseNavItem = (user: AppUser, item: ModuleNavItem) =>
+  (!item.permission || can(user, item.permission)) && (!item.allPermissions || item.allPermissions.every((permission) => can(user, permission)));
 const allowedNavItems = (user: AppUser, module: WorkModule) => moduleNavItems[module].filter((item) => canUseNavItem(user, item));
 
 const todayLocal = () => {
@@ -264,6 +275,9 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [toast, setToast] = useState("");
+  const [updateStatus, setUpdateStatus] = useState<AppUpdateStatus | null>(null);
+  const [updatePanelOpen, setUpdatePanelOpen] = useState(false);
+  const [updateBusy, setUpdateBusy] = useState(false);
 
   const refresh = () => setRefreshKey((value) => value + 1);
   const notify = (message: string) => {
@@ -297,6 +311,27 @@ export default function App() {
   useEffect(() => {
     if (!currentUser) return;
     window.autocare.getSettings().then(setSettings).catch((error) => notify(error.message));
+  }, [currentUser?.id]);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setUpdateStatus(null);
+      setUpdatePanelOpen(false);
+      return;
+    }
+
+    let active = true;
+    window.autocare
+      .getUpdateStatus()
+      .then((status) => {
+        if (active) setUpdateStatus(status);
+      })
+      .catch((error) => notify(errorMessage(error, "Unable to load update status.")));
+    const unsubscribe = window.autocare.onUpdateStatus((status) => setUpdateStatus(status));
+    return () => {
+      active = false;
+      unsubscribe();
+    };
   }, [currentUser?.id]);
 
   useEffect(() => {
@@ -482,6 +517,44 @@ export default function App() {
     setActiveNavKey("developer-console");
   };
 
+  const checkForUpdates = async () => {
+    setUpdatePanelOpen(true);
+    setUpdateBusy(true);
+    try {
+      const status = await window.autocare.checkForUpdates();
+      setUpdateStatus(status);
+      if (status.state === "not-available" || status.state === "disabled" || status.state === "error") notify(status.message);
+    } catch (error) {
+      notify(errorMessage(error, "Unable to check for updates."));
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  const downloadUpdate = async () => {
+    setUpdatePanelOpen(true);
+    setUpdateBusy(true);
+    try {
+      const status = await window.autocare.downloadUpdate();
+      setUpdateStatus(status);
+      if (status.state === "error") notify(status.message);
+    } catch (error) {
+      notify(errorMessage(error, "Unable to download the update."));
+    } finally {
+      setUpdateBusy(false);
+    }
+  };
+
+  const installUpdate = async () => {
+    setUpdateBusy(true);
+    try {
+      await window.autocare.installUpdate();
+    } catch (error) {
+      notify(errorMessage(error, "Unable to install the update."));
+      setUpdateBusy(false);
+    }
+  };
+
   const topbarAction = () => {
     if ((page === "settings" || page === "developer-console" || page === "reports" || page === "about") && activeModule === "home") {
       return (
@@ -511,6 +584,7 @@ export default function App() {
           </button>
         );
       }
+      if (page === "whatsapp-connect") return null;
       if (!can(currentUser, "billing.create")) return null;
       return (
         <button className="primary-action" onClick={() => openModule("billing")}>
@@ -563,8 +637,19 @@ export default function App() {
         : page === "about"
           ? "Production Details"
         : "Autocare24 Bike & Car Detailing Studio"
-      : `${moduleLabels[activeModule]} Workspace`;
+        : `${moduleLabels[activeModule]} Workspace`;
   const showOverview = activeModule === "home" && page !== "settings" && page !== "developer-console" && page !== "reports" && page !== "about";
+  const updateAction = currentUser ? (
+    <UpdateHeaderControl
+      status={updateStatus}
+      busy={updateBusy}
+      panelOpen={updatePanelOpen}
+      setPanelOpen={setUpdatePanelOpen}
+      checkForUpdates={checkForUpdates}
+      downloadUpdate={downloadUpdate}
+      installUpdate={installUpdate}
+    />
+  ) : null;
 
   if (authMode === "checking") {
     return (
@@ -620,7 +705,10 @@ export default function App() {
               <span className="eyebrow">{eyebrow}</span>
               <h1>{title}</h1>
             </div>
-            {topbarAction()}
+            <div className="topbar-actions">
+              {updateAction}
+              {topbarAction()}
+            </div>
           </header>
         )}
 
@@ -643,6 +731,7 @@ export default function App() {
                   openModule={openModule}
                   currentUser={currentUser}
                   openSettings={openSettings}
+                  updateAction={updateAction}
                   openAddStock={openAddStock}
                   startNewEnquiry={startNewEnquiry}
                   openBillingReports={openBillingReports}
@@ -684,6 +773,9 @@ export default function App() {
                 />
               )}
               {page === "customers" && activeModule !== "home" && can(currentUser, "customers.view") && <CustomersPage refreshKey={refreshKey} notify={notify} />}
+              {page === "whatsapp-connect" && activeModule !== "home" && can(currentUser, "customers.view") && can(currentUser, "sharing.whatsapp") && (
+                <WhatsAppConnectPage settings={settings} refreshKey={refreshKey} notify={notify} />
+              )}
               {page === "enquiries" && activeModule !== "home" && can(currentUser, "enquiries.view") && (
                 <EnquiriesPage
                   refreshKey={refreshKey}
@@ -738,6 +830,131 @@ export default function App() {
       </main>
 
       {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
+}
+
+const updateButtonLabel = (status: AppUpdateStatus | null, busy: boolean) => {
+  if (busy && status?.state === "downloaded") return "Installing";
+  if (busy && status?.state === "available") return "Starting download";
+  if (busy && status?.state !== "downloading") return "Checking";
+  if (!status) return "Check for updates";
+  if (status.state === "checking") return "Checking";
+  if (status.state === "available") return "Update available";
+  if (status.state === "downloading") return `Downloading ${Math.round(status.progressPercent)}%`;
+  if (status.state === "downloaded") return "Update ready";
+  return "Check for updates";
+};
+
+const updatePanelHeading = (status: AppUpdateStatus | null) => {
+  if (!status) return "App updates";
+  if (status.state === "available") return "Update available";
+  if (status.state === "downloading") return "Downloading update";
+  if (status.state === "downloaded") return "Update ready";
+  if (status.state === "not-available") return "Latest version";
+  if (status.state === "error") return "Update check failed";
+  return "App updates";
+};
+
+const formatBytes = (value: number) => {
+  if (!value) return "";
+  if (value >= 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+  return `${value} B`;
+};
+
+function UpdateHeaderControl({
+  status,
+  busy,
+  panelOpen,
+  setPanelOpen,
+  checkForUpdates,
+  downloadUpdate,
+  installUpdate
+}: {
+  status: AppUpdateStatus | null;
+  busy: boolean;
+  panelOpen: boolean;
+  setPanelOpen: (open: boolean) => void;
+  checkForUpdates: () => Promise<void>;
+  downloadUpdate: () => Promise<void>;
+  installUpdate: () => Promise<void>;
+}) {
+  const state = status?.state || "idle";
+  const progress = Math.round(status?.progressPercent || 0);
+  const version = status?.availableVersion && status.availableVersion !== status.currentVersion ? status.availableVersion : "";
+  const message = status?.message || "Ready to check for updates.";
+  const releaseDate = status?.releaseDate ? status.releaseDate.slice(0, 10) : "";
+  const downloaded = status?.transferredBytes ? formatBytes(status.transferredBytes) : "";
+  const total = status?.totalBytes ? formatBytes(status.totalBytes) : "";
+  const checkOnClick = state === "idle" || state === "not-available" || state === "error" || state === "disabled";
+
+  const handleButtonClick = () => {
+    if (checkOnClick) void checkForUpdates();
+    else setPanelOpen(!panelOpen);
+  };
+
+  return (
+    <div className="update-control">
+      <button
+        className={`ghost-button update-button update-${state}`}
+        disabled={busy && state !== "downloading"}
+        onClick={handleButtonClick}
+        title={message}
+      >
+        <RefreshCw size={17} className={state === "checking" || state === "downloading" ? "spin-icon" : ""} />
+        {updateButtonLabel(status, busy)}
+      </button>
+
+      {panelOpen && (
+        <div className="update-panel" role="status" aria-live="polite">
+          <div className="update-panel-header">
+            <div>
+              <strong>{updatePanelHeading(status)}</strong>
+              <span>Current version {status?.currentVersion || "unknown"}</span>
+            </div>
+            <button className="icon-button update-panel-close" onClick={() => setPanelOpen(false)} title="Close update panel">
+              <X size={16} />
+            </button>
+          </div>
+
+          <p className={state === "error" ? "update-message error" : "update-message"}>{message}</p>
+          {(version || releaseDate) && (
+            <div className="update-meta-row">
+              {version && <span>Version {version}</span>}
+              {releaseDate && <span>{releaseDate}</span>}
+            </div>
+          )}
+
+          {(state === "downloading" || state === "downloaded") && (
+            <div className="update-progress">
+              <div><span style={{ width: `${state === "downloaded" ? 100 : progress}%` }} /></div>
+              <small>{state === "downloaded" ? "Download complete" : `${progress}%${downloaded && total ? ` - ${downloaded} of ${total}` : ""}`}</small>
+            </div>
+          )}
+
+          <div className="update-panel-actions">
+            {state === "available" && (
+              <button className="primary-action" disabled={busy} onClick={() => void downloadUpdate()}>
+                <Download size={17} />
+                Download update
+              </button>
+            )}
+            {state === "downloaded" && (
+              <button className="primary-action" disabled={busy} onClick={() => void installUpdate()}>
+                <Power size={17} />
+                Restart and install
+              </button>
+            )}
+            {state !== "checking" && state !== "downloading" && (
+              <button className="ghost-button" disabled={busy} onClick={() => void checkForUpdates()}>
+                <RefreshCw size={17} />
+                Check again
+              </button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1245,6 +1462,7 @@ function OverviewPage({
   openModule,
   currentUser,
   openSettings,
+  updateAction,
   openAddStock,
   startNewEnquiry,
   openBillingReports,
@@ -1255,6 +1473,7 @@ function OverviewPage({
   openModule: (module: WorkModule) => void;
   currentUser: AppUser;
   openSettings: () => void;
+  updateAction: ReactNode;
   openAddStock: () => void;
   startNewEnquiry: () => void;
   openBillingReports: () => void;
@@ -1343,10 +1562,13 @@ function OverviewPage({
           <h1>Welcome back, {currentUser.displayName}</h1>
           <p>Here's what's happening in your studio today.</p>
         </div>
-        <button className="ghost-button" onClick={openSettings}>
-          <Settings size={18} />
-          Settings
-        </button>
+        <div className="overview-header-actions">
+          {updateAction}
+          <button className="ghost-button" onClick={openSettings}>
+            <Settings size={18} />
+            Settings
+          </button>
+        </div>
       </header>
 
       <section className="overview-kpi-strip" aria-label="Today summary">

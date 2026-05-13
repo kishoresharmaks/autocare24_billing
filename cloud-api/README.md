@@ -112,6 +112,15 @@ DEVICE_REGISTRATION_RATE_LIMIT_MAX=10
 DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS=900000
 TRUSTED_PROXY_IPS=
 INVOICE_PREFIX=AUTOCARE24
+WHATSAPP_ENABLED=false
+WHATSAPP_GRAPH_VERSION=v20.0
+WHATSAPP_ACCESS_TOKEN=
+WHATSAPP_PHONE_NUMBER_ID=
+WHATSAPP_BUSINESS_ACCOUNT_ID=
+WHATSAPP_WEBHOOK_VERIFY_TOKEN=
+WHATSAPP_APP_SECRET=
+WHATSAPP_DISPLAY_PHONE_NUMBER=
+WHATSAPP_DOCUMENT_MAX_BYTES=18874368
 ```
 
 Important:
@@ -121,11 +130,14 @@ Important:
 - Use a long private value, not a simple password.
 - `UPLOAD_DIR` should be outside `public_html`.
 - `TOKEN_HASH_SECRET` protects stored device token hashes. Keep it stable after deployment.
-- `MAX_BODY_BYTES` defaults to 24 MB so the 15 MB document limit still has room for base64 JSON overhead.
+- `MAX_BODY_BYTES` defaults to 24 MB so the 18 MB WhatsApp PDF limit still has room for base64 JSON overhead.
 - Auth and device registration rate limits default to 10 attempts per 15 minutes per IP.
 - Loopback proxies (`127.0.0.1` and `::1`) are trusted for `X-Forwarded-For`/`X-Real-IP` so local hosting panels can show the real client IP instead of `127.0.0.1`.
 - Add only known reverse proxy IPs to `TRUSTED_PROXY_IPS`; the API trusts forwarded IP headers only from loopback or those configured proxy IPs.
 - `INVOICE_PREFIX` is optional. The desktop also sends its configured invoice prefix during finalization.
+- WhatsApp Business API is optional. Set `WHATSAPP_ENABLED=true` only after adding the Meta access token, phone number ID, business account ID, webhook verify token, and app secret.
+- Invoice/job-card PDF sharing uses Meta media upload and requires approved document-header templates named `invoice_pdf_ready` and `job_card_pdf_ready`.
+- Configure the Meta webhook callback URL as `https://sync.yourdomain.com/api/v1/whatsapp/webhook`.
 - Keep HTTPS enabled through the hosting panel or a TLS-terminating reverse proxy. The desktop app rejects normal HTTP except for local development.
 
 ## 7. Install Dependencies
@@ -158,6 +170,11 @@ This creates:
 - `idempotency_keys`
 - `sync_conflicts`
 - `audit_log`
+- `whatsapp_settings`
+- `whatsapp_conversations`
+- `whatsapp_messages`
+- `whatsapp_message_events`
+- `whatsapp_templates`
 
 It also seeds the first business and number sequences for invoices, quotations, and job cards.
 
@@ -331,6 +348,8 @@ Synced files use this API:
 
 Purchase records are synced as the `purchase_records` business-record entity. They are reference documents only and are not used by the stock, expense, profit, or invoice-total calculations.
 
+Quick cash stock sales use `inventory_movements` with `type: "stock_sale"`, `saleAmount`, `saleUnitPrice`, and `paymentMode`. They deduct stock without creating a tax invoice, and reports include them separately from invoice sales.
+
 Files are stored under:
 
 ```text
@@ -339,7 +358,27 @@ UPLOAD_DIR=/home/cpaneluser/autocare24-sync-uploads
 
 Make sure this folder is writable by the Node app.
 
-## 16. Production Checklist
+## 16. WhatsApp Business API
+
+The desktop app uses the cloud API for WhatsApp Connect. Meta credentials stay on the server, and the desktop never receives the WhatsApp access token.
+
+Authenticated desktop endpoints:
+
+- `GET /api/v1/whatsapp/status`
+- `GET /api/v1/whatsapp/conversations`
+- `GET /api/v1/whatsapp/conversations/:id/messages`
+- `POST /api/v1/whatsapp/messages`
+- `GET /api/v1/whatsapp/templates`
+- `POST /api/v1/whatsapp/templates/sync`
+
+Public Meta webhook endpoints:
+
+- `GET /api/v1/whatsapp/webhook`
+- `POST /api/v1/whatsapp/webhook`
+
+Approved templates are required for first contact and notifications. Freeform text replies are allowed only after an inbound customer message opens the WhatsApp customer-service window.
+
+## 17. Production Checklist
 
 Before using this with real billing data:
 
@@ -355,7 +394,7 @@ Before using this with real billing data:
 - Print/PDF/WhatsApp stay blocked for any old `LOCAL-...` invoice until repaired.
 - Two PCs do not create duplicate invoice numbers.
 
-## 17. Troubleshooting
+## 18. Troubleshooting
 
 ### Health URL shows 404
 

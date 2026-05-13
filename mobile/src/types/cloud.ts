@@ -60,6 +60,71 @@ export interface LoginResult {
   user: CloudUser;
 }
 
+export interface BusinessSettings {
+  id?: string;
+  businessName?: string;
+  address?: string;
+  phone?: string;
+  email?: string;
+  gstin?: string;
+  state?: string;
+  invoicePaperSize?: "A4" | "Letter" | "Legal";
+  invoiceLogoPath?: string;
+  invoiceSignaturePath?: string;
+  invoiceWatermarkPath?: string;
+  invoiceAccentColor?: string;
+  invoiceSecondaryColor?: string;
+  invoiceFontStyle?: "modern" | "classic" | "system";
+  invoiceTextSize?: "compact" | "standard" | "large";
+  invoiceDensity?: "compact" | "standard" | "comfortable";
+  invoiceLogoSize?: "small" | "medium" | "large";
+  invoiceWatermarkOpacity?: number;
+  invoiceWatermarkPlacement?: "bottom-right" | "center" | "top-right";
+  gstInvoiceTitle?: string;
+  simpleReceiptTitle?: string;
+  quotationTitle?: string;
+  invoiceTerms?: string;
+  invoiceFooterNote?: string;
+  bankName?: string;
+  bankAccountName?: string;
+  bankAccountNumber?: string;
+  bankIfsc?: string;
+  upiId?: string;
+  signatureLabel?: string;
+  showGstin?: boolean;
+  showVehicleDetails?: boolean;
+  showPaymentDetails?: boolean;
+  showTerms?: boolean;
+  showBusinessPhone?: boolean;
+  showBusinessEmail?: boolean;
+  showBusinessAddress?: boolean;
+  showCustomerPhone?: boolean;
+  showCustomerAddress?: boolean;
+  showCustomerGstin?: boolean;
+  showInvoiceStatus?: boolean;
+  showPaymentMode?: boolean;
+  showPaidAmount?: boolean;
+  showBalanceDue?: boolean;
+  showSacCode?: boolean;
+  showItemGstRate?: boolean;
+  showFooterContactBar?: boolean;
+  invoiceNumberLabel?: string;
+  invoiceDateLabel?: string;
+  billToLabel?: string;
+  vehicleDetailsLabel?: string;
+  paymentDetailsLabel?: string;
+  bankDetailsLabel?: string;
+  termsLabel?: string;
+  subtotalLabel?: string;
+  grandTotalLabel?: string;
+  paidLabel?: string;
+  balanceDueLabel?: string;
+  paymentInstructions?: string;
+  showLogo?: boolean;
+  showSignature?: boolean;
+  showUpiQr?: boolean;
+}
+
 export interface InvoiceSummary {
   id: string;
   invoiceNumber: string;
@@ -85,6 +150,7 @@ export interface InvoiceSummary {
   paymentMode: string;
   paymentReference: string;
   notes: string;
+  cloudSyncStatus?: string;
   cancelledAt: string;
   cancelReason: string;
   createdAt: string;

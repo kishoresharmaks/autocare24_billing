@@ -16,11 +16,13 @@ import {
 } from "lucide-react-native";
 import type { LucideIcon } from "lucide-react-native";
 import { fetchInventoryDashboard, fetchPurchaseRecords, fetchSuppliers } from "../../src/services/cloudApi";
+import { ExportActions } from "../../src/components/ExportActions";
 import { FormField } from "../../src/components/FormField";
 import { MetricCard } from "../../src/components/MetricCard";
 import { MetricGrid } from "../../src/components/MetricGrid";
 import { Screen } from "../../src/components/Screen";
 import { colors, radius } from "../../src/theme";
+import { exportStockDocument, type ExportFormat } from "../../src/services/reportExport";
 import type { InventoryBatch, InventoryItem, InventoryMovement, PurchaseRecord, Supplier } from "../../src/types/cloud";
 import { formatCount, formatDate, formatMoney, titleCase } from "../../src/utils/format";
 import { useRequireOwner } from "../../src/hooks/useRequireOwner";
@@ -160,6 +162,17 @@ export default function StockTab() {
     await Promise.all([inventoryQuery.refetch(), suppliersQuery.refetch(), purchaseRecordsQuery.refetch()]);
   }
 
+  async function exportStock(format: ExportFormat) {
+    if (!dashboard) throw new Error("Stock data is not loaded yet.");
+    if (firstError) throw new Error("Refresh stock details before exporting.");
+    await exportStockDocument({
+      dashboard,
+      suppliers,
+      purchaseRecords,
+      format
+    });
+  }
+
   return (
     <Screen
       title="Stock"
@@ -169,6 +182,7 @@ export default function StockTab() {
       showHome
     >
       {firstError ? <Text style={styles.error}>{firstError instanceof Error ? firstError.message : "Unable to load stock details."}</Text> : null}
+      <ExportActions disabled={!dashboard || isRefreshing || Boolean(firstError)} onExport={exportStock} />
 
       <MetricGrid>
         <MetricCard label="Stock Value" value={formatMoney(dashboard?.totalStockValue)} tone="success" />

@@ -1,7 +1,7 @@
 import { PropsWithChildren, ReactNode } from "react";
 import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
-import { Home } from "lucide-react-native";
-import { router } from "expo-router";
+import { ChevronLeft, Home } from "lucide-react-native";
+import { router, usePathname } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useResponsiveLayout } from "../hooks/useResponsiveLayout";
 import { colors, radius } from "../theme";
@@ -13,6 +13,7 @@ interface ScreenProps extends PropsWithChildren {
   refreshing?: boolean;
   onRefresh?: () => void;
   showHome?: boolean;
+  showBack?: boolean;
   hideHeader?: boolean;
   fixedFooter?: ReactNode;
 }
@@ -23,12 +24,26 @@ export function Screen({
   right,
   refreshing = false,
   onRefresh,
-  showHome = false,
+  showHome = true,
+  showBack = true,
   hideHeader = false,
   fixedFooter,
   children
 }: ScreenProps) {
   const layout = useResponsiveLayout();
+  const pathname = usePathname();
+  const isHomeRoute = pathname === "/" || pathname === "/dashboard";
+  const canGoBack = router.canGoBack();
+  const shouldShowBack = showBack && !isHomeRoute && canGoBack;
+  const shouldShowHome = showHome && !isHomeRoute;
+
+  const handleBack = () => {
+    if (router.canGoBack()) {
+      router.back();
+      return;
+    }
+    router.replace("/dashboard");
+  };
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
@@ -54,19 +69,33 @@ export function Screen({
               </Text>
               {subtitle ? <Text style={styles.subtitle}>{subtitle}</Text> : null}
             </View>
-            {showHome || right ? (
+            {shouldShowBack || shouldShowHome || right ? (
               <View style={[styles.headerRight, layout.isCompact ? styles.headerRightCompact : null]}>
-                {showHome ? (
-                  <Pressable
-                    accessibilityRole="button"
-                    onPress={() => router.replace("/dashboard")}
-                    style={({ pressed }) => [styles.homeButton, pressed ? styles.homeButtonPressed : null]}
-                  >
-                    <Home color={colors.primary} size={18} />
-                    <Text style={styles.homeButtonText}>Home</Text>
-                  </Pressable>
+                {shouldShowBack || shouldShowHome ? (
+                  <View style={styles.navigationActions}>
+                    {shouldShowBack ? (
+                      <Pressable
+                        accessibilityLabel="Go back"
+                        accessibilityRole="button"
+                        onPress={handleBack}
+                        style={({ pressed }) => [styles.navIconButton, pressed ? styles.navButtonPressed : null]}
+                      >
+                        <ChevronLeft color={colors.primary} size={20} />
+                      </Pressable>
+                    ) : null}
+                    {shouldShowHome ? (
+                      <Pressable
+                        accessibilityRole="button"
+                        onPress={() => router.replace("/dashboard")}
+                        style={({ pressed }) => [styles.homeButton, pressed ? styles.navButtonPressed : null]}
+                      >
+                        <Home color={colors.primary} size={18} />
+                        <Text style={styles.homeButtonText}>Home</Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
                 ) : null}
-                {right}
+                {right ? <View style={styles.customActions}>{right}</View> : null}
               </View>
             ) : null}
           </View>
@@ -139,8 +168,29 @@ const styles = StyleSheet.create({
     alignItems: "stretch",
     justifyContent: "flex-start"
   },
+  navigationActions: {
+    minHeight: 42,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    gap: 8
+  },
+  customActions: {
+    minWidth: 0
+  },
+  navIconButton: {
+    width: 42,
+    height: 42,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceStrong
+  },
   homeButton: {
-    minHeight: 40,
+    minWidth: 92,
+    minHeight: 42,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
@@ -151,7 +201,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceStrong,
     paddingHorizontal: 12
   },
-  homeButtonPressed: {
+  navButtonPressed: {
     transform: [{ scale: 0.99 }]
   },
   homeButtonText: {

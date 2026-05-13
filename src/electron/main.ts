@@ -1,12 +1,15 @@
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell, type IpcMainInvokeEvent } from "electron";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { AppDatabase } from "./database";
 import { CloudDataClient } from "./cloud-data";
+import { createDailyReportArchive } from "./daily-report-backup";
 import { createDriveCloudService } from "./drive-cloud";
 import { CloudSyncEngine } from "./sync-engine";
+import { createAppUpdateService, type AppUpdateService } from "./update-service";
 import { hasPermission } from "../shared/access-control";
 import {
   APP_COPYRIGHT,
@@ -30,13 +33,19 @@ import type {
   CloudDeviceOwnerCredentials,
   DateRangePreset,
   ChangePasswordInput,
+  DailyReportBackupResult,
+  DailyReportBackupStatus,
   DriveBackupResult,
   EnquiryFollowupInput,
   EnquiryInput,
   EnquiryStatus,
   ExpenseInput,
+  InventoryBatch,
+  InventoryDashboardData,
+  InventoryMovement,
   InventoryMovementInput,
   InventoryPurchaseInput,
+  InvoiceSummary,
   InvoiceAppendItemInput,
   InvoiceCancelInput,
   InvoiceCreateInput,
@@ -49,11 +58,14 @@ import type {
   LoginInput,
   PermissionKey,
   PrintInput,
+  Payment,
+  PurchaseRecord,
   PurchaseRecordInput,
   QuotationDetail,
   QuotationSaveInput,
   QuotationStatusInput,
   RecordPaymentInput,
+  ReportData,
   ReportDateFilter,
   ReportExportKind,
   SavePdfInput,
@@ -64,6 +76,8 @@ import type {
   SyncConflictResolution,
   SyncEntity,
   SetupOwnerInput,
+  Supplier,
+  WhatsAppSendMessageInput,
   WhatsAppShareInput
 } from "../shared/types";
 
@@ -79,6 +93,7 @@ const database = new AppDatabase();
 let driveCloudService: ReturnType<typeof createDriveCloudService> | null = null;
 let cloudSyncEngine: CloudSyncEngine | null = null;
 let cloudDataClient: CloudDataClient | null = null;
+let updateService: AppUpdateService | null = null;
 let cloudSyncActionTimer: NodeJS.Timeout | null = null;
 let dailyBackupTimer: NodeJS.Timeout | null = null;
 const DAILY_BACKUP_HOUR = 19;
@@ -124,6 +139,10 @@ const cloudData = () => {
   cloudDataClient ??= new CloudDataClient(cloudSync(), { purchaseDocumentRoot: database.getPurchaseDocumentRoot() });
   return cloudDataClient;
 };
+const appUpdates = () => {
+  updateService ??= createAppUpdateService();
+  return updateService;
+};
 
 const scheduleCloudSyncAfterAction = () => {
   // Cloud-only business data uses direct API calls; legacy sync import remains manual through sync:trigger.
@@ -147,6 +166,10 @@ const safePathSegment = (value: string, fallback: string) => {
 };
 
 const todayForInvoice = () => new Date().toISOString().slice(0, 10);
+const localDate = (date = new Date()) => {
+  const normalized = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return normalized.toISOString().slice(0, 10);
+};
 
 if (!hasSingleInstanceLock) {
   app.quit();
@@ -367,7 +390,6 @@ const createSplashWindow = () => {
     <main class="splash">
       <div class="logo-frame"><img src="${logoUrl}" alt="Autocare24" /></div>
       <h1>${APP_PRODUCT_NAME}</h1>
-      <p>${APP_DEVELOPER.credit}</p>
       <div class="accent"></div>
       <div class="loading-row" aria-label="Loading">
         <span>Loading secure workspace</span>
@@ -597,6 +619,30 @@ const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bm
 const MAX_INVOICE_ASSET_BYTES = 5 * 1024 * 1024;
 const MAX_LOG_LINES = 400;
 type InvoiceAssetKind = "logo" | "signature" | "watermark";
+type DailyReportInventorySnapshot = InventoryDashboardData & {
+  batches?: Array<InventoryBatch & { itemName?: string; unit?: string }>;
+  movements?: InventoryMovement[];
+};
+type DailyReportDataSource = {
+  source: DailyReportBackupResult["source"];
+  sourceStatus: string;
+  report: ReportData;
+  allDuesReport: ReportData;
+  invoices: InvoiceSummary[];
+  payments: Payment[];
+  inventory: DailyReportInventorySnapshot;
+  suppliers: Supplier[];
+  purchaseRecords: PurchaseRecord[];
+};
+type StoredDailyReportBackupState = {
+  lastReportAt: string;
+  lastReportDate: string;
+  lastReportPath: string;
+  lastDriveUploadAt: string;
+  lastDriveUploadName: string;
+  lastError: string;
+  lastErrorAt: string;
+};
 
 const timestampForFile = () => {
   const normalized = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
@@ -1056,6 +1102,7 @@ const emptyBackupCloudSnapshotStatus = (error = ""): BackupCloudSnapshotStatus =
 });
 
 const backupScheduleStatePath = () => appDataDirectory("backup-scheduler-state.json");
+const dailyReportBackupStatePath = () => appDataDirectory("daily-report-backup-state.json");
 
 const readBackupScheduleState = (): StoredBackupScheduleState => {
   try {
@@ -1073,6 +1120,34 @@ const writeBackupScheduleState = (patch: Partial<StoredBackupScheduleState>) => 
   const state = { ...readBackupScheduleState(), ...patch };
   fs.mkdirSync(path.dirname(backupScheduleStatePath()), { recursive: true });
   fs.writeFileSync(backupScheduleStatePath(), JSON.stringify(state, null, 2), "utf8");
+  return state;
+};
+
+const emptyDailyReportBackupState = (): StoredDailyReportBackupState => ({
+  lastReportAt: "",
+  lastReportDate: "",
+  lastReportPath: "",
+  lastDriveUploadAt: "",
+  lastDriveUploadName: "",
+  lastError: "",
+  lastErrorAt: ""
+});
+
+const readDailyReportBackupState = (): StoredDailyReportBackupState => {
+  try {
+    return {
+      ...emptyDailyReportBackupState(),
+      ...JSON.parse(fs.readFileSync(dailyReportBackupStatePath(), "utf8"))
+    };
+  } catch {
+    return emptyDailyReportBackupState();
+  }
+};
+
+const writeDailyReportBackupState = (patch: Partial<StoredDailyReportBackupState>) => {
+  const state = { ...readDailyReportBackupState(), ...patch };
+  fs.mkdirSync(path.dirname(dailyReportBackupStatePath()), { recursive: true });
+  fs.writeFileSync(dailyReportBackupStatePath(), JSON.stringify(state, null, 2), "utf8");
   return state;
 };
 
@@ -1112,6 +1187,152 @@ const sendBackupScheduleStatus = () => {
   mainWindow?.webContents.send("backup:schedule-status", backupScheduleStatus());
 };
 
+const isDailyReportBackupDue = (now = new Date()) => {
+  const reportDate = new Date(now);
+  if (now.getHours() < DAILY_BACKUP_HOUR) reportDate.setDate(reportDate.getDate() - 1);
+  const dueDate = localDate(reportDate);
+  const state = readDailyReportBackupState();
+  return state.lastReportDate >= dueDate && state.lastReportPath && fs.existsSync(state.lastReportPath) ? "" : dueDate;
+};
+
+const dailyReportBackupStatus = (): DailyReportBackupStatus => {
+  const state = readDailyReportBackupState();
+  const reportExists = Boolean(state.lastReportPath && fs.existsSync(state.lastReportPath));
+  return {
+    scheduledTime: DAILY_BACKUP_LABEL,
+    nextRunAt: nextDailyBackupRun().toISOString(),
+    lastReportAt: reportExists ? state.lastReportAt : "",
+    lastReportDate: reportExists ? state.lastReportDate : "",
+    lastReportPath: reportExists ? state.lastReportPath : "",
+    lastDriveUploadAt: state.lastDriveUploadAt,
+    lastDriveUploadName: state.lastDriveUploadName,
+    lastError: state.lastError
+  };
+};
+
+const dailyReportOutputRoot = () => database.getSettings().backupDirectory || database.getDefaultBackupDirectory();
+
+const collectCloudDailyReportData = async (reportDate: string): Promise<DailyReportDataSource> => {
+  const filter: ReportDateFilter = { fromDate: reportDate, toDate: reportDate };
+  const client = cloudData();
+  const [report, allDuesReport, inventory, invoices, payments, suppliers, purchaseRecords] = await Promise.all([
+    client.reports(filter),
+    client.reports("all"),
+    client.inventoryDashboard() as Promise<DailyReportInventorySnapshot>,
+    client.listAllInvoices(),
+    client.listPayments(),
+    client.listSuppliers(),
+    client.listPurchaseRecords()
+  ]);
+  const [batches, movements] = await Promise.all([
+    client.listInventoryBatches().catch(() => inventory.batches || []),
+    client.listInventoryMovements().catch(() => inventory.movements || inventory.recentMovements || [])
+  ]);
+  return {
+    source: "cloud-api",
+    sourceStatus: "Cloud API live data",
+    report,
+    allDuesReport,
+    invoices,
+    payments,
+    inventory: { ...inventory, batches: inventory.batches || batches, movements: inventory.movements || movements },
+    suppliers,
+    purchaseRecords
+  };
+};
+
+const collectLocalDailyReportData = (reportDate: string, fallbackReason = ""): DailyReportDataSource => {
+  const filter: ReportDateFilter = { fromDate: reportDate, toDate: reportDate };
+  const inventory = database.getInventoryDashboard() as DailyReportInventorySnapshot;
+  return {
+    source: "local-database",
+    sourceStatus: fallbackReason ? `Local database fallback: ${fallbackReason}` : "Local database",
+    report: database.getReports(filter),
+    allDuesReport: database.getReports("all"),
+    invoices: database.listAllInvoices(),
+    payments: database.listPayments(),
+    inventory: {
+      ...inventory,
+      batches: database.listInventoryBatches(),
+      movements: database.listInventoryMovementsForDate(reportDate)
+    },
+    suppliers: database.listSuppliers(),
+    purchaseRecords: database.listPurchaseRecords()
+  };
+};
+
+const collectDailyReportData = async (reportDate: string): Promise<DailyReportDataSource> => {
+  try {
+    return await collectCloudDailyReportData(reportDate);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    logAppEvent("warn", "Daily report cloud data unavailable; using local database", { reportDate, message });
+    return collectLocalDailyReportData(reportDate, message);
+  }
+};
+
+const uploadDailyReportToDriveIfConnected = async (filePath: string) => {
+  const credentials = driveCredentials();
+  const driveStatus = driveCloud().getStatus(credentials);
+  if (!credentials.clientId || !driveStatus.connected) return null;
+  return driveCloud().uploadBackup(credentials, filePath);
+};
+
+const createDailyReportBackup = async (reportDate = localDate(), options: { uploadToDrive?: boolean } = {}): Promise<DailyReportBackupResult> => {
+  const generatedAt = new Date().toISOString();
+  const data = await collectDailyReportData(reportDate);
+  const archive = createDailyReportArchive({
+    outputRoot: dailyReportOutputRoot(),
+    reportDate,
+    generatedAt,
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+    source: data.source,
+    sourceDevice: os.hostname(),
+    sourceStatus: data.sourceStatus,
+    report: data.report,
+    allDuesReport: data.allDuesReport,
+    invoices: data.invoices,
+    payments: data.payments,
+    inventory: data.inventory,
+    suppliers: data.suppliers,
+    purchaseRecords: data.purchaseRecords
+  });
+
+  let driveUpload: DriveBackupResult | null = null;
+  let uploadError = "";
+  if (options.uploadToDrive !== false) {
+    try {
+      driveUpload = await uploadDailyReportToDriveIfConnected(archive.filePath);
+    } catch (error) {
+      uploadError = error instanceof Error ? error.message : String(error);
+      driveCloud().recordFailure(uploadError);
+      logAppEvent("warn", "Daily report Google Drive upload failed", { path: archive.filePath, message: uploadError });
+    }
+  }
+
+  const previousReportState = readDailyReportBackupState();
+  writeDailyReportBackupState({
+    lastReportAt: archive.generatedAt,
+    lastReportDate: archive.reportDate,
+    lastReportPath: archive.filePath,
+    lastDriveUploadAt: driveUpload?.uploadedAt || previousReportState.lastDriveUploadAt,
+    lastDriveUploadName: driveUpload?.fileName || previousReportState.lastDriveUploadName,
+    lastError: uploadError,
+    lastErrorAt: uploadError ? new Date().toISOString() : ""
+  });
+
+  const uploadMessage = driveUpload ? " Uploaded to Google Drive." : uploadError ? ` Google Drive upload failed: ${uploadError}` : "";
+  return {
+    ok: true,
+    message: `Daily report backup created for ${reportDate}.${uploadMessage}`,
+    path: archive.filePath,
+    reportDate: archive.reportDate,
+    generatedAt: archive.generatedAt,
+    source: archive.source,
+    driveUpload
+  };
+};
+
 const cloudSnapshotOptionsForBackup = async () => {
   try {
     const snapshot = await cloudData().exportCloudSnapshot();
@@ -1131,32 +1352,52 @@ const createManualBackupWithCloudSnapshot = async (): Promise<BackupResult> => {
 
 const runDailyScheduledBackup = async (reason: "startup" | "timer") => {
   let backupPath = "";
+  let reportResult: DailyReportBackupResult | null = null;
   try {
     const now = new Date();
-    if (!database.isScheduledBackupDue(now)) {
+    const reportDate = isDailyReportBackupDue(now);
+    const backupDue = database.isScheduledBackupDue(now);
+    if (!backupDue && !reportDate) {
       sendBackupScheduleStatus();
       return null;
     }
-    backupPath = database.createScheduledBackupIfDue(now, await cloudSnapshotOptionsForBackup());
-    if (!backupPath) {
-      sendBackupScheduleStatus();
-      return null;
+
+    if (backupDue) {
+      backupPath = database.createScheduledBackupIfDue(now, await cloudSnapshotOptionsForBackup());
+      if (backupPath) {
+        logAppEvent("info", "Daily scheduled backup created", { reason, path: backupPath });
+        writeBackupScheduleState({ lastError: "", lastErrorAt: "" });
+      }
     }
-    logAppEvent("info", "Daily scheduled backup created", { reason, path: backupPath });
-    writeBackupScheduleState({ lastError: "", lastErrorAt: "" });
+
+    if (reportDate) {
+      reportResult = await createDailyReportBackup(reportDate);
+      logAppEvent("info", "Daily report backup created", {
+        reason,
+        path: reportResult.path,
+        reportDate: reportResult.reportDate,
+        source: reportResult.source
+      });
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     writeBackupScheduleState({ lastError: message, lastErrorAt: new Date().toISOString() });
-    logAppEvent("warn", "Daily scheduled backup failed", { reason, message });
+    writeDailyReportBackupState({ lastError: message, lastErrorAt: new Date().toISOString() });
+    logAppEvent("warn", "Daily scheduled backup or report failed", { reason, message });
     sendBackupScheduleStatus();
     return null;
+  }
+
+  if (!backupPath) {
+    sendBackupScheduleStatus();
+    return { backupPath, driveResult: null, reportResult };
   }
 
   const credentials = driveCredentials();
   const driveStatus = driveCloud().getStatus(credentials);
   if (!credentials.clientId || !driveStatus.connected) {
     sendBackupScheduleStatus();
-    return { backupPath, driveResult: null };
+    return { backupPath, driveResult: null, reportResult };
   }
 
   try {
@@ -1164,14 +1405,14 @@ const runDailyScheduledBackup = async (reason: "startup" | "timer") => {
     logAppEvent("info", "Daily scheduled backup uploaded to Google Drive", driveResult);
     writeBackupScheduleState({ lastError: "", lastErrorAt: "" });
     sendBackupScheduleStatus();
-    return { backupPath, driveResult };
+    return { backupPath, driveResult, reportResult };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     writeBackupScheduleState({ lastError: message, lastErrorAt: new Date().toISOString() });
     driveCloud().recordFailure(message);
     logAppEvent("warn", "Daily scheduled Google Drive backup failed", { path: backupPath, message });
     sendBackupScheduleStatus();
-    return { backupPath, driveResult: null };
+    return { backupPath, driveResult: null, reportResult };
   }
 };
 
@@ -1194,6 +1435,7 @@ const formatShareMoney = (value?: number) =>
     minimumFractionDigits: 2,
     maximumFractionDigits: 2
   })}`;
+const WHATSAPP_PDF_MAX_BYTES = 18 * 1024 * 1024;
 
 const normalizeIndianPhone = (phone: string) => {
   const digits = phone.replace(/\D/g, "");
@@ -1210,6 +1452,14 @@ const shareStatusLabel = (status?: string) =>
 const buildWhatsAppMessage = (input: WhatsAppShareInput) => {
   const businessName = input.businessName?.trim() || "Autocare24";
   const customer = input.customerName?.trim() || "Customer";
+  const customMessage = input.message?.trim();
+  if (customMessage) return customMessage;
+  if (input.kind === "customer_chat") {
+    return [
+      `Hi ${customer},`,
+      `This is ${businessName}.`
+    ].filter(Boolean).join("\n");
+  }
   if (input.kind === "invoice") {
     return [
       `Hi ${customer},`,
@@ -1217,6 +1467,18 @@ const buildWhatsAppMessage = (input: WhatsAppShareInput) => {
       `Amount: ${formatShareMoney(input.grandTotal)}`,
       input.balanceDue && input.balanceDue > 0 ? `Balance due: ${formatShareMoney(input.balanceDue)}` : "Payment status: Paid",
       input.vehicleNumber ? `Vehicle: ${input.vehicleNumber}` : "",
+      "Thank you."
+    ].filter(Boolean).join("\n");
+  }
+  if (input.kind === "invoice_pdf") {
+    return [
+      `Hi ${customer},`,
+      `${businessName} invoice PDF is ready.`,
+      `Invoice: ${input.invoiceNumber || ""}`,
+      `Amount: ${formatShareMoney(input.grandTotal)}`,
+      input.balanceDue && input.balanceDue > 0 ? `Balance due: ${formatShareMoney(input.balanceDue)}` : "Payment status: Paid",
+      input.vehicleNumber ? `Vehicle: ${input.vehicleNumber}` : "",
+      "Please check the attached PDF.",
       "Thank you."
     ].filter(Boolean).join("\n");
   }
@@ -1268,12 +1530,85 @@ const buildWhatsAppMessage = (input: WhatsAppShareInput) => {
   ].filter(Boolean).join("\n");
 };
 
+const whatsappTemplateForShare = (kind: WhatsAppShareInput["kind"]) => {
+  if (kind === "invoice_pdf") return "invoice_pdf_ready";
+  if (kind === "invoice") return "invoice_ready";
+  if (kind === "due_reminder") return "payment_reminder";
+  if (kind === "quotation") return "quotation_ready";
+  if (kind === "job_card_pdf") return "job_card_pdf_ready";
+  if (kind === "job_card_status") return "job_card_update";
+  return "customer_chat";
+};
+
+const whatsappSourceForShare = (input: WhatsAppShareInput) => {
+  if (input.invoiceNumber) return { type: "invoice", id: input.invoiceNumber };
+  if (input.quotationNumber) return { type: "quotation", id: input.quotationNumber };
+  if (input.jobNumber) return { type: "job_card", id: input.jobNumber };
+  return { type: "customer", id: input.customerName || input.phone };
+};
+
+const whatsappVariablesForShare = (input: WhatsAppShareInput, message: string) => [
+  input.customerName || "Customer",
+  input.businessName || "Autocare24",
+  input.invoiceNumber || input.quotationNumber || input.jobNumber || "",
+  input.grandTotal === undefined ? "" : formatShareMoney(input.grandTotal),
+  input.balanceDue === undefined ? "" : formatShareMoney(input.balanceDue),
+  input.vehicleNumber || "",
+  shareStatusLabel(input.status) || "",
+  message
+].filter((value) => String(value || "").trim());
+
+const readWhatsAppPdfMedia = (input: WhatsAppShareInput): WhatsAppSendMessageInput["media"] | undefined => {
+  if (input.kind !== "invoice_pdf" && input.kind !== "job_card_pdf") return undefined;
+  if (!input.documentPath) throw new Error("PDF file is required before sending this WhatsApp document.");
+  const resolvedPath = path.resolve(input.documentPath);
+  if (!isInsideDirectory(app.getPath("documents"), resolvedPath)) {
+    throw new Error("WhatsApp PDF sharing can only send app-generated PDFs saved under Documents.");
+  }
+  if (path.extname(resolvedPath).toLowerCase() !== ".pdf") throw new Error("Only PDF files can be sent through this WhatsApp document flow.");
+  if (!fs.existsSync(resolvedPath)) throw new Error("PDF file was not found. Please generate the PDF again.");
+  const stat = fs.statSync(resolvedPath);
+  if (!stat.isFile()) throw new Error("PDF path is not a file.");
+  if (stat.size <= 0) throw new Error("PDF file is empty.");
+  if (stat.size > WHATSAPP_PDF_MAX_BYTES) throw new Error("PDF is too large for this WhatsApp send flow. Please reduce the PDF size.");
+  const data = fs.readFileSync(resolvedPath);
+  if (data.subarray(0, 5).toString("ascii") !== "%PDF-") throw new Error("The selected file is not a valid PDF.");
+  const fileName = safeExportFileName(input.documentFileName || path.basename(resolvedPath), "autocare24-document.pdf");
+  return {
+    fileName: fileName.toLowerCase().endsWith(".pdf") ? fileName : `${fileName}.pdf`,
+    mimeType: "application/pdf",
+    base64: data.toString("base64"),
+    sizeBytes: data.length
+  };
+};
+
+const buildWhatsAppBusinessSendInput = (input: WhatsAppShareInput): WhatsAppSendMessageInput => {
+  const phone = normalizeIndianPhone(input.phone || "");
+  const message = buildWhatsAppMessage(input);
+  const media = readWhatsAppPdfMedia(input);
+  return {
+    phone,
+    customerName: input.customerName,
+    mode: "template",
+    text: message,
+    templateName: whatsappTemplateForShare(input.kind),
+    languageCode: "en",
+    variables: whatsappVariablesForShare(input, message),
+    ...(media ? { media } : {}),
+    source: whatsappSourceForShare(input)
+  };
+};
+
 const registerIpcHandlers = () => {
   ipcMain.handle("app:openExternal", (_event, url: string) => {
     if (url !== APP_DEVELOPER.profileUrl) throw new Error("External link is not allowed.");
     return shell.openExternal(url).then(() => true);
   });
   ipcMain.handle("app:getInfo", authenticated(() => getAppInfo()));
+  ipcMain.handle("updates:status", authenticated(() => appUpdates().getStatus()));
+  ipcMain.handle("updates:check", authenticated(() => appUpdates().checkForUpdates()));
+  ipcMain.handle("updates:download", authenticated(() => appUpdates().downloadUpdate()));
+  ipcMain.handle("updates:install", authenticated(() => appUpdates().installUpdate()));
   ipcMain.handle("auth:status", async () => {
     if (currentSession) {
       const sessionId = currentSession.id;
@@ -1636,6 +1971,31 @@ const registerIpcHandlers = () => {
     fs.writeFileSync(result.filePath, csv, "utf8");
     return { ok: true, message: "Excel report exported successfully.", path: result.filePath };
   }));
+  ipcMain.handle("dailyReports:status", permitted("reports.export", () => dailyReportBackupStatus()));
+  ipcMain.handle("dailyReports:generate", permitted("reports.export", async () => {
+    const result = await createDailyReportBackup(localDate());
+    logAppEvent("info", "Manual daily report backup created", {
+      path: result.path,
+      reportDate: result.reportDate,
+      source: result.source,
+      driveUploaded: Boolean(result.driveUpload)
+    });
+    return result;
+  }));
+  ipcMain.handle("dailyReports:openFolder", permitted("reports.export", () => {
+    const state = readDailyReportBackupState();
+    if (state.lastReportPath && fs.existsSync(state.lastReportPath)) {
+      shell.showItemInFolder(state.lastReportPath);
+      return { ok: true, message: "Daily report archive highlighted.", path: state.lastReportPath };
+    }
+
+    const reportsFolder = path.join(dailyReportOutputRoot(), "daily-reports");
+    if (fs.existsSync(reportsFolder)) {
+      void shell.openPath(reportsFolder);
+      return { ok: true, message: "Daily reports folder opened.", path: reportsFolder };
+    }
+    return { ok: false, message: "No daily report backup folder is available yet." };
+  }));
   ipcMain.handle("developer:getDiagnostics", permitted("developer.access", () => getDeveloperDiagnostics()));
   ipcMain.handle("developer:scanDataHealth", permitted("developer.access", () => database.scanDataHealth()));
   ipcMain.handle("developer:runSafeRepair", permitted("developer.access", (_user, input: { repairCode: SafeRepairCode }) => {
@@ -1738,14 +2098,17 @@ const registerIpcHandlers = () => {
       path: downloaded.filePath
     };
   }));
+  ipcMain.handle("whatsapp:status", permitted("sharing.whatsapp", () => cloudData().getWhatsAppStatus()));
+  ipcMain.handle("whatsapp:conversations", permitted("sharing.whatsapp", (_user, query?: string) => cloudData().listWhatsAppConversations(query)));
+  ipcMain.handle("whatsapp:messages", permitted("sharing.whatsapp", (_user, conversationId: string) => cloudData().listWhatsAppMessages(conversationId)));
+  ipcMain.handle("whatsapp:templates", permitted("sharing.whatsapp", () => cloudData().listWhatsAppTemplates()));
+  ipcMain.handle("whatsapp:templatesSync", permitted("sharing.whatsapp", () => cloudData().syncWhatsAppTemplates()));
+  ipcMain.handle("whatsapp:sendMessage", permitted("sharing.whatsapp", (_user, input: WhatsAppSendMessageInput) => cloudData().sendWhatsAppMessage(input)));
   ipcMain.handle("sharing:openWhatsAppShare", permitted("sharing.whatsapp", async (_user, input: WhatsAppShareInput) => {
-    const phone = normalizeIndianPhone(input.phone || "");
-    const message = buildWhatsAppMessage(input);
-    const url = new URL(`https://wa.me/${phone}`);
-    url.searchParams.set("text", message);
-    await shell.openExternal(url.toString());
-    logAppEvent("info", "WhatsApp share opened", { kind: input.kind, phone });
-    return { ok: true, message: "WhatsApp message opened." };
+    const sendInput = buildWhatsAppBusinessSendInput(input);
+    const result = await cloudData().sendWhatsAppMessage(sendInput);
+    logAppEvent("info", "WhatsApp Business API message queued", { kind: input.kind, phone: sendInput.phone, messageId: result.message.id });
+    return { ok: true, message: sendInput.media ? "WhatsApp Business PDF sent." : "WhatsApp Business message sent.", path: result.message.id };
   }));
   ipcMain.handle("app:showItemInFolder", permitted("documents.printPdf", (_user, filePath: string) => {
     if (!filePath || !fs.existsSync(filePath)) return { ok: false, message: "PDF file was not found." };

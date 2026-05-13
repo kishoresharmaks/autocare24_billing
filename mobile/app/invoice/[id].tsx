@@ -1,17 +1,25 @@
 import { Alert, Share, StyleSheet, Text, View } from "react-native";
-import { router, useLocalSearchParams } from "expo-router";
+import { useLocalSearchParams } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { AppButton } from "../../src/components/AppButton";
 import { MetricCard } from "../../src/components/MetricCard";
 import { MetricGrid } from "../../src/components/MetricGrid";
 import { Screen } from "../../src/components/Screen";
-import { fetchInvoice } from "../../src/services/cloudApi";
+import { fetchBusinessSettings, fetchInvoice } from "../../src/services/cloudApi";
+import {
+  invoiceShareBlockReason,
+  normalizeWhatsAppPhone,
+  openInvoiceWhatsAppChat,
+  prepareInvoicePdf,
+  sharePreparedInvoicePdf,
+  type PreparedInvoicePdf
+} from "../../src/services/invoicePdfShare";
 import { colors } from "../../src/theme";
 import { formatDate, formatMoney, titleCase } from "../../src/utils/format";
 import { useRequireOwner } from "../../src/hooks/useRequireOwner";
 import { useSession } from "../../src/providers/SessionProvider";
-import type { InvoiceDetail, InvoiceItem, Payment } from "../../src/types/cloud";
+import type { BusinessSettings, InvoiceDetail, InvoiceItem, Payment } from "../../src/types/cloud";
 
 export default function InvoiceDetailScreen() {
   const guard = useRequireOwner();
@@ -23,6 +31,11 @@ export default function InvoiceDetailScreen() {
     queryKey: ["invoice", session.cloudUrl, session.token, invoiceId],
     queryFn: () => fetchInvoice(session.cloudUrl, session.token, invoiceId),
     enabled: Boolean(session.user && session.token && invoiceId && session.approvalStatus === "APPROVED")
+  });
+  const settingsQuery = useQuery({
+    queryKey: ["business-settings", session.cloudUrl, session.token],
+    queryFn: () => fetchBusinessSettings(session.cloudUrl, session.token),
+    enabled: Boolean(session.user && session.token && session.approvalStatus === "APPROVED")
   });
 
   if (guard) return guard;
@@ -51,8 +64,7 @@ export default function InvoiceDetailScreen() {
       subtitle={invoice ? `${invoice.customer?.name || invoice.customerName || "Customer"} - ${formatDate(invoice.invoiceDate)}` : "Cloud invoice detail"}
       right={
         <View style={styles.headerActions}>
-          <AppButton label="Back" onPress={() => router.back()} variant="secondary" style={styles.headerButton} />
-          <AppButton label="Share" onPress={() => void shareInvoice()} disabled={!invoice} style={styles.headerButton} />
+          <AppButton label="Share Text" onPress={() => void shareInvoice()} disabled={!invoice} style={styles.headerButton} />
         </View>
       }
       refreshing={invoiceQuery.isFetching}
@@ -64,6 +76,7 @@ export default function InvoiceDetailScreen() {
         <Text style={styles.error}>{invoiceQuery.error instanceof Error ? invoiceQuery.error.message : "Unable to load invoice."}</Text>
       ) : null}
       {invoiceQuery.isLoading ? <Text style={styles.empty}>Loading invoice...</Text> : null}
+      {invoice ? <InvoiceSharePanel invoice={invoice} settings={settingsQuery.data} onShareText={shareInvoice} /> : null}
       {invoice ? <InvoiceContent invoice={invoice} /> : null}
     </Screen>
   );
@@ -170,6 +183,127 @@ function InvoiceContent({ invoice }: { invoice: InvoiceDetail }) {
   );
 }
 
+function InvoiceSharePanel({
+  invoice,
+  settings,
+  onShareText
+}: {
+  invoice: InvoiceDetail;
+  settings?: BusinessSettings;
+  onShareText: () => Promise<void>;
+}) {
+  const session = useSession();
+  const [preparingPdf, setPreparingPdf] = useState(false);
+  const [openingWhatsapp, setOpeningWhatsapp] = useState(false);
+  const [sharingAgain, setSharingAgain] = useState(false);
+  const [lastPdf, setLastPdf] = useState<PreparedInvoicePdf | null>(null);
+  const phone = normalizeWhatsAppPhone(invoice.customer?.phone || invoice.customerPhone);
+  const blockReason = invoiceShareBlockReason(invoice, phone);
+  const disabled = Boolean(blockReason || preparingPdf || openingWhatsapp || sharingAgain);
+
+  const openChat = async () => {
+    setOpeningWhatsapp(true);
+    try {
+      await openInvoiceWhatsAppChat({ invoice, settings });
+    } catch (error) {
+      Alert.alert("Unable to open WhatsApp", error instanceof Error ? error.message : "WhatsApp is not available right now.");
+    } finally {
+      setOpeningWhatsapp(false);
+    }
+  };
+
+  const sharePdf = async () => {
+    if (blockReason) {
+      Alert.alert("WhatsApp PDF unavailable", blockReason);
+      return;
+    }
+    setPreparingPdf(true);
+    try {
+      const pdf = await prepareInvoicePdf({ invoice, settings, cloudUrl: session.cloudUrl, token: session.token });
+      await sharePreparedInvoicePdf(pdf);
+      setLastPdf(pdf);
+      Alert.alert(
+        "Invoice PDF ready",
+        "Choose WhatsApp in the share sheet to send the PDF. Open the customer chat if you need the prepared message and number.",
+        [
+          { text: "Open WhatsApp chat", onPress: () => void openChat() },
+          { text: "Done", style: "cancel" }
+        ]
+      );
+    } catch (error) {
+      Alert.alert("Unable to share invoice PDF", error instanceof Error ? error.message : "Invoice PDF sharing failed.");
+    } finally {
+      setPreparingPdf(false);
+    }
+  };
+
+  const shareLastPdf = async () => {
+    if (!lastPdf) return;
+    setSharingAgain(true);
+    try {
+      await sharePreparedInvoicePdf(lastPdf);
+    } catch (error) {
+      Alert.alert("Unable to share PDF", error instanceof Error ? error.message : "Invoice PDF sharing failed.");
+    } finally {
+      setSharingAgain(false);
+    }
+  };
+
+  return (
+    <Section title="WhatsApp PDF">
+      <View style={styles.whatsappTopRow}>
+        <View style={[styles.whatsappChip, phone.valid ? null : styles.whatsappChipMissing]}>
+          <Text style={[styles.whatsappChipText, phone.valid ? null : styles.whatsappChipTextMissing]}>
+            {phone.valid ? `WhatsApp to: ${phone.display}` : "Customer phone missing"}
+          </Text>
+        </View>
+        <Text style={styles.whatsappStatus} numberOfLines={1}>
+          {lastPdf ? "PDF ready" : "Real invoice PDF"}
+        </Text>
+      </View>
+      <Text style={styles.shareHelp}>
+        Generate the invoice PDF, choose WhatsApp in the share sheet, then send it to the loaded customer number.
+      </Text>
+      {blockReason ? <Text style={styles.error}>{blockReason}</Text> : null}
+      <View style={styles.shareActions}>
+        <AppButton
+          label={preparingPdf ? "Preparing PDF..." : "Send PDF on WhatsApp"}
+          onPress={() => void sharePdf()}
+          disabled={disabled}
+          style={styles.shareButton}
+        />
+        <AppButton
+          label={openingWhatsapp ? "Opening..." : "Open WhatsApp chat"}
+          onPress={() => void openChat()}
+          disabled={disabled}
+          variant="secondary"
+          style={styles.shareButton}
+        />
+      </View>
+      <View style={styles.shareActions}>
+        <AppButton label="Share invoice text" onPress={() => void onShareText()} variant="secondary" style={styles.shareButton} />
+        {lastPdf ? (
+          <AppButton
+            label={sharingAgain ? "Sharing..." : "Share PDF again"}
+            onPress={() => void shareLastPdf()}
+            disabled={sharingAgain}
+            variant="secondary"
+            style={styles.shareButton}
+          />
+        ) : null}
+      </View>
+      {lastPdf ? (
+        <View style={styles.pdfReadyBox}>
+          <Text style={styles.pdfReadyTitle}>PDF saved on this phone</Text>
+          <Text style={styles.pdfReadyText} numberOfLines={2}>
+            {lastPdf.fileName}
+          </Text>
+        </View>
+      ) : null}
+    </Section>
+  );
+}
+
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return (
     <View style={styles.section}>
@@ -253,6 +387,72 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 16,
     fontWeight: "900"
+  },
+  whatsappTopRow: {
+    minHeight: 34,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8
+  },
+  whatsappChip: {
+    maxWidth: "68%",
+    borderRadius: 999,
+    backgroundColor: colors.purpleSoft,
+    paddingHorizontal: 10,
+    paddingVertical: 7
+  },
+  whatsappChipMissing: {
+    backgroundColor: colors.redSoft
+  },
+  whatsappChipText: {
+    color: colors.primaryDark,
+    fontSize: 12,
+    fontWeight: "900"
+  },
+  whatsappChipTextMissing: {
+    color: colors.danger
+  },
+  whatsappStatus: {
+    flex: 1,
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: "800",
+    textAlign: "right"
+  },
+  shareHelp: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: "600",
+    lineHeight: 18
+  },
+  shareActions: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8
+  },
+  shareButton: {
+    minWidth: 148,
+    flexGrow: 1,
+    flexBasis: "48%"
+  },
+  pdfReadyBox: {
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.greenSoft,
+    padding: 10,
+    gap: 2
+  },
+  pdfReadyTitle: {
+    color: colors.success,
+    fontSize: 12,
+    fontWeight: "900"
+  },
+  pdfReadyText: {
+    color: colors.text,
+    fontSize: 12,
+    fontWeight: "700"
   },
   infoGrid: {
     flexDirection: "row",

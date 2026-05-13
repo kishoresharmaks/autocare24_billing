@@ -2,11 +2,13 @@ import { StyleSheet, Text, View } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { fetchProfit } from "../../src/services/cloudApi";
+import { ExportActions } from "../../src/components/ExportActions";
 import { MetricCard } from "../../src/components/MetricCard";
 import { MetricGrid } from "../../src/components/MetricGrid";
 import { RangeSelector } from "../../src/components/RangeSelector";
 import { Screen } from "../../src/components/Screen";
 import { colors } from "../../src/theme";
+import { exportProfitDocument, type ExportFormat } from "../../src/services/reportExport";
 import type { DateRangePreset, Expense } from "../../src/types/cloud";
 import { formatDateTime, formatMoney } from "../../src/utils/format";
 import { useRequireOwner } from "../../src/hooks/useRequireOwner";
@@ -24,6 +26,12 @@ export default function ProfitTab() {
 
   if (guard) return guard;
 
+  async function exportProfit(format: ExportFormat) {
+    if (!profitQuery.data) throw new Error("Profit data is not loaded yet.");
+    if (profitQuery.error) throw new Error("Refresh profit data before exporting.");
+    await exportProfitDocument({ profit: profitQuery.data, format });
+  }
+
   return (
     <Screen
       title="Profit & Expense"
@@ -34,6 +42,7 @@ export default function ProfitTab() {
       showHome
     >
       {profitQuery.error ? <Text style={styles.error}>{profitQuery.error instanceof Error ? profitQuery.error.message : "Unable to load profit."}</Text> : null}
+      <ExportActions disabled={!profitQuery.data || profitQuery.isFetching || Boolean(profitQuery.error)} onExport={exportProfit} />
       <MetricGrid>
         <MetricCard label="Cash Profit" value={formatMoney(profitQuery.data?.cashProfit)} tone={(profitQuery.data?.cashProfit || 0) >= 0 ? "success" : "danger"} />
         <MetricCard label="Margin" value={`${Number(profitQuery.data?.profitMargin || 0).toFixed(2)}%`} tone="info" />

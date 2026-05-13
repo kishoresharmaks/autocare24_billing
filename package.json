@@ -1,6 +1,6 @@
 {
   "name": "autocare24-billing",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Production Windows billing software for Autocare24 Bike & Car Detailing Studio with invoices, quotations, job cards, stock, reports, backup, PDF, and WhatsApp sharing.",
   "main": "dist-electron/electron/main.js",
   "author": "Kishoresharma",
@@ -17,11 +17,13 @@
     "sync-api:start": "npm --prefix cloud-api start",
     "sync-api:migrate": "npm --prefix cloud-api run migrate",
     "package": "npm run package:windows",
-    "package:windows": "npm run build && electron-builder --win nsis",
+    "package:windows": "npm run build && electron-builder --win nsis --publish never",
+    "release:windows": "npm run build && electron-builder --win nsis --publish always",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^5.1.0",
+    "electron-updater": "^6.8.3",
     "lucide-react": "^0.562.0",
     "qrcode": "^1.5.4",
     "react": "^19.2.1",
@@ -44,9 +46,17 @@
     "appId": "com.autocare24.billing",
     "productName": "Autocare24 Billing",
     "copyright": "Copyright (c) 2026 Autocare24. All rights reserved.",
+    "electronUpdaterCompatibility": ">=2.16",
     "directories": {
       "output": "release"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "kishoresharmaks",
+        "repo": "autocare24_billing"
+      }
+    ],
     "files": [
       "dist/**/*",
       "dist-electron/**/*",

@@ -56,6 +56,7 @@ const movementLabel = (type: string) => {
     purchase: "Stock added",
     usage: "Stock removed",
     sale: "Sold on bill",
+    stock_sale: "Stock sold",
     adjustment: "Added correction",
     return: "Returned stock",
     damage: "Damaged/wasted",
@@ -125,10 +126,13 @@ export function InventoryPage({
     itemId: "",
     type: "usage",
     quantity: 0,
+    saleAmount: 0,
+    paymentMode: "Cash",
     reference: "",
     notes: "",
     movementDate: todayLocal()
   });
+  const [saleAmountEdited, setSaleAmountEdited] = useState(false);
 
   const canManagePurchaseRecords = hasPermission(currentUser, "stock.purchase");
   const visibleTabs = inventoryTabs.filter((item) => hasPermission(currentUser, item.permission));
@@ -193,11 +197,43 @@ export function InventoryPage({
     }
   };
 
+  const quickSaleAmountFor = (itemId: string, quantity: number) => {
+    const item = items.find((row) => row.id === itemId);
+    return money((item?.retailPrice || 0) * (Number.isFinite(quantity) ? quantity : 0));
+  };
+
+  const updateRemoveItem = (itemId: string) => {
+    setRemoveForm((current) => ({
+      ...current,
+      itemId,
+      saleAmount: current.type === "stock_sale" && !saleAmountEdited ? quickSaleAmountFor(itemId, current.quantity) : current.saleAmount
+    }));
+  };
+
+  const updateRemoveQuantity = (quantity: number) => {
+    setRemoveForm((current) => ({
+      ...current,
+      quantity,
+      saleAmount: current.type === "stock_sale" && !saleAmountEdited ? quickSaleAmountFor(current.itemId, quantity) : current.saleAmount
+    }));
+  };
+
+  const updateRemoveType = (type: InventoryMovementInput["type"]) => {
+    setSaleAmountEdited(false);
+    setRemoveForm((current) => ({
+      ...current,
+      type,
+      saleAmount: type === "stock_sale" ? quickSaleAmountFor(current.itemId, current.quantity) : 0,
+      paymentMode: type === "stock_sale" ? current.paymentMode || "Cash" : "Cash"
+    }));
+  };
+
   const removeStock = async () => {
     try {
       await window.autocare.addInventoryMovement(removeForm);
-      notify("Stock removed.");
-      setRemoveForm({ ...removeForm, quantity: 0, reference: "", notes: "" });
+      notify(removeForm.type === "stock_sale" ? "Stock sale recorded." : "Stock removed.");
+      setRemoveForm({ ...removeForm, quantity: 0, saleAmount: 0, paymentMode: "Cash", reference: "", notes: "" });
+      setSaleAmountEdited(false);
       await load();
       onChanged();
     } catch (error) {
@@ -310,7 +346,7 @@ export function InventoryPage({
         <div className="panel-heading">
           <div>
             <h2>Inventory management</h2>
-            <p>Add stock when you buy items. Remove stock when items are used, damaged, or wasted.</p>
+            <p>Add stock when you buy items. Remove stock when items are used, sold, damaged, or wasted.</p>
           </div>
           <div className="segmented">
             {visibleTabs.map((item) => (
@@ -479,15 +515,17 @@ export function InventoryPage({
         <div className="page-grid">
           <section className="panel wide-panel">
             <h2>Remove stock</h2>
-            <p className="muted">Use this for items used outside a bill, damaged stock, wastage, or correction. Bills and service recipes already remove stock automatically.</p>
+            <p className="muted">Use this for items used outside a bill, quick cash stock sales, damaged stock, wastage, or correction. Bills and service recipes already remove stock automatically.</p>
             <div className="form-grid four">
-              <label>Item<select value={removeForm.itemId} onChange={(event) => setRemoveForm({ ...removeForm, itemId: event.currentTarget.value })}><option value="">Select item</option>{items.filter((item) => item.active).map((item) => <option key={item.id} value={item.id}>{item.name} ({item.currentQuantity} {item.unit} available)</option>)}</select></label>
-              <label>Reason<select value={removeForm.type} onChange={(event) => setRemoveForm({ ...removeForm, type: event.currentTarget.value as InventoryMovementInput["type"] })}><option value="usage">Used in studio</option><option value="damage">Damaged / wasted</option></select></label>
-              <label>Quantity to remove<input type="number" min="0" step="0.01" value={removeForm.quantity} onChange={(event) => setRemoveForm({ ...removeForm, quantity: Number(event.currentTarget.value) })} /></label>
+              <label>Item<select value={removeForm.itemId} onChange={(event) => updateRemoveItem(event.currentTarget.value)}><option value="">Select item</option>{items.filter((item) => item.active).map((item) => <option key={item.id} value={item.id}>{item.name} ({item.currentQuantity} {item.unit} available)</option>)}</select></label>
+              <label>Reason<select value={removeForm.type} onChange={(event) => updateRemoveType(event.currentTarget.value as InventoryMovementInput["type"])}><option value="usage">Used in studio</option><option value="stock_sale">Stock sold</option><option value="damage">Damaged / wasted</option></select></label>
+              <label>Quantity to remove<input type="number" min="0" step="0.01" value={removeForm.quantity} onChange={(event) => updateRemoveQuantity(Number(event.currentTarget.value))} /></label>
               <label>Date<input type="date" value={removeForm.movementDate} onChange={(event) => setRemoveForm({ ...removeForm, movementDate: event.currentTarget.value })} /></label>
+              {removeForm.type === "stock_sale" && <label>Sale amount<input type="number" min="0" step="0.01" value={removeForm.saleAmount || 0} onChange={(event) => { setSaleAmountEdited(true); setRemoveForm({ ...removeForm, saleAmount: Number(event.currentTarget.value) }); }} /></label>}
+              {removeForm.type === "stock_sale" && <label>Payment mode<select value={removeForm.paymentMode || "Cash"} onChange={(event) => setRemoveForm({ ...removeForm, paymentMode: event.currentTarget.value as PaymentMode })}>{paymentModes.map((mode) => <option key={mode} value={mode}>{mode}</option>)}</select></label>}
               <label>Reference<input placeholder="Optional" value={removeForm.reference} onChange={(event) => setRemoveForm({ ...removeForm, reference: event.currentTarget.value })} /></label>
               <label className="wide-input">Notes<input placeholder="Example: spilled, used for demo, correction" value={removeForm.notes} onChange={(event) => setRemoveForm({ ...removeForm, notes: event.currentTarget.value })} /></label>
-              <button className="primary-action align-bottom" onClick={removeStock}>Remove stock</button>
+              <button className="primary-action align-bottom" onClick={removeStock}>{removeForm.type === "stock_sale" ? "Record stock sale" : "Remove stock"}</button>
             </div>
           </section>
         </div>
@@ -569,15 +607,15 @@ function InventoryItemList({ items }: { items: InventoryItem[] }) {
 
 function MovementList({ movements }: { movements: InventoryMovement[] }) {
   if (!movements.length) return <div className="empty-state subtle">No stock movements.</div>;
-  return <div className="stack-list">{movements.slice(0, 8).map((row) => <div className="stack-row" key={row.id}><div><strong>{row.itemName}</strong><span>{movementLabel(row.type)} | {row.quantity} {row.itemUnit} | {row.movementDate}</span></div><b>{formatMoney(row.quantity * row.unitCost)}</b></div>)}</div>;
+  return <div className="stack-list">{movements.slice(0, 8).map((row) => <div className="stack-row" key={row.id}><div><strong>{row.itemName}</strong><span>{movementLabel(row.type)} | {row.quantity} {row.itemUnit} | {row.movementDate}{row.type === "stock_sale" ? ` | ${row.paymentMode || "Cash"}` : ""}</span></div><b>{row.type === "stock_sale" ? formatMoney(row.saleAmount) : formatMoney(row.quantity * row.unitCost)}</b></div>)}</div>;
 }
 
 function MovementTable({ movements }: { movements: InventoryMovement[] }) {
   if (!movements.length) return <div className="empty-state subtle">No movements available.</div>;
   return (
     <div className="table-wrap">
-      <table><thead><tr><th>Date</th><th>Item</th><th>Group</th><th>Action</th><th>Qty</th><th>Cost value</th><th>Reference</th><th>Notes</th></tr></thead><tbody>
-        {movements.map((row) => <tr key={row.id}><td>{row.movementDate}</td><td>{row.itemName}</td><td>{inventoryTypeLabel(row.itemType)}</td><td>{movementLabel(row.type)}</td><td>{row.quantity} {row.itemUnit}</td><td>{formatMoney(row.quantity * row.unitCost)}</td><td>{row.reference}</td><td>{row.notes}</td></tr>)}
+      <table><thead><tr><th>Date</th><th>Item</th><th>Group</th><th>Action</th><th>Qty</th><th>Cost value</th><th>Sale value</th><th>Payment</th><th>Reference</th><th>Notes</th></tr></thead><tbody>
+        {movements.map((row) => <tr key={row.id}><td>{row.movementDate}</td><td>{row.itemName}</td><td>{inventoryTypeLabel(row.itemType)}</td><td>{movementLabel(row.type)}</td><td>{row.quantity} {row.itemUnit}</td><td>{formatMoney(row.quantity * row.unitCost)}</td><td>{row.type === "stock_sale" ? formatMoney(row.saleAmount) : "-"}</td><td>{row.type === "stock_sale" ? row.paymentMode || "Cash" : "-"}</td><td>{row.reference}</td><td>{row.notes}</td></tr>)}
       </tbody></table>
     </div>
   );

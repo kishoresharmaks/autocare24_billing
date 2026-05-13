@@ -1,8 +1,9 @@
-import { BarChart3, CalendarDays, Download, FileSpreadsheet, FileText, Printer, RefreshCw, Save } from "lucide-react";
+import { Archive, BarChart3, CalendarDays, Download, FileSpreadsheet, FileText, FolderOpen, HardDriveUpload, Printer, RefreshCw, Save } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type {
   AppUser,
   DateRangePreset,
+  DailyReportBackupStatus,
   Expense,
   ExpenseInput,
   InventoryItem,
@@ -59,6 +60,7 @@ const timestampFilePart = () => {
 };
 const reportFileName = (kind: ReportExportKind, rangeLabel: string, extension: "pdf" | "csv") =>
   `autocare24-${reportExportLabel(kind)}-${safeFilePart(rangeLabel)}-${timestampFilePart()}.${extension}`;
+const formatDateTime = (value: string) => value ? new Date(value).toLocaleString() : "Not generated yet";
 
 export function ReportsPage({
   refreshKey,
@@ -81,6 +83,8 @@ export function ReportsPage({
   const [savingExpense, setSavingExpense] = useState(false);
   const [busyExport, setBusyExport] = useState("");
   const [busyPdf, setBusyPdf] = useState(false);
+  const [dailyReportStatus, setDailyReportStatus] = useState<DailyReportBackupStatus | null>(null);
+  const [busyDailyReport, setBusyDailyReport] = useState(false);
 
   const filter = useMemo<ReportDateFilter>(() => {
     if (fromDate || toDate) return { preset, fromDate, toDate };
@@ -98,10 +102,20 @@ export function ReportsPage({
     }
   };
 
+  const loadDailyReportStatus = async () => {
+    if (!hasPermission(currentUser, "reports.export")) return;
+    try {
+      setDailyReportStatus(await window.autocare.dailyReportBackupStatus());
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to load daily report backup status.");
+    }
+  };
+
   useEffect(() => {
     setReport(null);
     setProfit(null);
     void loadReports();
+    void loadDailyReportStatus();
   }, [refreshKey, currentUser.id, currentUser.permissions.join("|"), filter]);
 
   if (!hasPermission(currentUser, "reports.view")) {
@@ -156,6 +170,29 @@ export function ReportsPage({
       notify(error instanceof Error ? error.message : "Unable to save report PDF.");
     } finally {
       setBusyPdf(false);
+    }
+  };
+
+  const generateDailyReportBackup = async () => {
+    if (!hasPermission(currentUser, "reports.export")) return notify("Report export access is not enabled for this role.");
+    setBusyDailyReport(true);
+    try {
+      const result = await window.autocare.generateDailyReportBackup();
+      notify(result.path ? `${result.message} ${result.path}` : result.message);
+      await loadDailyReportStatus();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to generate daily report backup.");
+    } finally {
+      setBusyDailyReport(false);
+    }
+  };
+
+  const openDailyReportBackupFolder = async () => {
+    try {
+      const result = await window.autocare.openDailyReportBackupFolder();
+      notify(result.path ? `${result.message} ${result.path}` : result.message);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to open daily report backup folder.");
     }
   };
 
@@ -229,6 +266,43 @@ export function ReportsPage({
               <Download size={17} /> {busyExport === "full" ? "Exporting..." : "Full bundle"}
             </button>
           </div>
+        </div>
+      </section>}
+
+      {hasPermission(currentUser, "reports.export") && <section className="daily-report-backup-panel no-print" aria-label="Daily report backup">
+        <div className="daily-report-backup-header">
+          <div>
+            <span className="eyebrow">Daily backup archive</span>
+            <h3>Sales, stock, and pending dues</h3>
+            <p>Creates one permanent zip per day with PDF, CSV files, raw JSON, and file hashes.</p>
+          </div>
+          <Archive size={22} />
+        </div>
+        <div className="daily-report-backup-grid">
+          <div className="daily-report-backup-item">
+            <span>Last report</span>
+            <strong>{formatDateTime(dailyReportStatus?.lastReportAt || "")}</strong>
+            <small>{dailyReportStatus?.lastReportDate || "No daily archive found"}</small>
+          </div>
+          <div className="daily-report-backup-item">
+            <span>Next automatic run</span>
+            <strong>{formatDateTime(dailyReportStatus?.nextRunAt || "")}</strong>
+            <small>{dailyReportStatus?.scheduledTime || "Uses backup schedule"}</small>
+          </div>
+          <div className="daily-report-backup-item">
+            <span>Google Drive</span>
+            <strong>{dailyReportStatus?.lastDriveUploadAt ? "Uploaded" : "Not uploaded yet"}</strong>
+            <small>{dailyReportStatus?.lastDriveUploadName || "Uploads when Drive is connected"}</small>
+          </div>
+        </div>
+        {dailyReportStatus?.lastError && <div className="daily-report-backup-warning">{dailyReportStatus.lastError}</div>}
+        <div className="daily-report-backup-actions">
+          <button className="primary-action" disabled={busyDailyReport} onClick={() => void generateDailyReportBackup()}>
+            <HardDriveUpload size={17} /> {busyDailyReport ? "Generating..." : "Generate Now"}
+          </button>
+          <button className="ghost-button" onClick={() => void openDailyReportBackupFolder()}>
+            <FolderOpen size={17} /> Open Folder
+          </button>
         </div>
       </section>}
 
@@ -308,10 +382,15 @@ function SalesReport({
   conversionRate: number;
   summary?: boolean;
 }) {
+  const invoiceRevenue = report.invoiceRevenue ?? report.revenue;
+  const quickStockSales = report.quickStockSales ?? 0;
+  const totalSales = report.totalSales ?? money(invoiceRevenue + quickStockSales);
   return (
     <div className="report-grid">
       <div className="metric-strip">
-        <Metric label="Billed value" value={formatMoney(report.revenue)} />
+        <Metric label="Invoice billed" value={formatMoney(invoiceRevenue)} />
+        <Metric label="Quick stock sales" value={formatMoney(quickStockSales)} tone={quickStockSales ? "ok" : undefined} />
+        <Metric label="Total sales" value={formatMoney(totalSales)} />
         <Metric label="Collected" value={formatMoney(report.paidAmount)} tone="ok" />
         <Metric label="Pending due" value={formatMoney(report.balanceDue)} tone={report.balanceDue ? "warn" : "ok"} />
         <Metric label="Invoices" value={String(report.invoiceCount)} />
@@ -323,23 +402,25 @@ function SalesReport({
         <div className="panel-heading">
           <div>
             <h2>Daily sales trend</h2>
-            <p>Collected payments and billed value by date.</p>
+            <p>Collected payments and total sales by date.</p>
           </div>
         </div>
         <LineAreaChart
           points={report.salesTrend}
           primaryKey="paidAmount"
-          secondaryKey="billedValue"
+          secondaryKey="totalSales"
           primaryLabel="Collected"
-          secondaryLabel="Billed"
+          secondaryLabel="Total sales"
         />
       </section>
 
       <section className="panel">
-        <h2>Billed, collected, due</h2>
+        <h2>Invoice sales, quick sales, due</h2>
         <HorizontalBars
           rows={[
-            { label: "Billed", value: report.revenue },
+            { label: "Invoice billed", value: invoiceRevenue },
+            { label: "Quick stock sales", value: quickStockSales },
+            { label: "Total sales", value: totalSales },
             { label: "Collected", value: report.paidAmount },
             { label: "Due", value: report.balanceDue, tone: "warn" }
           ]}
@@ -748,7 +829,7 @@ function InventoryMovementTable({ movements }: { movements: InventoryMovement[] 
   return (
     <div className="table-wrap">
       <table className="compact-table">
-        <thead><tr><th>Date</th><th>Item</th><th>Type</th><th>Qty</th><th>Value</th><th>Reference</th></tr></thead>
+        <thead><tr><th>Date</th><th>Item</th><th>Type</th><th>Qty</th><th>Cost</th><th>Sale</th><th>Payment</th><th>Reference</th></tr></thead>
         <tbody>
           {movements.slice(0, 16).map((movement) => (
             <tr key={movement.id}>
@@ -757,6 +838,8 @@ function InventoryMovementTable({ movements }: { movements: InventoryMovement[] 
               <td>{statusLabel(movement.type)}</td>
               <td>{movement.quantity} {movement.itemUnit}</td>
               <td>{formatMoney(movement.quantity * movement.unitCost)}</td>
+              <td>{movement.type === "stock_sale" ? formatMoney(movement.saleAmount) : "-"}</td>
+              <td>{movement.type === "stock_sale" ? movement.paymentMode || "Cash" : "-"}</td>
               <td>{movement.reference || movement.notes || "-"}</td>
             </tr>
           ))}

@@ -14,7 +14,7 @@ export type InvoiceDensity = "compact" | "standard" | "comfortable";
 export type InvoiceLogoSize = "small" | "medium" | "large";
 export type InvoiceWatermarkPlacement = "bottom-right" | "center" | "top-right";
 export type InventoryItemType = "consumable" | "retail";
-export type InventoryMovementType = "purchase" | "usage" | "sale" | "adjustment" | "return" | "damage" | "invoice_cancel_reversal";
+export type InventoryMovementType = "purchase" | "usage" | "sale" | "stock_sale" | "adjustment" | "return" | "damage" | "invoice_cancel_reversal";
 export type EnquiryStatus = "new" | "contacted" | "follow_up" | "visited" | "converted" | "lost";
 export type EnquirySource = "Walk-in" | "Phone" | "WhatsApp" | "Instagram" | "Google" | "Referral" | "Other";
 export type VehicleType = "car" | "bike" | "other";
@@ -591,6 +591,9 @@ export interface ReportDateFilter {
 export interface ReportData {
   rangeLabel: string;
   revenue: number;
+  invoiceRevenue: number;
+  quickStockSales: number;
+  totalSales: number;
   invoiceCount: number;
   paidAmount: number;
   balanceDue: number;
@@ -603,7 +606,7 @@ export interface ReportData {
   dues: InvoiceSummary[];
   topServices: Array<{ name: string; quantity: number; revenue: number }>;
   paymentModes: Array<{ mode: PaymentMode; amount: number }>;
-  salesTrend: Array<{ date: string; label: string; billedValue: number; paidAmount: number; balanceDue: number }>;
+  salesTrend: Array<{ date: string; label: string; billedValue: number; quickStockSales: number; totalSales: number; paidAmount: number; balanceDue: number }>;
   inventory: InventoryDashboardData;
   enquiries: EnquiryReportData;
   jobCards: JobCardReportData;
@@ -660,6 +663,26 @@ export interface SaveResult {
   path?: string;
 }
 
+export type AppUpdateState = "idle" | "checking" | "available" | "not-available" | "downloading" | "downloaded" | "error" | "disabled";
+
+export interface AppUpdateStatus {
+  state: AppUpdateState;
+  currentVersion: string;
+  availableVersion: string;
+  releaseName: string;
+  releaseDate: string;
+  releaseNotes: string;
+  progressPercent: number;
+  transferredBytes: number;
+  totalBytes: number;
+  bytesPerSecond: number;
+  message: string;
+  error: string;
+  checkedAt: string;
+  updatedAt: string;
+  packaged: boolean;
+}
+
 export interface PrintInput {
   pageSize?: InvoicePaperSize;
   requiredPermission?: PermissionKey;
@@ -703,6 +726,24 @@ export interface DriveBackupResult extends SaveResult {
   sizeBytes?: number;
 }
 
+export interface DailyReportBackupStatus {
+  scheduledTime: string;
+  nextRunAt: string;
+  lastReportAt: string;
+  lastReportDate: string;
+  lastReportPath: string;
+  lastDriveUploadAt: string;
+  lastDriveUploadName: string;
+  lastError: string;
+}
+
+export interface DailyReportBackupResult extends SaveResult {
+  reportDate: string;
+  generatedAt: string;
+  source: "cloud-api" | "local-database";
+  driveUpload?: DriveBackupResult | null;
+}
+
 export interface BackupCloudSnapshotStatus {
   included: boolean;
   exportedAt: string;
@@ -727,7 +768,7 @@ export interface BackupScheduleStatus {
   lastError: string;
 }
 
-export type WhatsAppShareKind = "invoice" | "due_reminder" | "job_card_status" | "job_card_pdf" | "quotation";
+export type WhatsAppShareKind = "invoice" | "invoice_pdf" | "due_reminder" | "job_card_status" | "job_card_pdf" | "quotation" | "customer_chat";
 
 export interface WhatsAppShareInput {
   kind: WhatsAppShareKind;
@@ -746,6 +787,97 @@ export interface WhatsAppShareInput {
   balanceDue?: number;
   expectedDeliveryDate?: string;
   expectedDeliveryTime?: string;
+  message?: string;
+  documentPath?: string;
+  documentFileName?: string;
+}
+
+export type WhatsAppMessageMode = "text" | "template";
+export type WhatsAppMessageDirection = "inbound" | "outbound";
+export type WhatsAppMessageStatus = "queued" | "sent" | "delivered" | "read" | "failed" | "received";
+
+export interface WhatsAppBusinessStatus {
+  enabled: boolean;
+  configured: boolean;
+  webhookReady: boolean;
+  phoneNumberId: string;
+  businessAccountId: string;
+  displayPhoneNumber: string;
+  graphVersion: string;
+  templatesCount: number;
+  lastTemplateSyncAt: string;
+  webhookVerifiedAt: string;
+  message: string;
+}
+
+export interface WhatsAppTemplate {
+  name: string;
+  languageCode: string;
+  status: string;
+  category: string;
+  components: unknown[];
+  updatedAt: string;
+}
+
+export interface WhatsAppConversation {
+  id: string;
+  customerId: string;
+  customerName: string;
+  phone: string;
+  displayName: string;
+  lastMessagePreview: string;
+  lastMessageAt: string;
+  lastInboundAt: string;
+  unreadCount: number;
+  status: string;
+  canSendFreeform: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WhatsAppMessage {
+  id: string;
+  conversationId: string;
+  whatsappMessageId: string;
+  direction: WhatsAppMessageDirection;
+  messageType: "text" | "template" | "image" | "document" | "unknown";
+  status: WhatsAppMessageStatus;
+  phone: string;
+  textBody: string;
+  templateName: string;
+  sourceType: string;
+  sourceId: string;
+  errorMessage: string;
+  payload: Record<string, unknown>;
+  timestamp: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WhatsAppSendMessageInput {
+  phone: string;
+  customerId?: string;
+  customerName?: string;
+  mode: WhatsAppMessageMode;
+  text?: string;
+  templateName?: string;
+  languageCode?: string;
+  variables?: string[];
+  media?: {
+    fileName: string;
+    mimeType: "application/pdf";
+    base64: string;
+    sizeBytes: number;
+  };
+  source?: {
+    type: string;
+    id: string;
+  };
+}
+
+export interface WhatsAppSendMessageResult {
+  message: WhatsAppMessage;
+  conversation: WhatsAppConversation;
 }
 
 export interface DataHealthIssue {
@@ -891,6 +1023,9 @@ export interface InventoryMovement {
   type: InventoryMovementType;
   quantity: number;
   unitCost: number;
+  saleAmount: number;
+  saleUnitPrice: number;
+  paymentMode: PaymentMode | "";
   reference: string;
   notes: string;
   movementDate: string;
@@ -954,6 +1089,8 @@ export interface InventoryMovementInput {
   itemId: string;
   type: Exclude<InventoryMovementType, "purchase" | "sale" | "invoice_cancel_reversal">;
   quantity: number;
+  saleAmount?: number;
+  paymentMode?: PaymentMode;
   reference: string;
   notes: string;
   movementDate: string;

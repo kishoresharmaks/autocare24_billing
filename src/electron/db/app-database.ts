@@ -81,6 +81,8 @@ import type {
   PaymentStatus,
   PermissionKey,
   ProfitReportData,
+  PurchaseRecord,
+  PurchaseRecordDocument,
   QuotationDetail,
   QuotationItem,
   QuotationItemInput,
@@ -1626,7 +1628,7 @@ export class AppDatabase {
     if (!input.itemId) throw new Error("Inventory item is required.");
     if (Number(input.quantity) <= 0) throw new Error("Quantity must be greater than zero.");
     const type = input.type;
-    if (!["usage", "adjustment", "return", "damage"].includes(type)) throw new Error("Unsupported manual stock movement.");
+    if (!["usage", "stock_sale", "adjustment", "return", "damage"].includes(type)) throw new Error("Unsupported manual stock movement.");
     if (type === "adjustment" || type === "return") {
       const batch = this.getWritableBatch(input.itemId);
       if (!batch) throw new Error("Add a purchase batch before recording this movement.");
@@ -1649,8 +1651,13 @@ export class AppDatabase {
       return this.listInventoryMovements(input.itemId).slice(0, 20);
     }
 
+    const saleAmount = type === "stock_sale" ? money(positiveNumber(input.saleAmount, "Sale amount")) : 0;
+    const paymentMode = type === "stock_sale" ? this.normalizePaymentMode(input.paymentMode || "Cash") : "";
     this.writeTransaction(() => {
-      this.deductInventory(input.itemId, money(Number(input.quantity)), type, input.reference.trim(), input.notes.trim(), input.movementDate || localDate());
+      this.deductInventory(input.itemId, money(Number(input.quantity)), type, input.reference.trim(), input.notes.trim(), input.movementDate || localDate(), {
+        saleAmount,
+        paymentMode
+      });
     });
     return this.listInventoryMovements(input.itemId).slice(0, 20);
   }
@@ -1680,6 +1687,17 @@ export class AppDatabase {
     ).map(this.mapInventoryMovement);
   }
 
+  listInventoryMovementsForDate(movementDate: string): InventoryMovement[] {
+    return this.select<Row>(
+      `SELECT im.*, ii.name AS itemName, ii.type AS itemType, ii.unit AS itemUnit
+       FROM inventory_movements im
+       JOIN inventory_items ii ON ii.id = im.itemId
+       WHERE im.movementDate = ?
+       ORDER BY im.createdAt DESC`,
+      [movementDate]
+    ).map(this.mapInventoryMovement);
+  }
+
   getInventoryDashboard(): InventoryDashboardData {
     const items = this.listInventoryItems(true);
     const lowStockItems = items.filter((item) => item.active && item.lowStockLevel > 0 && item.currentQuantity <= item.lowStockLevel);
@@ -1699,6 +1717,23 @@ export class AppDatabase {
       expiringBatches,
       recentMovements: this.listInventoryMovements().slice(0, 20)
     };
+  }
+
+  listPayments(): Payment[] {
+    return this.select<Row>("SELECT * FROM payments ORDER BY paymentDate DESC, createdAt DESC").map(this.mapPayment);
+  }
+
+  listAllInvoices(): InvoiceSummary[] {
+    return this.select<Row>(
+      `${this.invoiceSummarySql()} ORDER BY i.invoiceDate DESC, i.createdAt DESC`
+    ).map(this.mapInvoiceSummary);
+  }
+
+  listPurchaseRecords(query = ""): PurchaseRecord[] {
+    const q = query.trim().toLowerCase();
+    return this.select<Row>("SELECT * FROM purchase_records ORDER BY purchaseDate DESC, createdAt DESC")
+      .map(this.mapPurchaseRecord)
+      .filter((record) => !q || JSON.stringify(record).toLowerCase().includes(q));
   }
 
   getServiceConsumables(serviceId: string): ServiceConsumable[] {
@@ -2960,10 +2995,12 @@ export class AppDatabase {
       this.select<Row>(`SELECT COUNT(*) AS value FROM invoices WHERE invoiceDate = ? AND ${activeInvoiceWhere}`, [today])[0],
       "value"
     );
+    const todayQuickStockSales = this.getQuickStockSaleRevenue({ fromDate: today, toDate: today });
+    const monthQuickStockSales = this.getQuickStockSaleRevenue({ fromDate: monthStart });
 
     return {
-      todayRevenue: money(todayRevenue),
-      monthRevenue: money(monthRevenue),
+      todayRevenue: money(todayRevenue + todayQuickStockSales),
+      monthRevenue: money(monthRevenue + monthQuickStockSales),
       pendingDues: money(pendingDues),
       todayInvoices,
       recentInvoices: this.listInvoices("").slice(0, 8),
@@ -3003,6 +3040,9 @@ export class AppDatabase {
     const topServices = this.getTopServices(filter);
     const paymentModes = this.getPaymentModeTotals(filter);
     const paidAmount = money(paymentModes.reduce((sum, item) => sum + item.amount, 0));
+    const invoiceRevenue = sums.revenue;
+    const quickStockSales = this.getQuickStockSaleRevenue(filter);
+    const totalSales = money(invoiceRevenue + quickStockSales);
 
     return {
       rangeLabel: label,
@@ -3016,6 +3056,9 @@ export class AppDatabase {
       enquiries: this.getEnquiryReport(filter),
       jobCards: this.getJobCardReport(filter),
       ...sums,
+      invoiceRevenue,
+      quickStockSales,
+      totalSales,
       paidAmount
     };
   }
@@ -3072,7 +3115,7 @@ export class AppDatabase {
     const stockRange = this.rangeCondition(filter, "im.movementDate");
     const expenseRange = this.rangeCondition(filter, "e.expenseDate");
 
-    const paidRevenue = money(rowNumber(
+    const invoicePaidRevenue = money(rowNumber(
       this.select<Row>(
         `SELECT COALESCE(SUM(p.amount), 0) AS value
          FROM payments p
@@ -3082,8 +3125,10 @@ export class AppDatabase {
       )[0] || { value: 0 },
       "value"
     ));
+    const quickStockSales = this.getQuickStockSaleRevenue(filter);
+    const paidRevenue = money(invoicePaidRevenue + quickStockSales);
 
-    const stockCost = money(rowNumber(
+    const invoiceStockCost = money(rowNumber(
       this.select<Row>(
         `SELECT COALESCE(SUM(im.quantity * im.unitCost), 0) AS value
          FROM inventory_movements im
@@ -3094,6 +3139,8 @@ export class AppDatabase {
       )[0] || { value: 0 },
       "value"
     ));
+    const quickStockCost = this.getQuickStockSaleCost(filter);
+    const stockCost = money(invoiceStockCost + quickStockCost);
 
     const expenseTotal = money(rowNumber(
       this.select<Row>(
@@ -3274,7 +3321,9 @@ export class AppDatabase {
         {
           range: report.rangeLabel,
           invoices: report.invoiceCount,
-          billedValue: report.revenue,
+          invoiceBilled: report.invoiceRevenue,
+          quickStockSales: report.quickStockSales,
+          totalSales: report.totalSales,
           collected: report.paidAmount,
           due: report.balanceDue,
           cancelled: report.cancelledCount
@@ -3345,7 +3394,9 @@ export class AppDatabase {
           type: movement.type,
           quantity: movement.quantity,
           unit: movement.itemUnit,
-          value: money(movement.quantity * movement.unitCost),
+          costValue: money(movement.quantity * movement.unitCost),
+          saleValue: movement.saleAmount,
+          paymentMode: movement.paymentMode,
           reference: movement.reference,
           notes: movement.notes
         }))
@@ -4495,9 +4546,11 @@ export class AppDatabase {
     type: InventoryMovementType,
     reference: string,
     notes: string,
-    movementDate: string
+    movementDate: string,
+    sale?: { saleAmount: number; paymentMode: PaymentMode | "" }
   ) {
     let remaining = money(quantity);
+    let remainingSaleAmount = money(sale?.saleAmount || 0);
     const batches = this.select<Row>(
       `SELECT * FROM inventory_batches
        WHERE itemId = ? AND quantityRemaining > 0
@@ -4511,15 +4564,32 @@ export class AppDatabase {
       throw new Error(`Insufficient stock for ${item.name}. Available ${available} ${item.unit}, required ${remaining} ${item.unit}.`);
     }
 
-    for (const batch of batches) {
+    for (let index = 0; index < batches.length; index++) {
+      const batch = batches[index];
       if (remaining <= 0) break;
       const used = money(Math.min(batch.quantityRemaining, remaining));
       remaining = money(remaining - used);
+      const saleAmount = sale
+        ? money(remaining <= 0 ? remainingSaleAmount : Math.min(remainingSaleAmount, money((sale.saleAmount * used) / quantity)))
+        : 0;
+      remainingSaleAmount = money(remainingSaleAmount - saleAmount);
       this.requireDb().run("UPDATE inventory_batches SET quantityRemaining = quantityRemaining - ? WHERE id = ?", [
         used,
         batch.id
       ]);
-      this.insertInventoryMovement({ itemId, batchId: batch.id, type, quantity: used, unitCost: batch.unitCost, reference, notes, movementDate });
+      this.insertInventoryMovement({
+        itemId,
+        batchId: batch.id,
+        type,
+        quantity: used,
+        unitCost: batch.unitCost,
+        saleAmount,
+        saleUnitPrice: used > 0 ? money(saleAmount / used) : 0,
+        paymentMode: sale?.paymentMode || "",
+        reference,
+        notes,
+        movementDate
+      });
     }
   }
 
@@ -4529,14 +4599,17 @@ export class AppDatabase {
     type: InventoryMovementType;
     quantity: number;
     unitCost: number;
+    saleAmount?: number;
+    saleUnitPrice?: number;
+    paymentMode?: PaymentMode | "";
     reference: string;
     notes: string;
     movementDate: string;
   }) {
     this.requireDb().run(
       `INSERT INTO inventory_movements
-        (id, itemId, batchId, type, quantity, unitCost, reference, notes, movementDate, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, itemId, batchId, type, quantity, unitCost, saleAmount, saleUnitPrice, paymentMode, reference, notes, movementDate, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         randomUUID(),
         input.itemId,
@@ -4544,6 +4617,9 @@ export class AppDatabase {
         input.type,
         money(input.quantity),
         money(input.unitCost),
+        money(input.saleAmount || 0),
+        money(input.saleUnitPrice || 0),
+        input.paymentMode || "",
         input.reference,
         input.notes,
         input.movementDate,
@@ -4950,17 +5026,52 @@ export class AppDatabase {
     }));
   }
 
+  private getQuickStockSaleRevenue(filter: ReportFilterInput) {
+    const saleRange = this.rangeCondition(filter, "im.movementDate");
+    return money(rowNumber(
+      this.select<Row>(
+        `SELECT COALESCE(SUM(im.saleAmount), 0) AS value
+         FROM inventory_movements im
+         WHERE im.type = 'stock_sale'
+           AND im.saleAmount > 0 ${saleRange.condition}`,
+        saleRange.params
+      )[0] || { value: 0 },
+      "value"
+    ));
+  }
+
+  private getQuickStockSaleCost(filter: ReportFilterInput) {
+    const saleRange = this.rangeCondition(filter, "im.movementDate");
+    return money(rowNumber(
+      this.select<Row>(
+        `SELECT COALESCE(SUM(im.quantity * im.unitCost), 0) AS value
+         FROM inventory_movements im
+         WHERE im.type = 'stock_sale' ${saleRange.condition}`,
+        saleRange.params
+      )[0] || { value: 0 },
+      "value"
+    ));
+  }
+
   private getPaymentModeTotals(filter: ReportFilterInput) {
-    const { where, params } = this.rangeClause(filter, "p.paymentDate");
-    const activeWhere = where ? `${where} AND i.invoiceStatus <> 'cancelled'` : "WHERE i.invoiceStatus <> 'cancelled'";
+    const paymentRange = this.rangeCondition(filter, "p.paymentDate");
+    const saleRange = this.rangeCondition(filter, "im.movementDate");
     return this.select<Row>(
-      `SELECT p.mode AS mode, COALESCE(SUM(p.amount), 0) AS amount
+      `SELECT mode, COALESCE(SUM(amount), 0) AS amount
+       FROM (
+        SELECT p.mode AS mode, p.amount AS amount
         FROM payments p
         JOIN invoices i ON i.id = p.invoiceId
-        ${activeWhere}
-        GROUP BY p.mode
-        ORDER BY amount DESC`,
-      params
+        WHERE i.invoiceStatus <> 'cancelled' ${paymentRange.condition}
+        UNION ALL
+        SELECT COALESCE(NULLIF(im.paymentMode, ''), 'Cash') AS mode, im.saleAmount AS amount
+        FROM inventory_movements im
+        WHERE im.type = 'stock_sale'
+          AND im.saleAmount > 0 ${saleRange.condition}
+       ) totals
+       GROUP BY mode
+       ORDER BY amount DESC`,
+      [...paymentRange.params, ...saleRange.params]
     ).map((row) => ({
       mode: rowText(row, "mode") as PaymentMode,
       amount: money(rowNumber(row, "amount"))
@@ -5060,40 +5171,58 @@ export class AppDatabase {
   private getSalesTrend(filter: ReportFilterInput) {
     const invoiceRange = this.rangeCondition(filter, "i.invoiceDate");
     const paymentRange = this.rangeCondition(filter, "p.paymentDate");
+    const saleRange = this.rangeCondition(filter, "im.movementDate");
     const rows = this.select<Row>(
       `SELECT date,
               COALESCE(SUM(billedValue), 0) AS billedValue,
+              COALESCE(SUM(quickStockSales), 0) AS quickStockSales,
               COALESCE(SUM(paidAmount), 0) AS paidAmount,
               COALESCE(SUM(balanceDue), 0) AS balanceDue
        FROM (
-         SELECT i.invoiceDate AS date,
-                SUM(i.grandTotal) AS billedValue,
-                0 AS paidAmount,
-                SUM(i.balanceDue) AS balanceDue
-         FROM invoices i
+          SELECT i.invoiceDate AS date,
+                 SUM(i.grandTotal) AS billedValue,
+                 0 AS quickStockSales,
+                 0 AS paidAmount,
+                 SUM(i.balanceDue) AS balanceDue
+          FROM invoices i
          WHERE i.invoiceStatus <> 'cancelled' ${invoiceRange.condition}
          GROUP BY i.invoiceDate
-         UNION ALL
-         SELECT p.paymentDate AS date,
-                0 AS billedValue,
-                SUM(p.amount) AS paidAmount,
-                0 AS balanceDue
-         FROM payments p
-         JOIN invoices i ON i.id = p.invoiceId
-         WHERE i.invoiceStatus <> 'cancelled' ${paymentRange.condition}
-         GROUP BY p.paymentDate
-       )
+          UNION ALL
+          SELECT p.paymentDate AS date,
+                 0 AS billedValue,
+                 0 AS quickStockSales,
+                 SUM(p.amount) AS paidAmount,
+                 0 AS balanceDue
+          FROM payments p
+          JOIN invoices i ON i.id = p.invoiceId
+          WHERE i.invoiceStatus <> 'cancelled' ${paymentRange.condition}
+          GROUP BY p.paymentDate
+          UNION ALL
+          SELECT im.movementDate AS date,
+                 0 AS billedValue,
+                 SUM(im.saleAmount) AS quickStockSales,
+                 SUM(im.saleAmount) AS paidAmount,
+                 0 AS balanceDue
+          FROM inventory_movements im
+          WHERE im.type = 'stock_sale'
+            AND im.saleAmount > 0 ${saleRange.condition}
+          GROUP BY im.movementDate
+       ) totals
        GROUP BY date
        ORDER BY date ASC`,
-      [...invoiceRange.params, ...paymentRange.params]
+      [...invoiceRange.params, ...paymentRange.params, ...saleRange.params]
     );
 
     return rows.map((row) => {
       const date = rowText(row, "date");
+      const billedValue = money(rowNumber(row, "billedValue"));
+      const quickStockSales = money(rowNumber(row, "quickStockSales"));
       return {
         date,
         label: date ? date.slice(5) : "-",
-        billedValue: money(rowNumber(row, "billedValue")),
+        billedValue,
+        quickStockSales,
+        totalSales: money(billedValue + quickStockSales),
         paidAmount: money(rowNumber(row, "paidAmount")),
         balanceDue: money(rowNumber(row, "balanceDue"))
       };
@@ -5103,6 +5232,7 @@ export class AppDatabase {
   private getProfitTrend(filter: ReportFilterInput) {
     const paymentRange = this.rangeCondition(filter, "p.paymentDate");
     const stockRange = this.rangeCondition(filter, "im.movementDate");
+    const stockSaleRange = this.rangeCondition(filter, "im.movementDate");
     const expenseRange = this.rangeCondition(filter, "e.expenseDate");
     const rows = this.select<Row>(
       `SELECT date,
@@ -5119,18 +5249,24 @@ export class AppDatabase {
          SELECT im.movementDate AS date, 0 AS paidRevenue, SUM(im.quantity * im.unitCost) AS stockCost, 0 AS expenses
          FROM inventory_movements im
          JOIN invoices i ON i.invoiceNumber = im.reference
-         WHERE i.invoiceStatus <> 'cancelled'
-           AND im.type IN ('sale', 'usage') ${stockRange.condition}
-         GROUP BY im.movementDate
-         UNION ALL
-         SELECT e.expenseDate AS date, 0 AS paidRevenue, 0 AS stockCost, SUM(e.amount) AS expenses
-         FROM expenses e
-         WHERE 1 = 1 ${expenseRange.condition}
-         GROUP BY e.expenseDate
-       )
-       GROUP BY date
-       ORDER BY date ASC`,
-      [...paymentRange.params, ...stockRange.params, ...expenseRange.params]
+          WHERE i.invoiceStatus <> 'cancelled'
+            AND im.type IN ('sale', 'usage') ${stockRange.condition}
+          GROUP BY im.movementDate
+          UNION ALL
+          SELECT im.movementDate AS date, SUM(im.saleAmount) AS paidRevenue, SUM(im.quantity * im.unitCost) AS stockCost, 0 AS expenses
+          FROM inventory_movements im
+          WHERE im.type = 'stock_sale'
+            AND im.saleAmount > 0 ${stockSaleRange.condition}
+          GROUP BY im.movementDate
+          UNION ALL
+          SELECT e.expenseDate AS date, 0 AS paidRevenue, 0 AS stockCost, SUM(e.amount) AS expenses
+          FROM expenses e
+          WHERE 1 = 1 ${expenseRange.condition}
+          GROUP BY e.expenseDate
+        ) totals
+        GROUP BY date
+        ORDER BY date ASC`,
+      [...paymentRange.params, ...stockRange.params, ...stockSaleRange.params, ...expenseRange.params]
     );
 
     return rows.map((row) => {
@@ -5436,6 +5572,30 @@ export class AppDatabase {
     createdAt: rowText(row, "createdAt")
   });
 
+  private mapPurchaseRecord = (row: Row): PurchaseRecord => {
+    let documents: PurchaseRecordDocument[] = [];
+    try {
+      const parsed = JSON.parse(rowText(row, "documents") || EMPTY_JSON_ARRAY);
+      documents = Array.isArray(parsed) ? parsed as PurchaseRecordDocument[] : [];
+    } catch {
+      documents = [];
+    }
+    return {
+      id: rowText(row, "id"),
+      purchaseDate: rowText(row, "purchaseDate"),
+      supplierId: rowText(row, "supplierId"),
+      supplierName: rowText(row, "supplierName"),
+      vendorName: rowText(row, "vendorName"),
+      billNumber: rowText(row, "billNumber"),
+      amount: money(rowNumber(row, "amount")),
+      paymentMode: this.normalizePaymentMode(rowText(row, "paymentMode")),
+      notes: rowText(row, "notes"),
+      documents,
+      createdAt: rowText(row, "createdAt"),
+      updatedAt: rowText(row, "updatedAt")
+    };
+  };
+
   private mapExpense = (row: Row): Expense => ({
     id: rowText(row, "id"),
     expenseDate: rowText(row, "expenseDate"),
@@ -5539,6 +5699,9 @@ export class AppDatabase {
     type: rowText(row, "type") as InventoryMovementType,
     quantity: money(rowNumber(row, "quantity")),
     unitCost: money(rowNumber(row, "unitCost")),
+    saleAmount: money(rowNumber(row, "saleAmount")),
+    saleUnitPrice: money(rowNumber(row, "saleUnitPrice")),
+    paymentMode: (["Cash", "UPI", "Card", "Bank Transfer", "Other"].includes(rowText(row, "paymentMode")) ? rowText(row, "paymentMode") : "") as PaymentMode | "",
     reference: rowText(row, "reference"),
     notes: rowText(row, "notes"),
     movementDate: rowText(row, "movementDate"),

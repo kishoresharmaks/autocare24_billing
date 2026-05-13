@@ -106,3 +106,87 @@ CREATE TABLE IF NOT EXISTS audit_log (
   ip_address VARCHAR(45),
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS whatsapp_settings (
+  business_id INT PRIMARY KEY,
+  enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  phone_number_id VARCHAR(80) NOT NULL DEFAULT '',
+  business_account_id VARCHAR(80) NOT NULL DEFAULT '',
+  display_phone_number VARCHAR(40) NOT NULL DEFAULT '',
+  graph_version VARCHAR(20) NOT NULL DEFAULT '',
+  webhook_verified_at DATETIME DEFAULT NULL,
+  last_template_sync_at DATETIME DEFAULT NULL,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  CONSTRAINT fk_whatsapp_settings_business FOREIGN KEY (business_id) REFERENCES businesses(id)
+);
+
+CREATE TABLE IF NOT EXISTS whatsapp_conversations (
+  id VARCHAR(36) PRIMARY KEY,
+  business_id INT NOT NULL,
+  customer_id VARCHAR(36) NOT NULL DEFAULT '',
+  phone VARCHAR(32) NOT NULL,
+  display_name VARCHAR(160) NOT NULL DEFAULT '',
+  last_message_preview VARCHAR(500) NOT NULL DEFAULT '',
+  last_message_at DATETIME DEFAULT NULL,
+  last_inbound_at DATETIME DEFAULT NULL,
+  unread_count INT NOT NULL DEFAULT 0,
+  status ENUM('open','archived') NOT NULL DEFAULT 'open',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_whatsapp_conversation_phone (business_id, phone),
+  KEY idx_whatsapp_conversations_recent (business_id, last_message_at),
+  KEY idx_whatsapp_conversations_customer (business_id, customer_id),
+  CONSTRAINT fk_whatsapp_conversations_business FOREIGN KEY (business_id) REFERENCES businesses(id)
+);
+
+CREATE TABLE IF NOT EXISTS whatsapp_messages (
+  id VARCHAR(36) PRIMARY KEY,
+  business_id INT NOT NULL,
+  conversation_id VARCHAR(36) NOT NULL,
+  whatsapp_message_id VARCHAR(120) DEFAULT NULL,
+  direction ENUM('inbound','outbound') NOT NULL,
+  message_type ENUM('text','template','image','document','unknown') NOT NULL DEFAULT 'text',
+  status ENUM('queued','sent','delivered','read','failed','received') NOT NULL DEFAULT 'queued',
+  phone VARCHAR(32) NOT NULL,
+  text_body TEXT,
+  template_name VARCHAR(120) NOT NULL DEFAULT '',
+  source_type VARCHAR(40) NOT NULL DEFAULT '',
+  source_id VARCHAR(80) NOT NULL DEFAULT '',
+  error_message VARCHAR(500) NOT NULL DEFAULT '',
+  payload JSON,
+  timestamp DATETIME DEFAULT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_whatsapp_message_external (business_id, whatsapp_message_id),
+  KEY idx_whatsapp_messages_conversation (business_id, conversation_id, timestamp),
+  KEY idx_whatsapp_messages_status (business_id, status),
+  CONSTRAINT fk_whatsapp_messages_business FOREIGN KEY (business_id) REFERENCES businesses(id),
+  CONSTRAINT fk_whatsapp_messages_conversation FOREIGN KEY (conversation_id) REFERENCES whatsapp_conversations(id)
+);
+
+CREATE TABLE IF NOT EXISTS whatsapp_message_events (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  business_id INT NOT NULL,
+  message_id VARCHAR(36) DEFAULT NULL,
+  whatsapp_message_id VARCHAR(120) NOT NULL DEFAULT '',
+  event_type VARCHAR(40) NOT NULL,
+  status VARCHAR(40) NOT NULL DEFAULT '',
+  payload JSON,
+  occurred_at DATETIME DEFAULT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_whatsapp_events_message (business_id, whatsapp_message_id),
+  CONSTRAINT fk_whatsapp_events_business FOREIGN KEY (business_id) REFERENCES businesses(id)
+);
+
+CREATE TABLE IF NOT EXISTS whatsapp_templates (
+  business_id INT NOT NULL,
+  name VARCHAR(120) NOT NULL,
+  language_code VARCHAR(20) NOT NULL,
+  status VARCHAR(40) NOT NULL DEFAULT '',
+  category VARCHAR(40) NOT NULL DEFAULT '',
+  components JSON,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (business_id, name, language_code),
+  KEY idx_whatsapp_templates_status (business_id, status),
+  CONSTRAINT fk_whatsapp_templates_business FOREIGN KEY (business_id) REFERENCES businesses(id)
+);

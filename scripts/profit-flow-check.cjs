@@ -177,12 +177,58 @@ const run = async () => {
 
   const salesReport = db.getReports({ fromDate: date, toDate: date });
   closeToMoney(salesReport.revenue, 236, "Sales report billed value uses invoice date");
+  closeToMoney(salesReport.invoiceRevenue, 236, "Invoice revenue stays invoice-only");
+  closeToMoney(salesReport.quickStockSales, 0, "No quick stock sales before manual stock sale");
+  closeToMoney(salesReport.totalSales, 236, "Total sales matches invoice revenue before quick stock sale");
   closeToMoney(salesReport.paidAmount, 286, "Sales report collected uses payment date");
   closeToMoney(salesReport.paymentModes.reduce((sum, item) => sum + item.amount, 0), 286, "Payment mode totals use payment date");
   assert.ok(
-    salesReport.salesTrend.some((item) => item.date === date && item.billedValue === 236 && item.paidAmount === 286),
+    salesReport.salesTrend.some((item) => item.date === date && item.billedValue === 236 && item.quickStockSales === 0 && item.totalSales === 236 && item.paidAmount === 286),
     "Sales trend combines billed-by-invoice-date and collected-by-payment-date"
   );
+
+  const stockBeforeQuickSale = db.getInventoryDashboard().items.find((item) => item.id === retail.id);
+  const quickSaleMovements = db.addInventoryMovement({
+    itemId: retail.id,
+    type: "stock_sale",
+    quantity: 3,
+    saleAmount: 375,
+    paymentMode: "UPI",
+    reference: "WALKIN-STOCK-1",
+    notes: "Quick stock sale without tax invoice",
+    movementDate: date
+  });
+  const quickSaleRows = quickSaleMovements.filter((movement) => movement.type === "stock_sale" && movement.reference === "WALKIN-STOCK-1");
+  closeToMoney(quickSaleRows.reduce((sum, movement) => sum + movement.quantity, 0), 3, "Quick stock sale movement quantity");
+  closeToMoney(quickSaleRows.reduce((sum, movement) => sum + movement.saleAmount, 0), 375, "Quick stock sale amount is preserved across movement rows");
+  assert.equal(quickSaleRows.every((movement) => movement.paymentMode === "UPI"), true, "Quick stock sale stores payment mode");
+  const stockAfterQuickSale = db.getInventoryDashboard().items.find((item) => item.id === retail.id);
+  closeToMoney(stockAfterQuickSale.currentQuantity, stockBeforeQuickSale.currentQuantity - 3, "Quick stock sale reduces available stock");
+
+  const quickProfit = db.getProfitReport("30d");
+  closeToMoney(quickProfit.paidRevenue, 661, "Profit paid revenue includes quick stock sale");
+  closeToMoney(quickProfit.stockCost, 200, "Profit stock cost includes quick stock sale cost");
+  closeToMoney(quickProfit.cashProfit, -39, "Profit includes quick stock sale revenue and cost");
+  assert.ok(quickProfit.trend.some((item) => item.date === date && item.paidRevenue === 661 && item.stockCost === 200 && item.expenses === 500), "Profit trend includes quick stock sale");
+
+  const quickSalesReport = db.getReports({ fromDate: date, toDate: date });
+  closeToMoney(quickSalesReport.revenue, 236, "Quick stock sale does not change invoice billed value");
+  closeToMoney(quickSalesReport.invoiceRevenue, 236, "Quick stock sale keeps invoice revenue separate");
+  closeToMoney(quickSalesReport.quickStockSales, 375, "Sales report shows quick stock sales separately");
+  closeToMoney(quickSalesReport.totalSales, 611, "Sales report total sales combines invoice and quick stock sales");
+  closeToMoney(quickSalesReport.paidAmount, 661, "Collected amount includes quick stock sale");
+  closeToMoney(quickSalesReport.taxableValue, salesReport.taxableValue, "Quick stock sale does not change GST taxable value");
+  assert.equal(quickSalesReport.invoiceCount, salesReport.invoiceCount, "Quick stock sale does not change invoice count");
+  assert.deepEqual(quickSalesReport.dues.map((invoice) => invoice.id), salesReport.dues.map((invoice) => invoice.id), "Quick stock sale does not change dues");
+  assert.ok(quickSalesReport.paymentModes.some((item) => item.mode === "UPI" && item.amount === 375), "Payment mode totals include quick stock sale");
+  assert.ok(
+    quickSalesReport.salesTrend.some((item) => item.date === date && item.billedValue === 236 && item.quickStockSales === 375 && item.totalSales === 611 && item.paidAmount === 661),
+    "Sales trend includes quick stock sale as separate and collected sales"
+  );
+
+  const quickDashboard = db.getDashboard();
+  closeToMoney(quickDashboard.todayRevenue, 661, "Dashboard today revenue includes quick stock sale");
+  closeToMoney(quickDashboard.monthRevenue, 661, "Dashboard month revenue includes quick stock sale");
 
   const allReport = db.getProfitReport("all");
   closeToMoney(allReport.expenseTotal, 2500, "All-time expenses include old expenses");
@@ -230,7 +276,7 @@ const run = async () => {
   assert.match(mainSource, /ipcMain\.handle\("profit:get", permitted\("reports\.view"/, "profit:get requires report permission");
   assert.match(mainSource, /ipcMain\.handle\("reports:exportCsv", permitted\("reports\.export"/, "report export requires export permission");
 
-  console.log("Profit flow verification passed (10 cases):");
+  console.log("Profit flow verification passed (11 cases):");
   console.log("- expense create/edit/delete");
   console.log("- permission-based IPC wiring");
   console.log("- dashboard, report, and profit paid revenue by payment date");
@@ -241,6 +287,7 @@ const run = async () => {
   console.log("- profit trend and category summaries");
   console.log("- date preset all vs current range");
   console.log("- purchase records excluded from stock, expense, and profit calculations");
+  console.log("- quick cash stock sale updates stock, sales collection, and profit without changing invoice/GST/dues");
   console.log(`Temporary database: ${tempRoot}`);
 };
 

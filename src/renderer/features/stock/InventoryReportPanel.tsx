@@ -9,6 +9,7 @@ const movementLabel = (type: string) => {
     purchase: "Stock added",
     usage: "Stock removed",
     sale: "Sold on bill",
+    stock_sale: "Stock sold",
     adjustment: "Added correction",
     return: "Returned stock",
     damage: "Damaged/wasted",
@@ -46,9 +47,9 @@ function MovementList({ movements }: { movements: InventoryMovement[] }) {
         <div className="stack-row" key={row.id}>
           <div>
             <strong>{row.itemName}</strong>
-            <span>{movementLabel(row.type)} | {row.quantity} {row.itemUnit} | {row.movementDate}</span>
+            <span>{movementLabel(row.type)} | {row.quantity} {row.itemUnit} | {row.movementDate}{row.type === "stock_sale" ? ` | ${row.paymentMode || "Cash"}` : ""}</span>
           </div>
-          <b>{formatMoney(row.quantity * row.unitCost)}</b>
+          <b>{row.type === "stock_sale" ? formatMoney(row.saleAmount) : formatMoney(row.quantity * row.unitCost)}</b>
         </div>
       ))}
     </div>

@@ -1,6 +1,7 @@
 import type {
   BusinessSettings,
   AppInfo,
+  AppUpdateStatus,
   AccessRole,
   AppUser,
   AuthStatus,
@@ -15,6 +16,8 @@ import type {
   Customer,
   CustomerWithVehicles,
   DataHealthReport,
+  DailyReportBackupResult,
+  DailyReportBackupStatus,
   DashboardData,
   DateRangePreset,
   DeveloperDiagnostics,
@@ -78,7 +81,13 @@ import type {
   SetupOwnerInput,
   Vehicle,
   VehicleType,
-  WhatsAppShareInput
+  WhatsAppBusinessStatus,
+  WhatsAppConversation,
+  WhatsAppMessage,
+  WhatsAppSendMessageInput,
+  WhatsAppSendMessageResult,
+  WhatsAppShareInput,
+  WhatsAppTemplate
 } from "../shared/types";
 
 declare module "*.png" {
@@ -185,12 +194,19 @@ declare global {
       profit: (filter: DateRangePreset | ReportDateFilter) => Promise<ProfitReportData>;
       reports: (filter: DateRangePreset | ReportDateFilter) => Promise<ReportData>;
       exportReportCsv: (input: { kind: ReportExportKind; filter: DateRangePreset | ReportDateFilter; fileName?: string }) => Promise<SaveResult>;
+      dailyReportBackupStatus: () => Promise<DailyReportBackupStatus>;
+      generateDailyReportBackup: () => Promise<DailyReportBackupResult>;
+      openDailyReportBackupFolder: () => Promise<SaveResult>;
       getDeveloperDiagnostics: () => Promise<DeveloperDiagnostics>;
       scanDataHealth: () => Promise<DataHealthReport>;
       runSafeRepair: (input: { repairCode: SafeRepairCode }) => Promise<SafeRepairResult>;
       getDeveloperLogs: () => Promise<string[]>;
       exportDiagnosticBundle: () => Promise<SaveResult>;
       getAppInfo: () => Promise<AppInfo>;
+      getUpdateStatus: () => Promise<AppUpdateStatus>;
+      checkForUpdates: () => Promise<AppUpdateStatus>;
+      downloadUpdate: () => Promise<AppUpdateStatus>;
+      installUpdate: () => Promise<AppUpdateStatus>;
       openExternal: (url: string) => Promise<boolean>;
       showItemInFolder: (filePath: string) => Promise<SaveResult>;
       print: (input?: PrintInput) => Promise<void>;
@@ -216,10 +232,17 @@ declare global {
       listSyncConflicts: () => Promise<SyncConflictSummary[]>;
       resolveSyncConflict: (input: { conflictId: string; resolution: SyncConflictResolution }) => Promise<SyncConflictSummary>;
       onSyncStatus: (callback: (status: SyncDeviceStatus) => void) => () => void;
+      getWhatsAppStatus: () => Promise<WhatsAppBusinessStatus>;
+      listWhatsAppConversations: (query?: string) => Promise<WhatsAppConversation[]>;
+      listWhatsAppMessages: (conversationId: string) => Promise<{ conversation: WhatsAppConversation; messages: WhatsAppMessage[] }>;
+      listWhatsAppTemplates: () => Promise<WhatsAppTemplate[]>;
+      syncWhatsAppTemplates: () => Promise<WhatsAppTemplate[]>;
+      sendWhatsAppMessage: (input: WhatsAppSendMessageInput) => Promise<WhatsAppSendMessageResult>;
       openWhatsAppShare: (input: WhatsAppShareInput) => Promise<SaveResult>;
       exportCsv: (kind: "invoices" | "customers" | "services" | "inventory" | "enquiries" | "jobCards") => Promise<SaveResult>;
       onDatabaseRestored: (callback: () => void) => () => void;
       onBackupScheduleStatus: (callback: (status: BackupScheduleStatus) => void) => () => void;
+      onUpdateStatus: (callback: (status: AppUpdateStatus) => void) => () => void;
     };
   }
 }

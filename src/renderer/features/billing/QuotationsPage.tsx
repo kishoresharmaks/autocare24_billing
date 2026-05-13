@@ -447,7 +447,7 @@ export function QuotationsPage({
       });
       notify(result.message);
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Unable to open WhatsApp.");
+      notify(error instanceof Error ? error.message : "Unable to send WhatsApp message.");
     }
   };
 

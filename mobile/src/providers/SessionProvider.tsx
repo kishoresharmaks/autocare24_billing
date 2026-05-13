@@ -36,6 +36,7 @@ interface SessionState {
 }
 
 const SessionContext = createContext<SessionState | null>(null);
+const STARTUP_SPLASH_MIN_MS = 5000;
 
 export function SessionProvider({ children }: PropsWithChildren) {
   const [booting, setBooting] = useState(true);
@@ -60,7 +61,11 @@ export function SessionProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     let active = true;
-    loadStoredSession()
+    let splashTimer: ReturnType<typeof setTimeout>;
+    const minimumSplashTime = new Promise<void>((resolve) => {
+      splashTimer = setTimeout(resolve, STARTUP_SPLASH_MIN_MS);
+    });
+    const storedSession = loadStoredSession()
       .then((stored) => {
         if (!active) return;
         setCloudUrl(stored.cloudUrl);
@@ -76,12 +81,15 @@ export function SessionProvider({ children }: PropsWithChildren) {
       })
       .catch((error: Error) => {
         if (active) setLastError(error.message || "Unable to load saved mobile session.");
-      })
-      .finally(() => {
+      });
+
+    Promise.allSettled([storedSession, minimumSplashTime]).finally(() => {
         if (active) setBooting(false);
       });
+
     return () => {
       active = false;
+      clearTimeout(splashTimer);
     };
   }, []);
 

@@ -62,7 +62,13 @@ import type {
   Supplier,
   TaxScope,
   Vehicle,
-  VehicleType
+  VehicleType,
+  WhatsAppBusinessStatus,
+  WhatsAppConversation,
+  WhatsAppMessage,
+  WhatsAppSendMessageInput,
+  WhatsAppSendMessageResult,
+  WhatsAppTemplate
 } from "../shared/types";
 
 type RecordResponse<T> = { record?: T; data?: T; revision?: number };
@@ -447,6 +453,44 @@ export class CloudDataClient {
       }));
   }
 
+  async getWhatsAppStatus(): Promise<WhatsAppBusinessStatus> {
+    const response = await this.cloud.cloudRequest<{ status: WhatsAppBusinessStatus }>("/api/v1/whatsapp/status");
+    return response.status;
+  }
+
+  async listWhatsAppConversations(query = ""): Promise<WhatsAppConversation[]> {
+    const params = new URLSearchParams();
+    if (query.trim()) params.set("q", query.trim());
+    const response = await this.cloud.cloudRequest<{ conversations: WhatsAppConversation[] }>(
+      `/api/v1/whatsapp/conversations${params.toString() ? `?${params}` : ""}`
+    );
+    return response.conversations || [];
+  }
+
+  async listWhatsAppMessages(conversationId: string): Promise<{ conversation: WhatsAppConversation; messages: WhatsAppMessage[] }> {
+    const response = await this.cloud.cloudRequest<{ conversation: WhatsAppConversation; messages: WhatsAppMessage[] }>(
+      `/api/v1/whatsapp/conversations/${encodeURIComponent(conversationId)}/messages`
+    );
+    return { conversation: response.conversation, messages: response.messages || [] };
+  }
+
+  async listWhatsAppTemplates(): Promise<WhatsAppTemplate[]> {
+    const response = await this.cloud.cloudRequest<{ templates: WhatsAppTemplate[] }>("/api/v1/whatsapp/templates");
+    return response.templates || [];
+  }
+
+  async syncWhatsAppTemplates(): Promise<WhatsAppTemplate[]> {
+    const response = await this.cloud.cloudRequest<{ templates: WhatsAppTemplate[] }>("/api/v1/whatsapp/templates/sync", { method: "POST" });
+    return response.templates || [];
+  }
+
+  sendWhatsAppMessage(input: WhatsAppSendMessageInput): Promise<WhatsAppSendMessageResult> {
+    return this.cloud.cloudRequest<WhatsAppSendMessageResult>("/api/v1/whatsapp/messages", {
+      method: "POST",
+      body: input
+    });
+  }
+
   saveCustomer(customer: Partial<Customer> & Pick<Customer, "name">) {
     return this.save<Customer>("customers", {
       id: customer.id || randomUUID(),
@@ -538,6 +582,18 @@ export class CloudDataClient {
     return rows
       .filter((row) => !q || searchBlob(row).includes(q))
       .sort((a, b) => b.purchaseDate.localeCompare(a.purchaseDate) || b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async listPayments() {
+    return this.list<Payment>("payments", { includeInactive: true }).then((rows) =>
+      rows.sort((a, b) => b.paymentDate.localeCompare(a.paymentDate) || b.createdAt.localeCompare(a.createdAt))
+    );
+  }
+
+  async listAllInvoices() {
+    return this.list<InvoiceSummary>("invoices", { includeInactive: true }).then((rows) =>
+      rows.sort((a, b) => b.invoiceDate.localeCompare(a.invoiceDate) || b.createdAt.localeCompare(a.createdAt))
+    );
   }
 
   async savePurchaseRecord(input: PurchaseRecordInput, documentPaths: string[] = []) {
@@ -846,7 +902,9 @@ export class CloudDataClient {
       addSection("Sales Summary", [{
         range: report.rangeLabel,
         invoices: report.invoiceCount,
-        billedValue: report.revenue,
+        invoiceBilled: report.invoiceRevenue ?? report.revenue,
+        quickStockSales: report.quickStockSales ?? 0,
+        totalSales: report.totalSales ?? report.revenue,
         collected: report.paidAmount,
         due: report.balanceDue,
         cancelled: report.cancelledCount
@@ -901,7 +959,9 @@ export class CloudDataClient {
         type: movement.type,
         quantity: movement.quantity,
         unit: movement.itemUnit,
-        value: money(movement.quantity * movement.unitCost),
+        costValue: money(movement.quantity * movement.unitCost),
+        saleValue: movement.saleAmount || 0,
+        paymentMode: movement.paymentMode || "",
         reference: movement.reference,
         notes: movement.notes
       })));
