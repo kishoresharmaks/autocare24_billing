@@ -111,6 +111,10 @@ AUTH_RATE_LIMIT_WINDOW_MS=900000
 DEVICE_REGISTRATION_RATE_LIMIT_MAX=10
 DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS=900000
 TRUSTED_PROXY_IPS=
+GITHUB_RELEASE_TOKEN=github_pat_private_release_read_token
+GITHUB_RELEASE_OWNER=kishoresharmaks
+GITHUB_RELEASE_REPO=autocare24_billing
+GITHUB_RELEASE_TAG=
 INVOICE_PREFIX=AUTOCARE24
 WHATSAPP_ENABLED=false
 WHATSAPP_GRAPH_VERSION=v20.0
@@ -134,6 +138,8 @@ Important:
 - Auth and device registration rate limits default to 10 attempts per 15 minutes per IP.
 - Loopback proxies (`127.0.0.1` and `::1`) are trusted for `X-Forwarded-For`/`X-Real-IP` so local hosting panels can show the real client IP instead of `127.0.0.1`.
 - Add only known reverse proxy IPs to `TRUSTED_PROXY_IPS`; the API trusts forwarded IP headers only from loopback or those configured proxy IPs.
+- `GITHUB_RELEASE_TOKEN` is server-only. Use a GitHub fine-grained token for the private `autocare24_billing` repository with **Contents: Read-only** for update downloads. Do not put this token in the desktop app.
+- Leave `GITHUB_RELEASE_TAG` empty to serve the latest published GitHub Release, or set it to a fixed tag like `v0.1.14` for controlled rollout.
 - `INVOICE_PREFIX` is optional. The desktop also sends its configured invoice prefix during finalization.
 - WhatsApp Business API is optional. Set `WHATSAPP_ENABLED=true` only after adding the Meta access token, phone number ID, business account ID, webhook verify token, and app secret.
 - Invoice/job-card PDF sharing uses Meta media upload and requires approved document-header templates named `invoice_pdf_ready` and `job_card_pdf_ready`.
@@ -216,7 +222,30 @@ Expected result:
 
 If this URL does not work, do not connect the desktop app yet.
 
-## 11. Connect First Desktop PC
+## 11. Private App Updates
+
+The Windows app checks:
+
+```text
+https://sync.yourdomain.com/updates/win/latest.yml
+```
+
+That endpoint is public, but the GitHub token stays only on this server. The API reads release assets from the private GitHub repository and streams `latest.yml`, the installer, and the blockmap to installed apps.
+
+To publish a Windows update from your build PC:
+
+```powershell
+npm.cmd version patch --no-git-tag-version
+$env:GH_TOKEN="your-github-token-with-contents-read-write"
+npm.cmd run release:windows
+Remove-Item Env:\GH_TOKEN
+```
+
+The publish token on the build PC needs **Contents: Read and write** for the private repository. The server token can be read-only.
+
+Important first-time note: any already-installed app version that still points directly to GitHub Releases cannot update from the private repo. Install the new generic-feed installer once manually; after that, future updates can come through **Check for updates**.
+
+## 12. Connect First Desktop PC
 
 In the Windows billing app:
 
@@ -242,7 +271,7 @@ Office PC 1
 
 The first PC will seed local records to the cloud.
 
-## 12. Connect Second Desktop PC
+## 13. Connect Second Desktop PC
 
 On the second PC:
 
@@ -264,7 +293,7 @@ Office PC 2
 
 The registration key only requests access. After owner/users exist, it does not give business-data access until an owner approves the device.
 
-## 13. Device Approval Security
+## 14. Device Approval Security
 
 Device states are stored in the `devices` table:
 
@@ -322,7 +351,7 @@ WHERE approval_status = 'PENDING';
 
 If phpMyAdmin says a column already exists, skip that `ALTER TABLE` line and run the remaining lines.
 
-## 14. Final Invoice Rule
+## 15. Final Invoice Rule
 
 Final invoices are cloud-issued now.
 
@@ -336,7 +365,7 @@ Final invoices are cloud-issued now.
 
 Do not create final invoice numbers directly in MySQL or in the desktop app.
 
-## 15. File Uploads
+## 16. File Uploads
 
 Synced files use this API:
 
@@ -358,7 +387,7 @@ UPLOAD_DIR=/home/cpaneluser/autocare24-sync-uploads
 
 Make sure this folder is writable by the Node app.
 
-## 16. WhatsApp Business API
+## 17. WhatsApp Business API
 
 The desktop app uses the cloud API for WhatsApp Connect. Meta credentials stay on the server, and the desktop never receives the WhatsApp access token.
 
@@ -378,11 +407,12 @@ Public Meta webhook endpoints:
 
 Approved templates are required for first contact and notifications. Freeform text replies are allowed only after an inbound customer message opens the WhatsApp customer-service window.
 
-## 17. Production Checklist
+## 18. Production Checklist
 
 Before using this with real billing data:
 
 - Health URL returns OK over HTTPS.
+- Update feed URL returns `latest.yml` after a private release is published.
 - MySQL migration completed without errors.
 - `UPLOAD_DIR` is writable and not public.
 - First PC can connect and sync.
@@ -394,7 +424,7 @@ Before using this with real billing data:
 - Print/PDF/WhatsApp stay blocked for any old `LOCAL-...` invoice until repaired.
 - Two PCs do not create duplicate invoice numbers.
 
-## 18. Troubleshooting
+## 19. Troubleshooting
 
 ### Health URL shows 404
 

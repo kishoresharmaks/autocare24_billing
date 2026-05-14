@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
 const path = require("node:path");
+const { Readable } = require("node:stream");
 const { URL } = require("node:url");
 const mysql = require("mysql2/promise");
 
@@ -43,6 +44,11 @@ const WHATSAPP_GRAPH_BASE_URL = String(process.env.WHATSAPP_API_BASE_URL || "htt
 const WHATSAPP_GRAPH_VERSION = String(process.env.WHATSAPP_GRAPH_VERSION || "v20.0").replace(/^\/+/, "");
 const WHATSAPP_CUSTOMER_WINDOW_MS = 24 * 60 * 60 * 1000;
 const WHATSAPP_DOCUMENT_MAX_BYTES = envPositiveInt("WHATSAPP_DOCUMENT_MAX_BYTES", 18 * 1024 * 1024);
+const UPDATE_FEED_PREFIX = "/updates/win";
+const GITHUB_RELEASE_TOKEN = String(process.env.GITHUB_RELEASE_TOKEN || process.env.GH_TOKEN || "").trim();
+const GITHUB_RELEASE_OWNER = String(process.env.GITHUB_RELEASE_OWNER || "kishoresharmaks").trim();
+const GITHUB_RELEASE_REPO = String(process.env.GITHUB_RELEASE_REPO || "autocare24_billing").trim();
+const GITHUB_RELEASE_TAG = String(process.env.GITHUB_RELEASE_TAG || "").trim();
 const TRUSTED_PROXY_IPS = new Set([
   "127.0.0.1",
   "::1",
@@ -3222,6 +3228,124 @@ const textResponse = (res, status, body, headers = {}) => {
   res.end(String(body ?? ""));
 };
 
+const githubReleaseHeaders = (extra = {}) => ({
+  "accept": "application/vnd.github+json",
+  "authorization": `Bearer ${GITHUB_RELEASE_TOKEN}`,
+  "user-agent": "autocare24-cloud-update-proxy",
+  "x-github-api-version": "2022-11-28",
+  ...extra
+});
+
+const safeUpdateAssetName = (value) => {
+  const decoded = decodeURIComponent(String(value || ""));
+  const baseName = path.basename(decoded);
+  if (!baseName || baseName !== decoded || decoded.length > 180 || !/^[A-Za-z0-9 ._()'-]+$/.test(decoded)) {
+    throwHttpError(400, "invalid_update_asset", "Update asset name is invalid.");
+  }
+  return decoded;
+};
+
+const updateAssetContentType = (fileName) => {
+  if (/\.ya?ml$/i.test(fileName)) return "application/x-yaml; charset=utf-8";
+  if (/\.exe$/i.test(fileName)) return "application/vnd.microsoft.portable-executable";
+  return "application/octet-stream";
+};
+
+const comparableUpdateAssetName = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+const findUpdateReleaseAsset = (release, assetName) => {
+  const assets = Array.isArray(release.assets) ? release.assets : [];
+  const exact = assets.find((candidate) => candidate.name === assetName);
+  if (exact) return exact;
+  const comparable = comparableUpdateAssetName(assetName);
+  return assets.find((candidate) => comparableUpdateAssetName(candidate.name) === comparable) || null;
+};
+
+async function getGitHubAssetRedirectUrl(asset) {
+  const response = await fetch(asset.url, {
+    redirect: "manual",
+    headers: githubReleaseHeaders({ accept: "application/octet-stream" })
+  });
+  const location = response.headers.get("location");
+  if (location && response.status >= 300 && response.status < 400) return location;
+  if (response.body) await response.body.cancel().catch(() => {});
+  return "";
+}
+
+async function getPrivateGitHubRelease() {
+  if (!GITHUB_RELEASE_TOKEN || !GITHUB_RELEASE_OWNER || !GITHUB_RELEASE_REPO) {
+    throwHttpError(503, "updates_not_configured", "Update feed is not configured on the server.");
+  }
+  const releasePath = GITHUB_RELEASE_TAG
+    ? `/releases/tags/${encodeURIComponent(GITHUB_RELEASE_TAG)}`
+    : "/releases/latest";
+  const response = await fetch(`https://api.github.com/repos/${GITHUB_RELEASE_OWNER}/${GITHUB_RELEASE_REPO}${releasePath}`, {
+    headers: githubReleaseHeaders()
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    const message = response.status === 404
+      ? "No published update release was found for this private repository."
+      : "Could not read private GitHub release metadata.";
+    throwHttpError(response.status === 404 ? 404 : 502, "update_release_unavailable", `${message} ${text}`.trim());
+  }
+  return JSON.parse(text);
+}
+
+async function handleUpdateAsset(req, res, url) {
+  try {
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      return textResponse(res, 405, "Method not allowed.", { allow: "GET, HEAD" });
+    }
+    const rawAssetName = url.pathname.slice(`${UPDATE_FEED_PREFIX}/`.length);
+    const assetName = safeUpdateAssetName(rawAssetName || "latest.yml");
+    const release = await getPrivateGitHubRelease();
+    const asset = findUpdateReleaseAsset(release, assetName);
+    if (!asset) {
+      return textResponse(res, 404, `Update asset was not found: ${assetName}`);
+    }
+
+    if (assetName !== "latest.yml") {
+      const redirectUrl = await getGitHubAssetRedirectUrl(asset);
+      if (redirectUrl) {
+        res.writeHead(307, {
+          ...SECURITY_HEADERS,
+          location: redirectUrl,
+          "cache-control": "private, no-store"
+        });
+        res.end();
+        return;
+      }
+    }
+
+    const headers = githubReleaseHeaders({ accept: "application/octet-stream" });
+    if (req.headers.range) headers.range = req.headers.range;
+    const response = await fetch(asset.url, { headers });
+    if (!response.ok) {
+      const text = await response.text();
+      return textResponse(res, response.status === 404 ? 404 : 502, `Could not download update asset. ${text}`.trim());
+    }
+
+    const passthroughHeaders = {
+      ...SECURITY_HEADERS,
+      "content-type": updateAssetContentType(assetName),
+      "cache-control": assetName === "latest.yml" ? "no-store" : "private, max-age=300"
+    };
+    for (const headerName of ["content-length", "content-range", "accept-ranges", "etag", "last-modified"]) {
+      const value = response.headers.get(headerName);
+      if (value) passthroughHeaders[headerName] = value;
+    }
+    res.writeHead(response.status, passthroughHeaders);
+    if (req.method === "HEAD" || !response.body) {
+      res.end();
+      return;
+    }
+    Readable.fromWeb(response.body).on("error", () => res.destroy()).pipe(res);
+  } catch (err) {
+    return textResponse(res, err.status || 500, err.status >= 500 ? "Update feed error." : err.message || "Update feed request failed.");
+  }
+}
+
 const isTruthyEnv = (value) => ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
 const whatsappRuntimeConfig = () => {
   const enabled = isTruthyEnv(process.env.WHATSAPP_ENABLED);
@@ -4023,6 +4147,9 @@ async function handleMetaWebhookPost(req, res) {
 async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   try {
+    if (url.pathname === UPDATE_FEED_PREFIX || url.pathname.startsWith(`${UPDATE_FEED_PREFIX}/`)) {
+      return handleUpdateAsset(req, res, url);
+    }
     if (req.method === "GET" && url.pathname === "/api/v1/health") {
       return ok(res, { ok: true, version: API_VERSION, serverTime: new Date().toISOString() });
     }

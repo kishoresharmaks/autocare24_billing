@@ -397,7 +397,6 @@ const createSplashWindow = () => {
         <span class="loading-dot"></span>
         <span class="loading-dot"></span>
       </div>
-      <div class="loader-track" aria-hidden="true"><div class="loader-bar"></div></div>
     </main>
   </body>
 </html>`;
