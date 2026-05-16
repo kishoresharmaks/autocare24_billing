@@ -1,4 +1,4 @@
-import { Archive, BarChart3, CalendarDays, Download, FileSpreadsheet, FileText, FolderOpen, HardDriveUpload, Printer, RefreshCw, Save } from "lucide-react";
+import { Archive, CalendarDays, Download, FileSpreadsheet, FileText, FolderOpen, HardDriveUpload, Printer, RefreshCw, Save } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type {
   AppUser,
@@ -21,11 +21,13 @@ import { emptyExpenseInput } from "./ProfitReportView";
 type LegacyReportView = "all" | "billing" | "stock" | "enquiries" | "profit";
 type ReportTab = "summary" | "sales" | "gst" | "payments" | "stock" | "enquiries" | "jobCards" | "profit";
 type ChartPoint = { label: string; [key: string]: string | number };
+type ReportTabConfig = { id: ReportTab; label: string; exportKind: ReportExportKind };
 
 const presets: DateRangePreset[] = ["7d", "30d", "90d", "all"];
 const paymentModes: PaymentMode[] = ["Cash", "UPI", "Card", "Bank Transfer", "Other"];
-const reportTabs: Array<{ id: ReportTab; label: string; exportKind: ReportExportKind }> = [
-  { id: "summary", label: "Full Business Summary", exportKind: "full" },
+const defaultReportTab: ReportTabConfig = { id: "summary", label: "Full Business Summary", exportKind: "full" };
+const reportTabs: ReportTabConfig[] = [
+  defaultReportTab,
   { id: "sales", label: "Sales Report", exportKind: "sales" },
   { id: "gst", label: "GST / Tax Report", exportKind: "gst" },
   { id: "payments", label: "Payment & Dues", exportKind: "payments" },
@@ -131,7 +133,7 @@ export function ReportsPage({
 
   if (!report || !profit) return <div className="empty-state">Loading report dashboard...</div>;
 
-  const active = reportTabs.find((item) => item.id === activeTab) || reportTabs[0];
+  const active = reportTabs.find((item) => item.id === activeTab) || defaultReportTab;
   const conversionRate = report.enquiries.total ? Math.round((report.enquiries.converted / report.enquiries.total) * 100) : 0;
 
   const exportReport = async (kind: ReportExportKind) => {
@@ -764,7 +766,9 @@ function LineAreaChart({
   });
   const primaryPath = coords.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.primaryY}`).join(" ");
   const secondaryPath = coords.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.secondaryY}`).join(" ");
-  const areaPath = `${primaryPath} L ${coords[coords.length - 1].x} ${base} L ${coords[0].x} ${base} Z`;
+  const firstCoord = coords[0];
+  const lastCoord = coords[coords.length - 1];
+  const areaPath = firstCoord && lastCoord ? `${primaryPath} L ${lastCoord.x} ${base} L ${firstCoord.x} ${base} Z` : "";
 
   return (
     <div className="report-chart-wrap">
@@ -779,7 +783,7 @@ function LineAreaChart({
             </g>
           );
         })}
-        <path className="chart-fill" d={areaPath} />
+        {areaPath && <path className="chart-fill" d={areaPath} />}
         <path className="chart-line secondary" d={secondaryPath} />
         <path className="chart-line primary" d={primaryPath} />
         {coords.map((point) => (

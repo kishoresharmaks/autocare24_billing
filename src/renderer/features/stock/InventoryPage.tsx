@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { Eye, Paperclip, Trash2, Upload } from "lucide-react";
 import type { AppUser, InventoryDashboardData, InventoryItem, InventoryMovement, InventoryMovementInput, InventoryPurchaseInput, PaymentMode, PermissionKey, PurchaseRecord, PurchaseRecordDocument, PurchaseRecordInput, Supplier } from "../../../shared/types";
 import { hasPermission } from "../../../shared/access-control";
+import { money } from "../../../shared/billing-math";
 import { InventoryReportPanel } from "./InventoryReportPanel";
 
 type InventoryTab = "overview" | "items" | "purchases" | "purchaseRecords" | "remove" | "movements" | "suppliers" | "reports";
@@ -24,7 +25,6 @@ const todayLocal = () => {
   date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
   return date.toISOString().slice(0, 10);
 };
-const money = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
 const formatMoney = (value: number) =>
   `Rs ${money(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const paymentModes: PaymentMode[] = ["Cash", "UPI", "Card", "Bank Transfer", "Other"];
@@ -38,6 +38,18 @@ const emptyPurchaseRecordInput = (): PurchaseRecordInput => ({
   paymentMode: "UPI",
   notes: "",
   documents: []
+});
+const emptyInventoryPurchaseInput = (): InventoryPurchaseInput => ({
+  itemId: "",
+  supplierId: "",
+  supplier: { name: "" },
+  batchNumber: "",
+  expiryDate: "",
+  purchaseDate: todayLocal(),
+  billNumber: "",
+  quantity: 0,
+  unitCost: 0,
+  gstRate: 18
 });
 const fileNameFromPath = (filePath: string) => filePath.split(/[\\/]/).filter(Boolean).pop() || filePath;
 const formatBytes = (value: number) => {
@@ -110,18 +122,7 @@ export function InventoryPage({
     active: true
   });
   const [supplierForm, setSupplierForm] = useState<Partial<Supplier> & Pick<Supplier, "name">>({ name: "" });
-  const [purchaseForm, setPurchaseForm] = useState<InventoryPurchaseInput>({
-    itemId: "",
-    supplierId: "",
-    supplier: { name: "" },
-    batchNumber: "",
-    expiryDate: "",
-    purchaseDate: todayLocal(),
-    billNumber: "",
-    quantity: 0,
-    unitCost: 0,
-    gstRate: 18
-  });
+  const [purchaseForm, setPurchaseForm] = useState<InventoryPurchaseInput>(emptyInventoryPurchaseInput());
   const [removeForm, setRemoveForm] = useState<InventoryMovementInput>({
     itemId: "",
     type: "usage",
@@ -158,8 +159,9 @@ export function InventoryPage({
   }, [refreshKey, includeInactive, currentUser.id, currentUser.permissions.join("|")]);
 
   useEffect(() => {
-    if (!visibleTabs.length) return;
-    if (!visibleTabs.some((item) => item.id === tab)) setTab(visibleTabs[0].id);
+    const firstTab = visibleTabs[0];
+    if (!firstTab) return;
+    if (!visibleTabs.some((item) => item.id === tab)) setTab(firstTab.id);
   }, [tab, visibleTabs.map((item) => item.id).join("|")]);
 
   const saveItem = async () => {
@@ -189,7 +191,7 @@ export function InventoryPage({
     try {
       await window.autocare.addInventoryPurchase(purchaseForm);
       notify("Purchase stock added.");
-      setPurchaseForm({ ...purchaseForm, batchNumber: "", billNumber: "", quantity: 0, unitCost: 0 });
+      setPurchaseForm(emptyInventoryPurchaseInput());
       await load();
       onChanged();
     } catch (error) {

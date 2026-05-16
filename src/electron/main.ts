@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, shell, type IpcMainInvokeEvent, type Session } from "electron";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -21,7 +21,6 @@ import {
   APP_PRODUCTION_READINESS,
   APP_PRODUCT_NAME
 } from "../shared/app-info";
-import { BUSINESS_SETTINGS_SYNC_ID, JOB_CARD_SETTINGS_SYNC_ID } from "../shared/types";
 import type {
   AppUser,
   BackupCloudSnapshotStatus,
@@ -51,7 +50,6 @@ import type {
   InvoiceCreateInput,
   InvoiceDetail,
   InvoiceDraftSaveInput,
-  JobCardDetail,
   JobCardInput,
   JobCardPhotoType,
   JobCardStatus,
@@ -61,7 +59,6 @@ import type {
   Payment,
   PurchaseRecord,
   PurchaseRecordInput,
-  QuotationDetail,
   QuotationSaveInput,
   QuotationStatusInput,
   RecordPaymentInput,
@@ -94,8 +91,9 @@ let driveCloudService: ReturnType<typeof createDriveCloudService> | null = null;
 let cloudSyncEngine: CloudSyncEngine | null = null;
 let cloudDataClient: CloudDataClient | null = null;
 let updateService: AppUpdateService | null = null;
-let cloudSyncActionTimer: NodeJS.Timeout | null = null;
 let dailyBackupTimer: NodeJS.Timeout | null = null;
+let appQuitting = false;
+const cspInstalledSessions = new WeakSet<Session>();
 const DAILY_BACKUP_HOUR = 19;
 const DAILY_BACKUP_MINUTE = 0;
 const DAILY_BACKUP_LABEL = "7:00 PM";
@@ -439,9 +437,39 @@ const isAllowedRendererNavigation = (targetUrl: string) => {
   }
 };
 
+const normalizedExternalUrlParts = (value: string) => {
+  try {
+    const parsed = new URL(value);
+    const pathname = parsed.pathname.replace(/\/+$/, "") || "/";
+    return {
+      protocol: parsed.protocol,
+      hostname: parsed.hostname.toLowerCase(),
+      port: parsed.port,
+      pathname
+    };
+  } catch {
+    return null;
+  }
+};
+
+const isAllowedExternalUrl = (targetUrl: string) => {
+  const target = normalizedExternalUrlParts(targetUrl);
+  const allowed = normalizedExternalUrlParts(APP_DEVELOPER.profileUrl);
+  if (!target || !allowed) return false;
+  return (
+    target.protocol === allowed.protocol &&
+    target.hostname === allowed.hostname &&
+    target.port === allowed.port &&
+    target.pathname === allowed.pathname
+  );
+};
+
 const installRendererCsp = (window: BrowserWindow) => {
+  const rendererSession = window.webContents.session;
+  if (cspInstalledSessions.has(rendererSession)) return;
+  cspInstalledSessions.add(rendererSession);
   const csp = app.isPackaged ? PACKAGED_RENDERER_CSP : DEVELOPMENT_RENDERER_CSP;
-  window.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+  rendererSession.webRequest.onHeadersReceived((details, callback) => {
     const responseHeaders = details.responseHeaders || {};
     const cspHeader = Object.keys(responseHeaders).find((key) => key.toLowerCase() === "content-security-policy") || "Content-Security-Policy";
     callback({
@@ -528,7 +556,7 @@ const createWindow = () => {
     app.quit();
   });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url === APP_DEVELOPER.profileUrl) void shell.openExternal(url);
+    if (isAllowedExternalUrl(url)) void shell.openExternal(APP_DEVELOPER.profileUrl);
     return { action: "deny" };
   });
   mainWindow.webContents.on("will-navigate", (event, url) => {
@@ -608,6 +636,7 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  appQuitting = true;
   if (dailyBackupTimer) {
     clearTimeout(dailyBackupTimer);
     dailyBackupTimer = null;
@@ -927,25 +956,6 @@ const queueInvoiceDetail = (invoice: InvoiceDetail) => {
   invoice.items.forEach((item) => queueCloudSyncResult("invoice_items", item));
   invoice.payments.forEach((payment) => queueCloudSyncResult("payments", payment));
   return invoice;
-};
-
-const queueQuotationDetail = (quotation: QuotationDetail) => {
-  queueCloudSyncResult("customers", quotation.customer);
-  queueCloudSyncResult("vehicles", quotation.vehicle);
-  queueCloudSyncResult("quotations", quotation);
-  quotation.items.forEach((item) => queueCloudSyncResult("quotation_items", item));
-  return quotation;
-};
-
-const queueJobCardDetail = (jobCard: JobCardDetail) => {
-  queueCloudSyncResult("customers", jobCard.customer);
-  queueCloudSyncResult("vehicles", jobCard.vehicle);
-  queueCloudSyncResult("job_cards", jobCard);
-  jobCard.items.forEach((item) => queueCloudSyncResult("job_card_items", item));
-  jobCard.checklist.forEach((item) => queueCloudSyncResult("job_card_checklist_items", item));
-  jobCard.photos.forEach((photo) => queueCloudSyncResult("job_card_photos", photo));
-  jobCard.history.forEach((item) => queueCloudSyncResult("job_card_status_history", item));
-  return jobCard;
 };
 
 const assignOfficialInvoiceNumber = async (
@@ -1416,6 +1426,7 @@ const runDailyScheduledBackup = async (reason: "startup" | "timer") => {
 };
 
 const scheduleNextDailyBackup = () => {
+  if (appQuitting) return;
   if (dailyBackupTimer) {
     clearTimeout(dailyBackupTimer);
     dailyBackupTimer = null;
@@ -1423,7 +1434,9 @@ const scheduleNextDailyBackup = () => {
   const delay = Math.max(1000, nextDailyBackupRun().getTime() - Date.now());
   dailyBackupTimer = setTimeout(() => {
     dailyBackupTimer = null;
-    void runDailyScheduledBackup("timer").finally(() => scheduleNextDailyBackup());
+    void runDailyScheduledBackup("timer").finally(() => {
+      if (!appQuitting) scheduleNextDailyBackup();
+    });
   }, delay);
   dailyBackupTimer.unref?.();
   sendBackupScheduleStatus();
@@ -1561,18 +1574,20 @@ const readWhatsAppPdfMedia = (input: WhatsAppShareInput): WhatsAppSendMessageInp
   if (input.kind !== "invoice_pdf" && input.kind !== "job_card_pdf") return undefined;
   if (!input.documentPath) throw new Error("PDF file is required before sending this WhatsApp document.");
   const resolvedPath = path.resolve(input.documentPath);
-  if (!isInsideDirectory(app.getPath("documents"), resolvedPath)) {
+  if (!fs.existsSync(resolvedPath)) throw new Error("PDF file was not found. Please generate the PDF again.");
+  const documentsRoot = fs.realpathSync(app.getPath("documents"));
+  const realPath = fs.realpathSync(resolvedPath);
+  if (!isInsideDirectory(documentsRoot, realPath)) {
     throw new Error("WhatsApp PDF sharing can only send app-generated PDFs saved under Documents.");
   }
-  if (path.extname(resolvedPath).toLowerCase() !== ".pdf") throw new Error("Only PDF files can be sent through this WhatsApp document flow.");
-  if (!fs.existsSync(resolvedPath)) throw new Error("PDF file was not found. Please generate the PDF again.");
-  const stat = fs.statSync(resolvedPath);
+  if (path.extname(realPath).toLowerCase() !== ".pdf") throw new Error("Only PDF files can be sent through this WhatsApp document flow.");
+  const stat = fs.statSync(realPath);
   if (!stat.isFile()) throw new Error("PDF path is not a file.");
   if (stat.size <= 0) throw new Error("PDF file is empty.");
   if (stat.size > WHATSAPP_PDF_MAX_BYTES) throw new Error("PDF is too large for this WhatsApp send flow. Please reduce the PDF size.");
-  const data = fs.readFileSync(resolvedPath);
+  const data = fs.readFileSync(realPath);
   if (data.subarray(0, 5).toString("ascii") !== "%PDF-") throw new Error("The selected file is not a valid PDF.");
-  const fileName = safeExportFileName(input.documentFileName || path.basename(resolvedPath), "autocare24-document.pdf");
+  const fileName = safeExportFileName(input.documentFileName || path.basename(realPath), "autocare24-document.pdf");
   return {
     fileName: fileName.toLowerCase().endsWith(".pdf") ? fileName : `${fileName}.pdf`,
     mimeType: "application/pdf",
@@ -1600,8 +1615,8 @@ const buildWhatsAppBusinessSendInput = (input: WhatsAppShareInput): WhatsAppSend
 
 const registerIpcHandlers = () => {
   ipcMain.handle("app:openExternal", (_event, url: string) => {
-    if (url !== APP_DEVELOPER.profileUrl) throw new Error("External link is not allowed.");
-    return shell.openExternal(url).then(() => true);
+    if (!isAllowedExternalUrl(url)) throw new Error("External link is not allowed.");
+    return shell.openExternal(APP_DEVELOPER.profileUrl).then(() => true);
   });
   ipcMain.handle("app:getInfo", authenticated(() => getAppInfo()));
   ipcMain.handle("updates:status", authenticated(() => appUpdates().getStatus()));
@@ -1720,8 +1735,9 @@ const registerIpcHandlers = () => {
       properties: ["openFile"],
       filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"] }]
     });
-    if (result.canceled || !result.filePaths.length) return { ok: false, message: `${label} selection cancelled.` };
-    return { ok: true, message: `${label} selected.`, path: copyInvoiceAssetToAppData(kind, result.filePaths[0]) };
+    const filePath = result.filePaths[0];
+    if (result.canceled || !filePath) return { ok: false, message: `${label} selection cancelled.` };
+    return { ok: true, message: `${label} selected.`, path: copyInvoiceAssetToAppData(kind, filePath) };
   }));
   ipcMain.handle("settings:pickLogo", permitted("settings.manage", async () => {
     const result = await dialog.showOpenDialog(mainWindow!, {
@@ -1729,8 +1745,9 @@ const registerIpcHandlers = () => {
       properties: ["openFile"],
       filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"] }]
     });
-    if (result.canceled || !result.filePaths.length) return { ok: false, message: "Logo selection cancelled." };
-    return { ok: true, message: "Logo selected.", path: copyInvoiceAssetToAppData("logo", result.filePaths[0]) };
+    const filePath = result.filePaths[0];
+    if (result.canceled || !filePath) return { ok: false, message: "Logo selection cancelled." };
+    return { ok: true, message: "Logo selected.", path: copyInvoiceAssetToAppData("logo", filePath) };
   }));
   ipcMain.handle("settings:readAsset", authenticated(async (_user, filePath?: string) => {
     try {
@@ -2020,9 +2037,10 @@ const registerIpcHandlers = () => {
         { name: "Legacy SQLite backup", extensions: ["sqlite", "db"] }
       ]
     });
-    if (result.canceled || !result.filePaths.length) return { ok: false, message: "Restore cancelled." };
+    const filePath = result.filePaths[0];
+    if (result.canceled || !filePath) return { ok: false, message: "Restore cancelled." };
 
-    const restored = database.restoreFromFile(result.filePaths[0]);
+    const restored = database.restoreFromFile(filePath);
     currentSession = null;
     logAppEvent("warn", "Backup restored", restored);
     mainWindow?.webContents.send("database:restored");

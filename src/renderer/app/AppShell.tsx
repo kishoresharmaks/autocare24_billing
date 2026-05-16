@@ -26,7 +26,7 @@
   X,
   type LucideIcon
 } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import type {
   AppUpdateStatus,
   AppUser,
@@ -34,7 +34,6 @@ import type {
   DashboardData,
   InventoryDashboardData,
   InvoiceSummary,
-  JobCardSummary,
   PermissionKey,
   SyncDeviceStatus
 } from "../../shared/types";
@@ -216,21 +215,16 @@ const todayLocal = () => {
 const money = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
 const formatMoney = (value: number) =>
   `Rs ${money(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const toLocalDateKey = (date: Date) => {
-  const local = new Date(date);
-  local.setMinutes(local.getMinutes() - local.getTimezoneOffset());
-  return local.toISOString().slice(0, 10);
-};
 const dateFromKey = (dateKey: string) => new Date(`${dateKey}T00:00:00`);
+const addDaysToDateKey = (dateKey: string, days: number) => {
+  const [year = 1970, month = 1, day = 1] = dateKey.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+};
 const shortWeekday = (dateKey: string) =>
   dateFromKey(dateKey).toLocaleDateString("en-IN", { weekday: "short" });
 const lastSevenDateKeys = () => {
-  const today = dateFromKey(todayLocal());
-  return Array.from({ length: 7 }, (_, index) => {
-    const date = new Date(today);
-    date.setDate(today.getDate() - (6 - index));
-    return toLocalDateKey(date);
-  });
+  const todayKey = todayLocal();
+  return Array.from({ length: 7 }, (_, index) => addDaysToDateKey(todayKey, index - 6));
 };
 const buildWeeklySales = (invoices: InvoiceSummary[]) => {
   const dateKeys = lastSevenDateKeys();
@@ -286,26 +280,31 @@ export default function App() {
   };
 
   useEffect(() => {
-    window.autocare
-      .authStatus()
-      .then((status) => {
+    let active = true;
+    const loadAuthStatus = () =>
+      window.autocare.authStatus().then((status) => {
+        if (!active) return;
         setAuthMode(status.hasUsers ? "login" : "setup");
         if (status.currentUser) setCurrentUser(status.currentUser);
-      })
-      .catch((error) => notify(error.message));
-    return window.autocare.onDatabaseRestored(() => {
+      });
+
+    loadAuthStatus().catch((error) => {
+      if (active) notify(error.message);
+    });
+    const unsubscribeDatabaseRestored = window.autocare.onDatabaseRestored(() => {
+      if (!active) return;
       notify("Backup restored. Data refreshed.");
       setCurrentUser(null);
       setSettings(null);
-      window.autocare
-        .authStatus()
-        .then((status) => {
-          setAuthMode(status.hasUsers ? "login" : "setup");
-          if (status.currentUser) setCurrentUser(status.currentUser);
-        })
-        .catch((error) => notify(error.message));
+      loadAuthStatus().catch((error) => {
+        if (active) notify(error.message);
+      });
       refresh();
     });
+    return () => {
+      active = false;
+      unsubscribeDatabaseRestored();
+    };
   }, []);
 
   useEffect(() => {
@@ -1798,8 +1797,10 @@ function SalesActivityChart({ points }: { points: WeeklySalesPoint[] }) {
     return { ...point, x, y };
   });
   const linePath = coordinates.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
-  const areaPath = coordinates.length
-    ? `${linePath} L ${coordinates[coordinates.length - 1].x} ${baseY} L ${coordinates[0].x} ${baseY} Z`
+  const firstCoordinate = coordinates[0];
+  const lastCoordinate = coordinates[coordinates.length - 1];
+  const areaPath = firstCoordinate && lastCoordinate
+    ? `${linePath} L ${lastCoordinate.x} ${baseY} L ${firstCoordinate.x} ${baseY} Z`
     : "";
   const gridValues = [0, 0.33, 0.66, 1];
 

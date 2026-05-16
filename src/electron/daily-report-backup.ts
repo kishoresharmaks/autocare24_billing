@@ -57,7 +57,9 @@ const csvEscape = (value: unknown) => {
 };
 const rowsToCsv = (rows: Array<Record<string, unknown>>) => {
   if (!rows.length) return "";
-  const headers = Object.keys(rows[0]);
+  const first = rows[0];
+  if (!first) return "";
+  const headers = Object.keys(first);
   return [headers.join(","), ...rows.map((row) => headers.map((header) => csvEscape(row[header])).join(","))].join("\n");
 };
 const jsonBuffer = (value: unknown) => Buffer.from(JSON.stringify(value, null, 2), "utf8");
@@ -65,7 +67,6 @@ const sha256 = (data: Buffer) => createHash("sha256").update(data).digest("hex")
 const safeSegment = (value: string, fallback: string) =>
   text(value).replace(/[^a-zA-Z0-9._-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "") || fallback;
 const toLocalDate = (value: string) => text(value).slice(0, 10);
-const paymentStatusLabel = (value: string) => text(value).replace(/[_-]/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 const formatMoney = (value: unknown) =>
   `Rs ${money(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const formatNumber = (value: unknown) => money(value).toLocaleString("en-IN", { maximumFractionDigits: 2 });
@@ -88,9 +89,9 @@ const truncate = (value: unknown, width: number) => {
   return valueText.length <= width ? valueText.padEnd(width, " ") : `${valueText.slice(0, Math.max(0, width - 1))} `;
 };
 const lineTable = (headers: string[], rows: Array<Array<string | number>>, widths: number[]) => [
-  headers.map((header, index) => truncate(header, widths[index])).join(" "),
+  headers.map((header, index) => truncate(header, widths[index] ?? 12)).join(" "),
   widths.map((width) => "-".repeat(width)).join(" "),
-  ...rows.map((row) => row.map((cell, index) => truncate(cell, widths[index])).join(" "))
+  ...rows.map((row) => row.map((cell, index) => truncate(cell, widths[index] ?? 12)).join(" "))
 ];
 
 const crcTable = (() => {
@@ -105,7 +106,7 @@ const crcTable = (() => {
 
 const crc32 = (data: Buffer) => {
   let crc = 0xffffffff;
-  for (const byte of data) crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  for (const byte of data) crc = (crcTable[(crc ^ byte) & 0xff] ?? 0) ^ (crc >>> 8);
   return (crc ^ 0xffffffff) >>> 0;
 };
 

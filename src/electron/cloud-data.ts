@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { calculateInvoiceTotals, money } from "../shared/billing-math";
+import { calculateInvoiceTotals, money, normalizeSacCode } from "../shared/billing-math";
 import { BUSINESS_SETTINGS_SYNC_ID, JOB_CARD_SETTINGS_SYNC_ID } from "../shared/types";
 import type { CloudSyncEngine } from "./sync-engine";
 import type {
@@ -80,6 +80,7 @@ type CloudSnapshotExport = {
 };
 
 const nowIso = () => new Date().toISOString();
+const toErrorMessage = (error: unknown) => error instanceof Error ? error.message : String(error || "Unknown error");
 const localDate = (date = new Date()) => {
   const normalized = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
   return normalized.toISOString().slice(0, 10);
@@ -134,7 +135,9 @@ const csvEscape = (value: unknown) => {
 };
 const rowsToCsv = (rows: Array<Record<string, unknown>>) => {
   if (!rows.length) return "";
-  const headers = Object.keys(rows[0]);
+  const first = rows[0];
+  if (!first) return "";
+  const headers = Object.keys(first);
   return [headers.join(","), ...rows.map((row) => headers.map((header) => csvEscape(row[header])).join(","))].join("\n");
 };
 const sanitizeSnapshotData = (value: unknown): unknown =>
@@ -198,7 +201,7 @@ const normalizeQuotationDraftItems = (items: QuotationSaveInput["items"] = []) =
       quantity: money(Math.max(0, Number(item.quantity || 0))),
       unitPrice: money(Math.max(0, Number(item.unitPrice || 0))),
       gstRate: money(Math.max(0, Number(item.gstRate || 0))),
-      sacCode: item.sacCode || "9987"
+      sacCode: normalizeSacCode(item.sacCode)
     }));
 
 export class CloudDataClient {
@@ -359,11 +362,23 @@ export class CloudDataClient {
       data: sanitizeSnapshotData(role)
     }));
 
-    await Promise.all(
-      CLOUD_SNAPSHOT_RECORD_ENTITIES.map(async (entity) => {
-        entities[entity] = await this.listSnapshotRecords(entity);
-      })
+    const snapshotErrors: string[] = [];
+    const recordResults = await Promise.allSettled(
+      CLOUD_SNAPSHOT_RECORD_ENTITIES.map(async (entity) => ({
+        entity,
+        records: await this.listSnapshotRecords(entity)
+      }))
     );
+    recordResults.forEach((result, index) => {
+      const entity = CLOUD_SNAPSHOT_RECORD_ENTITIES[index];
+      if (!entity) return;
+      if (result.status === "fulfilled") {
+        entities[result.value.entity] = result.value.records;
+        return;
+      }
+      entities[entity] = [];
+      snapshotErrors.push(`${entity}: ${toErrorMessage(result.reason)}`);
+    });
 
     const entityCounts = Object.fromEntries(Object.entries(entities).map(([entity, records]) => [entity, records.length]));
     const recordCount = Object.values(entityCounts).reduce((total, count) => total + Number(count || 0), 0);
@@ -388,7 +403,7 @@ export class CloudDataClient {
         entityCount: Object.keys(entities).length,
         recordCount,
         invoiceCount,
-        error: ""
+        error: snapshotErrors.join("; ").slice(0, 1000)
       }
     };
   }
@@ -432,7 +447,7 @@ export class CloudDataClient {
       category: service.category || "Detailing",
       defaultPrice: money(Number(service.defaultPrice || 0)),
       gstRate: money(Number(service.gstRate || 0)),
-      sacCode: service.sacCode || "9987",
+      sacCode: normalizeSacCode(service.sacCode),
       active: service.active !== false,
       createdAt: service.createdAt || nowIso()
     });
@@ -850,7 +865,7 @@ export class CloudDataClient {
     return invoice;
   }
 
-  listExpenses(filter: DateRangePreset | ReportDateFilter = "30d") {
+  listExpenses(_filter: DateRangePreset | ReportDateFilter = "30d") {
     return this.list<Expense>("expenses", { includeInactive: true }).then((rows) => rows.sort((a, b) => b.expenseDate.localeCompare(a.expenseDate)));
   }
 

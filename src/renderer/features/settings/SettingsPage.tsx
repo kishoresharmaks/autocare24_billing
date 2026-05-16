@@ -25,6 +25,7 @@ import type {
   TaxScope
 } from "../../../shared/types";
 import { OWNER_ACCESS_ROLE_ID, PERMISSION_GROUPS, STAFF_OPERATIONS_ROLE_ID, hasAnyPermission, hasPermission } from "../../../shared/access-control";
+import { DEFAULT_SAC_CODE } from "../../../shared/billing-math";
 import { InvoicePreview } from "../billing/InvoicePreview";
 
 type InvoiceAssetKind = "logo" | "signature" | "watermark";
@@ -449,10 +450,10 @@ const sampleInvoice: InvoiceDetail = {
     createdAt: todayLocal()
   },
   items: [
-    { id: "preview-item-1", invoiceId: "preview", serviceId: "", inventoryItemId: "", description: "Full Vehicle Detailing", quantity: 1, unitPrice: 4999, gstRate: 18, sacCode: "9987", lineSubTotal: 4999, lineTax: 899.82, lineTotal: 5898.82 },
-    { id: "preview-item-2", invoiceId: "preview", serviceId: "", inventoryItemId: "", description: "Interior Vacuum Cleaning", quantity: 1, unitPrice: 799, gstRate: 18, sacCode: "9987", lineSubTotal: 799, lineTax: 143.82, lineTotal: 942.82 },
-    { id: "preview-item-3", invoiceId: "preview", serviceId: "", inventoryItemId: "", description: "Dashboard Polishing", quantity: 1, unitPrice: 499, gstRate: 18, sacCode: "9987", lineSubTotal: 499, lineTax: 89.82, lineTotal: 588.82 },
-    { id: "preview-item-4", invoiceId: "preview", serviceId: "", inventoryItemId: "", description: "Tyre & Rim Cleaning", quantity: 1, unitPrice: 399, gstRate: 18, sacCode: "9987", lineSubTotal: 399, lineTax: 71.82, lineTotal: 470.82 },
+    { id: "preview-item-1", invoiceId: "preview", serviceId: "", inventoryItemId: "", description: "Full Vehicle Detailing", quantity: 1, unitPrice: 4999, gstRate: 18, sacCode: DEFAULT_SAC_CODE, lineSubTotal: 4999, lineTax: 899.82, lineTotal: 5898.82 },
+    { id: "preview-item-2", invoiceId: "preview", serviceId: "", inventoryItemId: "", description: "Interior Vacuum Cleaning", quantity: 1, unitPrice: 799, gstRate: 18, sacCode: DEFAULT_SAC_CODE, lineSubTotal: 799, lineTax: 143.82, lineTotal: 942.82 },
+    { id: "preview-item-3", invoiceId: "preview", serviceId: "", inventoryItemId: "", description: "Dashboard Polishing", quantity: 1, unitPrice: 499, gstRate: 18, sacCode: DEFAULT_SAC_CODE, lineSubTotal: 499, lineTax: 89.82, lineTotal: 588.82 },
+    { id: "preview-item-4", invoiceId: "preview", serviceId: "", inventoryItemId: "", description: "Tyre & Rim Cleaning", quantity: 1, unitPrice: 399, gstRate: 18, sacCode: DEFAULT_SAC_CODE, lineSubTotal: 399, lineTax: 71.82, lineTotal: 470.82 },
     { id: "preview-item-5", invoiceId: "preview", serviceId: "", inventoryItemId: "", description: "Vehicle Perfume", quantity: 1, unitPrice: 199, gstRate: 18, sacCode: "330749", lineSubTotal: 199, lineTax: 35.82, lineTotal: 234.82 }
   ],
   payments: []
@@ -597,7 +598,8 @@ export function SettingsPage({
   const groupedSyncConflicts = groupConflicts(syncConflicts);
 
   useEffect(() => {
-    if (visibleTabs.length && !visibleTabs.some((tab) => tab.id === activeTab)) setActiveTab(visibleTabs[0].id);
+    const firstTab = visibleTabs[0];
+    if (firstTab && !visibleTabs.some((tab) => tab.id === activeTab)) setActiveTab(firstTab.id);
   }, [activeTab, visibleTabs.map((tab) => tab.id).join("|")]);
 
   if (!visibleTabs.length) {

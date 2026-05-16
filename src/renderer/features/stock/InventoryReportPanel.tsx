@@ -3,7 +3,6 @@ import type { InventoryItem, InventoryMovement } from "../../../shared/types";
 const money = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
 const formatMoney = (value: number) =>
   `Rs ${money(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-const inventoryTypeLabel = (type: "consumable" | "retail" | string) => (type === "retail" ? "Retail products" : "Studio consumables");
 const movementLabel = (type: string) => {
   const labels: Record<string, string> = {
     purchase: "Stock added",

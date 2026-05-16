@@ -14,7 +14,6 @@ import type {
   SyncConflictResolution,
   SyncDeviceStatus,
   SyncEntity,
-  SyncOperationType,
   SyncTriggerResult
 } from "../shared/types";
 
@@ -26,7 +25,6 @@ type CloudRequestOptions = {
   body?: unknown;
 };
 
-const SYNC_INTERVAL_MS = 2 * 60 * 1000;
 const LOCAL_DEV_API_PATTERN = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i;
 
 const normalizeCloudUrl = (value: string) => value.trim().replace(/\/+$/, "");
@@ -518,11 +516,9 @@ export class CloudSyncEngine {
       revision?: number;
       deletedAt?: string | null;
     }>;
-    this.database.applyCloudRecords(records);
     const newestRecordRevision = records.reduce((max, record) => Math.max(max, Number(record.revision || 0)), status.lastRevision);
     const newRevision = Number(body.data?.newRevision ?? body.newRevision ?? newestRecordRevision);
-    this.database.updateSyncRevision("global", Math.max(status.lastRevision, newRevision));
-    this.database.updateSyncRuntime({ lastPullAt: new Date().toISOString() });
+    this.database.applyCloudPull(records, Math.max(status.lastRevision, newRevision), new Date().toISOString());
   }
 
   private recordConflict(body: Record<string, unknown>, fallbackEntity: SyncEntity, fallbackLocalId: string) {
@@ -538,10 +534,17 @@ export class CloudSyncEngine {
 
   private async fetchWithTimeout(url: string, init: RequestInit = {}, timeoutMs = 12000) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let completed = false;
+    const timeout = setTimeout(() => {
+      if (!completed) controller.abort();
+    }, timeoutMs);
+    if (typeof timeout === "object" && "unref" in timeout && typeof timeout.unref === "function") timeout.unref();
     try {
-      return await fetch(url, { ...init, signal: controller.signal });
+      const response = await fetch(url, { ...init, signal: controller.signal });
+      completed = true;
+      return response;
     } finally {
+      completed = true;
       clearTimeout(timeout);
     }
   }

@@ -50,7 +50,9 @@ const vehicleSummary = (customer: CustomerWithVehicles) =>
 
 const customerInitials = (name: string) => {
   const parts = name.trim().split(/\s+/).filter(Boolean);
-  return (parts.length > 1 ? `${parts[0][0]}${parts[1][0]}` : parts[0]?.slice(0, 2) || "WA").toUpperCase();
+  const first = parts[0] || "";
+  const second = parts[1] || "";
+  return (second ? `${first[0] ?? ""}${second[0] ?? ""}` : first.slice(0, 2) || "WA").toUpperCase();
 };
 
 const defaultMessage = (customer: CustomerWithVehicles | null, businessName: string) =>
@@ -190,7 +192,8 @@ export function WhatsAppConnectPage({
       setSelectedId("");
       return;
     }
-    if (!contacts.some((customer) => customer.id === selectedId)) setSelectedId(contacts[0].id);
+    const first = contacts[0];
+    if (!contacts.some((customer) => customer.id === selectedId) && first) setSelectedId(first.id);
   }, [contacts, selectedId]);
 
   useEffect(() => {

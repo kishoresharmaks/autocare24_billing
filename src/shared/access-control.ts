@@ -113,7 +113,7 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
 
 const permissionSet = new Set<PermissionKey>(ALL_PERMISSION_KEYS);
 
-export const ALL_PERMISSIONS = [...ALL_PERMISSION_KEYS];
+export const ALL_PERMISSIONS: ReadonlyArray<PermissionKey> = Object.freeze([...ALL_PERMISSION_KEYS]);
 
 export const normalizePermissions = (permissions: unknown): PermissionKey[] => {
   const rows = Array.isArray(permissions) ? permissions : [];
@@ -167,7 +167,7 @@ export const DEFAULT_ACCESS_ROLES: Array<Omit<AccessRole, "createdAt" | "updated
     id: OWNER_ACCESS_ROLE_ID,
     name: "Owner",
     description: "Full access to every workspace, setting, report, backup, and developer tool.",
-    permissions: ALL_PERMISSIONS,
+    permissions: [...ALL_PERMISSIONS],
     locked: true,
     active: true
   },

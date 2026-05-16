@@ -56,7 +56,9 @@ const takeInvoiceChunk = (items: InvoiceItem[], startIndex: number, budget: numb
   let used = 0;
   let endIndex = startIndex;
   while (endIndex < items.length) {
-    const nextUnits = estimateInvoiceItemUnits(items[endIndex]);
+    const item = items[endIndex];
+    if (!item) break;
+    const nextUnits = estimateInvoiceItemUnits(item);
     if (endIndex > startIndex && used + nextUnits > budget) break;
     used += nextUnits;
     endIndex += 1;
@@ -68,7 +70,9 @@ const findFinalChunkStart = (items: InvoiceItem[], startIndex: number, budget: n
   let used = 0;
   let finalStart = items.length;
   for (let index = items.length - 1; index >= startIndex; index -= 1) {
-    const nextUnits = estimateInvoiceItemUnits(items[index]);
+    const item = items[index];
+    if (!item) break;
+    const nextUnits = estimateInvoiceItemUnits(item);
     if (used + nextUnits > budget) break;
     used += nextUnits;
     finalStart = index;

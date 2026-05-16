@@ -1,7 +1,7 @@
 import { CheckCircle2, FileText, MessageCircle, PlusCircle, Printer, ReceiptText, Save, Search, Send } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { hasPermission } from "../../../shared/access-control";
-import { calculateInvoiceTotals } from "../../../shared/billing-math";
+import { calculateInvoiceTotals, DEFAULT_SAC_CODE, money, normalizeSacCode } from "../../../shared/billing-math";
 import type {
   AppUser,
   BusinessSettings,
@@ -40,7 +40,6 @@ const todayLocal = () => {
   return date.toISOString().slice(0, 10);
 };
 
-const money = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
 const formatMoney = (value: number) =>
   `Rs ${money(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const statusLabel = (status: string) =>
@@ -62,7 +61,7 @@ const emptyItem = (settings?: BusinessSettings): DraftItem => ({
   quantity: 1,
   unitPrice: 0,
   gstRate: settings?.defaultGstRate ?? 18,
-  sacCode: "9987"
+  sacCode: DEFAULT_SAC_CODE
 });
 
 const quotationItemHasContent = (item: Partial<InvoiceItemInput>) =>
@@ -83,7 +82,7 @@ const normalizeQuotationDraftItems = (rows: Array<Partial<InvoiceItemInput>>): I
       quantity: money(Math.max(0, Number(item.quantity || 0))),
       unitPrice: money(Math.max(0, Number(item.unitPrice || 0))),
       gstRate: money(Math.max(0, Number(item.gstRate || 0))),
-      sacCode: item.sacCode || "9987"
+      sacCode: normalizeSacCode(item.sacCode)
     }));
 
 const itemsFromQuotation = (quotation: QuotationDetail, settings: BusinessSettings): DraftItem[] =>
@@ -95,7 +94,7 @@ const itemsFromQuotation = (quotation: QuotationDetail, settings: BusinessSettin
     quantity: Number.isFinite(Number(item.quantity)) ? Number(item.quantity) : 1,
     unitPrice: Number.isFinite(Number(item.unitPrice)) ? Number(item.unitPrice) : 0,
     gstRate: Number.isFinite(Number(item.gstRate)) ? Number(item.gstRate) : settings.defaultGstRate,
-    sacCode: item.sacCode || "9987"
+    sacCode: normalizeSacCode(item.sacCode)
   }));
 
 const validateQuotationForBill = (payload: QuotationSaveInput) => {
@@ -196,14 +195,17 @@ export function QuotationsPage({
   const totals = useMemo(() => calculateInvoiceTotals(mode, taxScope, draftItems, discount), [mode, taxScope, draftItems, discount]);
   const isConverted = Boolean(activeQuotation?.convertedInvoiceId || status === "converted");
   const canEditCurrent = canManage && !isConverted;
-  const canConvertCurrent = canConvert && activeQuotation && ["draft", "sent", "accepted"].includes(activeQuotation.quotationStatus) && !activeQuotation.convertedInvoiceId;
+  const canConvertCurrent = Boolean(
+    canConvert && activeQuotation && ["draft", "sent", "accepted"].includes(activeQuotation.quotationStatus) && !activeQuotation.convertedInvoiceId
+  );
 
   const loadQuotations = async () => {
     if (!canView) return;
     try {
       const rows = await window.autocare.listQuotations(query);
       setQuotations(rows);
-      if (!selectedId && rows.length) setSelectedId(rows[0].id);
+      const first = rows[0];
+      if (!selectedId && first) setSelectedId(first.id);
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to load quotations.");
     }
@@ -307,7 +309,7 @@ export function QuotationsPage({
   const pickService = (key: string, serviceId: string) => {
     const service = services.find((item) => item.id === serviceId);
     if (!service) {
-      updateItem(key, { serviceId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: "9987" });
+      updateItem(key, { serviceId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE });
       return;
     }
     updateItem(key, {
@@ -316,14 +318,14 @@ export function QuotationsPage({
       description: service.name,
       unitPrice: service.defaultPrice,
       gstRate: service.gstRate,
-      sacCode: service.sacCode
+      sacCode: normalizeSacCode(service.sacCode)
     });
   };
 
   const pickRetailItem = (key: string, inventoryItemId: string) => {
     const item = retailItems.find((row) => row.id === inventoryItemId);
     if (!item) {
-      updateItem(key, { inventoryItemId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: "9987" });
+      updateItem(key, { inventoryItemId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE });
       return;
     }
     updateItem(key, {
@@ -332,7 +334,7 @@ export function QuotationsPage({
       description: item.name,
       unitPrice: item.retailPrice,
       gstRate: item.gstRate,
-      sacCode: "9987"
+      sacCode: DEFAULT_SAC_CODE
     });
   };
 
@@ -466,6 +468,10 @@ export function QuotationsPage({
     id: activeQuotation?.id || "quotation-preview",
     invoiceNumber: activeQuotation?.quotationNumber || "Saved after Save",
     invoiceStatus: "finalized",
+    cloudSyncStatus: "local_only",
+    cloudRevision: 0,
+    cloudSyncedAt: "",
+    cloudConflictId: "",
     invoiceMode: mode,
     taxScope,
     invoiceDate: quotationDate,

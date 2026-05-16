@@ -1,7 +1,8 @@
 ﻿import { FileText, Printer, Search } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Copy, MessageCircle } from "lucide-react";
 import { hasPermission } from "../../../shared/access-control";
+import { DEFAULT_SAC_CODE, money, normalizeSacCode } from "../../../shared/billing-math";
 import type { AppUser, BusinessSettings, InventoryItem, InvoiceDetail, InvoiceItemInput, InvoiceSummary, PaymentMode, ServiceItem, VehicleType } from "../../../shared/types";
 import { InvoicePreview } from "./InvoicePreview";
 
@@ -14,9 +15,14 @@ const todayLocal = () => {
   return date.toISOString().slice(0, 10);
 };
 
-const money = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
 const formatMoney = (value: number) =>
   `Rs ${money(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const parsePaymentAmount = (value: string | number, maxAmount: number) => {
+  const amount = Number(value);
+  const balanceDue = Number(maxAmount);
+  if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(balanceDue) || balanceDue <= 0) return 0;
+  return money(Math.min(amount, balanceDue));
+};
 const statusLabel = (status: string) =>
   status
     .replace(/[_-]/g, " ")
@@ -73,7 +79,7 @@ async function waitForImageReady(image: HTMLImageElement, timeoutMs: number) {
   await image.decode?.().catch(() => undefined);
 }
 
-const emptyItem = (settings?: BusinessSettings): DraftItem => ({
+const emptyItem = (settings?: BusinessSettings | null): DraftItem => ({
   key: crypto.randomUUID(),
   serviceId: "",
   inventoryItemId: "",
@@ -81,7 +87,7 @@ const emptyItem = (settings?: BusinessSettings): DraftItem => ({
   quantity: 1,
   unitPrice: 0,
   gstRate: settings?.defaultGstRate ?? 18,
-  sacCode: "9987"
+  sacCode: DEFAULT_SAC_CODE
 });
 
 export function InvoicesPage({
@@ -92,7 +98,7 @@ export function InvoicesPage({
   currentUser,
   initialSelectedInvoiceId
 }: {
-  settings: BusinessSettings;
+  settings: BusinessSettings | null;
   refreshKey: number;
   notify: (message: string) => void;
   openDraft: (draftId: string) => void;
@@ -116,6 +122,11 @@ export function InvoicesPage({
   const [repairingCloudInvoice, setRepairingCloudInvoice] = useState(false);
   const [sharingPdf, setSharingPdf] = useState(false);
   const [pdfSharePath, setPdfSharePath] = useState("");
+  const mountedRef = useRef(true);
+  const invoiceListRequestRef = useRef(0);
+  const invoiceDetailRequestRef = useRef(0);
+  const defaultGstRate = settings?.defaultGstRate ?? 18;
+  const businessName = settings?.businessName || "Autocare24";
   const canManageInvoices = hasPermission(currentUser, "billing.manageInvoices");
   const canCancelInvoices = hasPermission(currentUser, "billing.cancelInvoices");
   const canRecordPayments = hasPermission(currentUser, "billing.recordPayments");
@@ -124,14 +135,32 @@ export function InvoicesPage({
   const invoiceNeedsCloudNumber = Boolean(invoice && (invoice.cloudSyncStatus === "pending_cloud" || invoice.cloudSyncStatus === "failed" || invoice.invoiceNumber.startsWith("LOCAL-")));
   const whatsappPhone = normalizeWhatsAppPhone(invoice?.customerPhone || invoice?.customer.phone || "");
 
-  const loadInvoices = () =>
-    window.autocare
-      .listInvoices(query)
-      .then((rows) => {
-        setInvoices(rows);
-        if (!selectedId && rows.length) setSelectedId(rows[0].id);
-      })
-      .catch((error) => notify(error.message));
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+      invoiceListRequestRef.current += 1;
+      invoiceDetailRequestRef.current += 1;
+    };
+  }, []);
+
+  const loadInvoices = async () => {
+    const requestId = ++invoiceListRequestRef.current;
+    try {
+      const rows = await window.autocare.listInvoices(query);
+      if (!mountedRef.current || requestId !== invoiceListRequestRef.current) return rows;
+      setInvoices(rows);
+      setSelectedId((currentSelectedId) => {
+        if (currentSelectedId && rows.some((row) => row.id === currentSelectedId)) return currentSelectedId;
+        return rows[0]?.id || "";
+      });
+      return rows;
+    } catch (error) {
+      if (mountedRef.current && requestId === invoiceListRequestRef.current) {
+        notify(error instanceof Error ? error.message : "Unable to load invoices.");
+      }
+      return [];
+    }
+  };
 
   useEffect(() => {
     loadInvoices();
@@ -142,37 +171,64 @@ export function InvoicesPage({
   }, [initialSelectedInvoiceId]);
 
   useEffect(() => {
+    let active = true;
     Promise.all([
       canManageInvoices ? window.autocare.listServices() : Promise.resolve([]),
       canManageInvoices ? window.autocare.listInventoryItems() : Promise.resolve([])
     ])
       .then(([serviceRows, inventoryRows]) => {
+        if (!active) return;
         setServices(serviceRows);
         setRetailItems(inventoryRows.filter((item) => item.type === "retail" && item.active));
       })
-      .catch((error) => notify(error.message));
+      .catch((error) => {
+        if (active) notify(error.message);
+      });
+    return () => {
+      active = false;
+    };
   }, [canManageInvoices]);
 
   useEffect(() => {
+    const requestId = ++invoiceDetailRequestRef.current;
+    let active = true;
     if (!selectedId) {
       setInvoice(null);
-      return;
+      return () => {
+        active = false;
+      };
     }
     setShowCancelPanel(false);
     setCancelReason("");
     setShowAddItemPanel(false);
     setAppendItem(emptyItem(settings));
     setPdfSharePath("");
-    window.autocare.getInvoice(selectedId).then(setInvoice).catch((error) => notify(error.message));
-  }, [selectedId]);
+    window.autocare
+      .getInvoice(selectedId)
+      .then((row) => {
+        if (active && mountedRef.current && requestId === invoiceDetailRequestRef.current) setInvoice(row);
+      })
+      .catch((error) => {
+        if (active && mountedRef.current && requestId === invoiceDetailRequestRef.current) notify(error.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedId, defaultGstRate]);
 
   const recordPayment = async () => {
     if (!invoice) return;
     if (!canRecordPayments) return notify("Payment access is not enabled for this role.");
+    const amount = parsePaymentAmount(paymentAmount, invoice.balanceDue);
+    if (amount <= 0) {
+      setPaymentAmount(0);
+      return notify("Enter a valid payment amount greater than zero.");
+    }
+    if (amount !== paymentAmount) setPaymentAmount(amount);
     try {
       const updated = await window.autocare.recordPayment({
         invoiceId: invoice.id,
-        amount: paymentAmount,
+        amount,
         mode: paymentMode,
         reference: paymentReference,
         paymentDate: todayLocal()
@@ -232,7 +288,7 @@ export function InvoicesPage({
         kind: "invoice_pdf",
         phone: whatsappPhone.value,
         customerName: invoice.customerName,
-        businessName: settings.businessName,
+        businessName,
         invoiceNumber: invoice.invoiceNumber,
         invoiceDate: invoice.invoiceDate,
         vehicleNumber: invoice.vehicleNumber,
@@ -260,7 +316,7 @@ export function InvoicesPage({
         kind,
         phone: whatsappPhone.value,
         customerName: invoice.customerName,
-        businessName: settings.businessName,
+        businessName,
         invoiceNumber: invoice.invoiceNumber,
         invoiceDate: invoice.invoiceDate,
         vehicleNumber: invoice.vehicleNumber,
@@ -345,7 +401,7 @@ export function InvoicesPage({
   const pickAppendService = (serviceId: string) => {
     const service = services.find((item) => item.id === serviceId);
     if (!service) {
-      updateAppendItem({ serviceId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: "9987" });
+      updateAppendItem({ serviceId: "", description: "", unitPrice: 0, gstRate: defaultGstRate, sacCode: DEFAULT_SAC_CODE });
       return;
     }
     updateAppendItem({
@@ -354,14 +410,14 @@ export function InvoicesPage({
       description: service.name,
       unitPrice: service.defaultPrice,
       gstRate: service.gstRate,
-      sacCode: service.sacCode
+      sacCode: normalizeSacCode(service.sacCode)
     });
   };
 
   const pickAppendRetailItem = (inventoryItemId: string) => {
     const item = retailItems.find((row) => row.id === inventoryItemId);
     if (!item) {
-      updateAppendItem({ inventoryItemId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: "9987" });
+      updateAppendItem({ inventoryItemId: "", description: "", unitPrice: 0, gstRate: defaultGstRate, sacCode: DEFAULT_SAC_CODE });
       return;
     }
     updateAppendItem({
@@ -370,7 +426,7 @@ export function InvoicesPage({
       description: item.name,
       unitPrice: item.retailPrice,
       gstRate: item.gstRate,
-      sacCode: "9987"
+      sacCode: DEFAULT_SAC_CODE
     });
   };
 
@@ -378,9 +434,10 @@ export function InvoicesPage({
     if (!invoice) return;
     if (!canManageInvoices) return notify("Invoice edit access is not enabled for this role.");
     const { key: _key, ...item } = appendItem;
+    const normalizedItem = { ...item, sacCode: normalizeSacCode(item.sacCode) };
     setUpdatingInvoice(true);
     try {
-      const updated = await window.autocare.appendInvoiceItem({ invoiceId: invoice.id, item });
+      const updated = await window.autocare.appendInvoiceItem({ invoiceId: invoice.id, item: normalizedItem });
       setInvoice(updated);
       setPdfSharePath("");
       setAppendItem(emptyItem(settings));
@@ -563,12 +620,12 @@ export function InvoicesPage({
                 {invoice.replacementInvoiceId && <span>Replacement invoice is linked in history.</span>}
               </div>
             )}
-            <InvoicePreview settings={settings} invoice={invoice} />
+            {settings ? <InvoicePreview settings={settings} invoice={invoice} /> : <div className="empty-state">Loading invoice settings...</div>}
             {invoice.invoiceStatus !== "cancelled" && canRecordPayments && invoice.balanceDue > 0 && (
               <div className="panel payment-panel no-print">
                 <h2>Record payment</h2>
                 <div className="form-grid four">
-                  <label>Amount<input type="number" min="0" max={invoice.balanceDue} value={paymentAmount} onChange={(event) => setPaymentAmount(Number(event.currentTarget.value))} /></label>
+                  <label>Amount<input type="number" min="0" step="0.01" max={invoice.balanceDue} value={paymentAmount} onChange={(event) => setPaymentAmount(parsePaymentAmount(event.currentTarget.value, invoice.balanceDue))} /></label>
                   <label>Mode<select value={paymentMode} onChange={(event) => setPaymentMode(event.currentTarget.value as PaymentMode)}>{paymentModes.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
                   <label>Reference<input value={paymentReference} onChange={(event) => setPaymentReference(event.currentTarget.value)} /></label>
                   <button className="primary-action align-bottom" onClick={recordPayment}>Save payment</button>

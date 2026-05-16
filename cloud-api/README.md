@@ -102,12 +102,15 @@ DB_PORT=3306
 DB_NAME=cpaneluser_autocare24_sync
 DB_USER=cpaneluser_autocare24_user
 DB_PASSWORD=your-strong-password
+NODE_ENV=production
 SYNC_REGISTRATION_KEY=make-a-long-private-device-key
 UPLOAD_DIR=/home/cpaneluser/autocare24-sync-uploads
 TOKEN_HASH_SECRET=make-a-different-long-private-token-hash-secret
-MAX_BODY_BYTES=25165824
+ALLOW_LEGACY_TOKEN_MIGRATION=false
+MAX_BODY_BYTES=33554432
 AUTH_RATE_LIMIT_MAX=10
 AUTH_RATE_LIMIT_WINDOW_MS=900000
+RATE_LIMIT_MAX_BUCKETS=50000
 DEVICE_REGISTRATION_RATE_LIMIT_MAX=10
 DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS=900000
 TRUSTED_PROXY_IPS=
@@ -130,12 +133,17 @@ WHATSAPP_DOCUMENT_MAX_BYTES=18874368
 Important:
 
 - If your hosting panel automatically sets `PORT`, leave `PORT` unset. If it asks you for a port, use the panel-assigned port. For local testing, the API defaults to `8080`.
+- `NODE_ENV=production` enables startup checks that refuse unsafe defaults such as missing `TOKEN_HASH_SECRET`, empty database passwords, or `DB_USER=root`.
 - `SYNC_REGISTRATION_KEY` is what you enter in the desktop app when connecting a PC.
 - Use a long private value, not a simple password.
-- `UPLOAD_DIR` should be outside `public_html`.
+- `UPLOAD_DIR` should be a dedicated folder outside `public_html`; do not point it at `/`, a drive root, or a public web folder.
 - `TOKEN_HASH_SECRET` protects stored device token hashes. Keep it stable after deployment.
-- `MAX_BODY_BYTES` defaults to 24 MB so the 18 MB WhatsApp PDF limit still has room for base64 JSON overhead.
+- `ALLOW_LEGACY_TOKEN_MIGRATION=false` is the secure production default. Set it to `true` only temporarily when migrating old SHA-256 device-token hashes to HMAC, then set it back to `false` after devices reconnect.
+- `MAX_BODY_BYTES` defaults to 32 MB so 15 MB purchase documents and 18 MB WhatsApp PDFs have room for base64 JSON overhead.
 - Auth and device registration rate limits default to 10 attempts per 15 minutes per IP.
+- `RATE_LIMIT_MAX_BUCKETS` caps in-memory rate-limit keys so a rotating-IP attack cannot grow memory without bound.
+- This API is desktop/server-to-server only. Browser requests with an `Origin` header are rejected instead of using CORS.
+- Cloud user passwords must be 8-128 characters, include at least one letter and one number, and avoid common/simple passwords.
 - Loopback proxies (`127.0.0.1` and `::1`) are trusted for `X-Forwarded-For`/`X-Real-IP` so local hosting panels can show the real client IP instead of `127.0.0.1`.
 - Add only known reverse proxy IPs to `TRUSTED_PROXY_IPS`; the API trusts forwarded IP headers only from loopback or those configured proxy IPs.
 - `GITHUB_RELEASE_TOKEN` is server-only. Use a GitHub fine-grained token for the private `autocare24_billing` repository with **Contents: Read-only** for update downloads. Do not put this token in the desktop app.
@@ -414,7 +422,8 @@ Before using this with real billing data:
 - Health URL returns OK over HTTPS.
 - Update feed URL returns `latest.yml` after a private release is published.
 - MySQL migration completed without errors.
-- `UPLOAD_DIR` is writable and not public.
+- `NODE_ENV=production`, `TOKEN_HASH_SECRET`, and dedicated non-root MySQL credentials are set.
+- `UPLOAD_DIR` is writable, dedicated to uploads, not filesystem root, and not public.
 - First PC can connect and sync.
 - Second PC becomes pending first, then can sync only after owner approval.
 - Unknown devices can be revoked from **Cloud Devices**.

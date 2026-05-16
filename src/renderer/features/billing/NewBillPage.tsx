@@ -1,6 +1,6 @@
 ﻿import { Save } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { calculateInvoiceTotals } from "../../../shared/billing-math";
+import { calculateInvoiceTotals, DEFAULT_SAC_CODE, money, normalizeSacCode } from "../../../shared/billing-math";
 import type { BusinessSettings, Customer, CustomerWithVehicles, InventoryItem, InvoiceDetail, InvoiceDraft, InvoiceDraftCorrectionType, InvoiceDraftPayload, InvoiceItemInput, InvoiceMode, PaymentMode, ServiceItem, TaxScope, Vehicle, VehicleType } from "../../../shared/types";
 
 type DraftItem = InvoiceItemInput & { key: string };
@@ -13,7 +13,6 @@ const todayLocal = () => {
   return date.toISOString().slice(0, 10);
 };
 
-const money = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
 const formatMoney = (value: number) =>
   `Rs ${money(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const formatInvoiceDate = (date: string) => {
@@ -37,7 +36,7 @@ const emptyItem = (settings?: BusinessSettings): DraftItem => ({
   quantity: 1,
   unitPrice: 0,
   gstRate: settings?.defaultGstRate ?? 18,
-  sacCode: "9987"
+  sacCode: DEFAULT_SAC_CODE
 });
 
 const emptyInvoiceDraftPayload = (settings: BusinessSettings): InvoiceDraftPayload => ({
@@ -63,7 +62,7 @@ const draftItemsFromPayload = (payload: InvoiceDraftPayload, settings: BusinessS
     quantity: Number.isFinite(Number(item.quantity)) ? Number(item.quantity) : 1,
     unitPrice: Number.isFinite(Number(item.unitPrice)) ? Number(item.unitPrice) : 0,
     gstRate: Number.isFinite(Number(item.gstRate)) ? Number(item.gstRate) : settings.defaultGstRate,
-    sacCode: item.sacCode || "9987"
+    sacCode: normalizeSacCode(item.sacCode)
   }));
 
 const draftCorrectionLabel = (type: InvoiceDraftCorrectionType) =>
@@ -121,6 +120,11 @@ export function NewBillPage({
   const hydratingDraftRef = useRef(false);
   const locallySavedDraftIdRef = useRef("");
   const autosaveTimerRef = useRef<number | undefined>(undefined);
+  const notifyRef = useRef(notify);
+
+  useEffect(() => {
+    notifyRef.current = notify;
+  }, [notify]);
 
   const clearAutosaveTimer = () => {
     if (!autosaveTimerRef.current) return;
@@ -140,9 +144,10 @@ export function NewBillPage({
         setCustomers(customerRows);
         setRetailItems(inventoryRows.filter((item) => item.type === "retail" && item.active));
         setDrafts(draftRows);
-        if (!activeDraftId && draftRows.length) setActiveDraftId(draftRows[0].id);
+        const firstDraft = draftRows[0];
+        if (!activeDraftId && firstDraft) setActiveDraftId(firstDraft.id);
       })
-      .catch((error) => notify(error.message));
+      .catch((error) => notifyRef.current(error.message));
   }, []);
 
   const selectedCustomer = customers.find((item) => item.id === selectedCustomerId);
@@ -161,7 +166,7 @@ export function NewBillPage({
     customer,
     vehicleId: selectedVehicleId || undefined,
     vehicle,
-    items: items.map(({ key: _key, ...item }) => item),
+    items: items.map(({ key: _key, ...item }) => ({ ...item, sacCode: normalizeSacCode(item.sacCode) })),
     discount,
     paidAmount,
     paymentMode,
@@ -257,11 +262,11 @@ export function NewBillPage({
       setActiveDraftId(draft.id);
       await refreshDrafts();
       setDraftStatus(`Draft saved ${new Date().toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}`);
-      if (!silent) notify("Draft saved.");
+      if (!silent) notifyRef.current("Draft saved.");
       return draft;
     } catch (error) {
       setDraftStatus("Draft save failed");
-      if (!silent) notify(error instanceof Error ? error.message : "Unable to save draft.");
+      if (!silent) notifyRef.current(error instanceof Error ? error.message : "Unable to save draft.");
       return null;
     } finally {
       if (!silent) setSavingDraft(false);
@@ -285,7 +290,7 @@ export function NewBillPage({
       })
       .catch((error) => {
         if (cancelled) return;
-        notify(error instanceof Error ? error.message : "Unable to load draft.");
+        notifyRef.current(error instanceof Error ? error.message : "Unable to load draft.");
         setActiveDraftId("");
       });
     return () => {
@@ -352,7 +357,7 @@ export function NewBillPage({
   const pickService = (key: string, serviceId: string) => {
     const service = services.find((item) => item.id === serviceId);
     if (!service) {
-      updateItem(key, { serviceId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: "9987" });
+      updateItem(key, { serviceId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE });
       return;
     }
     updateItem(key, {
@@ -361,14 +366,14 @@ export function NewBillPage({
       description: service.name,
       unitPrice: service.defaultPrice,
       gstRate: service.gstRate,
-      sacCode: service.sacCode
+      sacCode: normalizeSacCode(service.sacCode)
     });
   };
 
   const pickRetailItem = (key: string, inventoryItemId: string) => {
     const item = retailItems.find((row) => row.id === inventoryItemId);
     if (!item) {
-      updateItem(key, { inventoryItemId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: "9987" });
+      updateItem(key, { inventoryItemId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE });
       return;
     }
     updateItem(key, {
@@ -377,7 +382,7 @@ export function NewBillPage({
       description: item.name,
       unitPrice: item.retailPrice,
       gstRate: item.gstRate,
-      sacCode: "9987"
+      sacCode: DEFAULT_SAC_CODE
     });
   };
 

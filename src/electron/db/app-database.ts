@@ -1,4 +1,4 @@
-﻿import { app } from "electron";
+import { app } from "electron";
 import { execFileSync } from "node:child_process";
 import { createHash, pbkdf2Sync, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
@@ -13,7 +13,7 @@ import {
   STAFF_OPERATIONS_ROLE_ID,
   normalizePermissions
 } from "../../shared/access-control";
-import { calculateInvoiceTotals } from "../../shared/billing-math";
+import { calculateInvoiceTotals, DEFAULT_SAC_CODE, normalizeSacCode } from "../../shared/billing-math";
 import { CORE_SCHEMA_SQL, DATA_TABLES, INVOICES_JOB_CARD_INDEX_SQL, SCHEMA_COLUMNS } from "./schema";
 import { BUSINESS_SETTINGS_SYNC_ID, JOB_CARD_SETTINGS_SYNC_ID } from "../../shared/types";
 import type {
@@ -263,7 +263,7 @@ const readNetworkHardwareValues = () => {
 const uuidFromStableValue = (value: string) => {
   const chars = createHash("sha256").update(value).digest("hex").slice(0, 32).split("");
   chars[12] = "5";
-  chars[16] = ((parseInt(chars[16], 16) & 0x3) | 0x8).toString(16);
+  chars[16] = ((parseInt(chars[16] ?? "0", 16) & 0x3) | 0x8).toString(16);
   const hex = chars.join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 };
@@ -815,33 +815,21 @@ export class AppDatabase {
   applyCloudRecords(records: CloudRecord[]) {
     if (!records.length) return;
     this.writeTransaction(() => {
-      records.forEach((record) => {
-        const entity = String(record.entity || "");
-        const data = this.normalizeCloudRecordData(record.data);
-        if (entity === "settings") {
-          this.applyCloudSettings(record.recordId || "", data);
-          return;
-        }
-        if (!DATA_TABLES.includes(entity as (typeof DATA_TABLES)[number]) || CLOUD_SYNC_SKIP_TABLES.has(entity)) return;
-        const columns = this.tableColumnNames(entity);
-        if (!columns.has("id")) return;
-        const recordId = String(record.recordId || data.id || "");
-        if (!recordId) return;
-        if (record.deletedAt) {
-          this.applyCloudTombstone(entity, recordId, columns);
-          return;
-        }
-        const payload: Record<string, unknown> = { ...data, id: data.id || recordId };
-        const writableColumns = [...columns].filter((column) => Object.prototype.hasOwnProperty.call(payload, column));
-        if (!writableColumns.length) return;
-        const placeholders = writableColumns.map(() => "?").join(", ");
-        const values = writableColumns.map((column) => normalizeCloudParam(payload[column]));
-        this.requireDb().run(
-          `INSERT OR REPLACE INTO ${entity} (${writableColumns.join(", ")}) VALUES (${placeholders})`,
-          values
-        );
-      });
+      this.applyCloudRecordsInCurrentTransaction(records);
     });
+  }
+
+  applyCloudPull(records: CloudRecord[], revision: number, pulledAt = nowIso()) {
+    const safeRevision = Math.max(0, Math.floor(Number(revision) || 0));
+    this.writeTransaction(() => {
+      this.applyCloudRecordsInCurrentTransaction(records);
+      this.requireDb().run(
+        "INSERT OR REPLACE INTO sync_state (entity, lastRevision, lastSyncedAt) VALUES (?, ?, ?)",
+        ["global", safeRevision, pulledAt]
+      );
+      this.requireDb().run("UPDATE sync_device SET lastPullAt = ? WHERE id = 1", [pulledAt]);
+    });
+    return this.getSyncStatus();
   }
 
   applyCloudCanonicalRows(rows: Array<{ entity?: string; localId?: string; recordId?: string; invoiceNumber?: string; quotationNumber?: string; jobNumber?: string; revision?: number }>) {
@@ -906,6 +894,35 @@ export class AppDatabase {
     }
   }
 
+  private applyCloudRecordsInCurrentTransaction(records: CloudRecord[]) {
+    records.forEach((record) => {
+      const entity = String(record.entity || "");
+      const data = this.normalizeCloudRecordData(record.data);
+      if (entity === "settings") {
+        this.applyCloudSettings(record.recordId || "", data);
+        return;
+      }
+      if (!DATA_TABLES.includes(entity as (typeof DATA_TABLES)[number]) || CLOUD_SYNC_SKIP_TABLES.has(entity)) return;
+      const columns = this.tableColumnNames(entity);
+      if (!columns.has("id")) return;
+      const recordId = String(record.recordId || data.id || "");
+      if (!recordId) return;
+      if (record.deletedAt) {
+        this.applyCloudTombstone(entity, recordId, columns);
+        return;
+      }
+      const payload: Record<string, unknown> = { ...data, id: data.id || recordId };
+      const writableColumns = [...columns].filter((column) => Object.prototype.hasOwnProperty.call(payload, column));
+      if (!writableColumns.length) return;
+      const placeholders = writableColumns.map(() => "?").join(", ");
+      const values = writableColumns.map((column) => normalizeCloudParam(payload[column]));
+      this.requireDb().run(
+        `INSERT OR REPLACE INTO ${entity} (${writableColumns.join(", ")}) VALUES (${placeholders})`,
+        values
+      );
+    });
+  }
+
   listSyncConflicts(): SyncConflictSummary[] {
     return this.select<Row>("SELECT * FROM sync_conflicts WHERE status = 'OPEN' ORDER BY detectedAt DESC").map(this.mapSyncConflict);
   }
@@ -931,7 +948,8 @@ export class AppDatabase {
     return new Set(this.select<Row>(`PRAGMA table_info(${table})`).map((row) => rowText(row, "name")).filter(Boolean));
   }
 
-  private rowPayload(row: Row): Record<string, unknown> {
+  private rowPayload(row: Row | undefined | null): Record<string, unknown> {
+    if (!row) return {};
     return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, value]));
   }
 
@@ -1490,7 +1508,7 @@ export class AppDatabase {
         input.category?.trim() || "Detailing",
         money(nonNegativeNumber(input.defaultPrice ?? 0, "Default price")),
         money(nonNegativeNumber(input.gstRate ?? this.getSettings().defaultGstRate, "GST rate")),
-        input.sacCode?.trim() || "9987",
+        normalizeSacCode(input.sacCode),
         input.active === false ? 0 : 1,
         createdAt
       ]
@@ -2745,7 +2763,7 @@ export class AppDatabase {
         vehicleId: invoice.vehicleId,
         customer: invoice.customer,
         vehicle: invoice.vehicle,
-        items: [{ description: "", quantity: 1, unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: "9987" }],
+        items: [{ description: "", quantity: 1, unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE }],
         discount: 0,
         paidAmount: 0,
         paymentMode: invoice.paymentMode,
@@ -3301,7 +3319,9 @@ export class AppDatabase {
                   }));
 
     if (!rows.length) return "";
-    const headers = Object.keys(rows[0]);
+    const first = rows[0];
+    if (!first) return "";
+    const headers = Object.keys(first);
     return [headers.join(","), ...rows.map((row) => headers.map((header) => csvEscape(row[header as keyof typeof row])).join(","))].join(
       "\n"
     );
@@ -3466,7 +3486,9 @@ export class AppDatabase {
 
   private rowsToCsv(rows: Array<Record<string, unknown>>) {
     if (!rows.length) return "";
-    const headers = Object.keys(rows[0]);
+    const first = rows[0];
+    if (!first) return "";
+    const headers = Object.keys(first);
     return [headers.join(","), ...rows.map((row) => headers.map((header) => csvEscape(row[header])).join(","))].join("\n");
   }
 
@@ -3617,11 +3639,11 @@ export class AppDatabase {
       const serviceCount = rowNumber(this.select<Row>("SELECT COUNT(*) AS value FROM services")[0], "value");
       if (serviceCount === 0) {
         const seededServices = [
-          ["Premium Exterior Wash", "Wash", 799, 18, "9987"],
-          ["Interior Deep Cleaning", "Interior", 2499, 18, "9987"],
-          ["Full Vehicle Detailing", "Detailing", 4999, 18, "9987"],
-          ["Paint Correction", "Polishing", 6999, 18, "9987"],
-          ["Ceramic Coating", "Protection", 14999, 18, "9987"]
+          ["Premium Exterior Wash", "Wash", 799, 18, DEFAULT_SAC_CODE],
+          ["Interior Deep Cleaning", "Interior", 2499, 18, DEFAULT_SAC_CODE],
+          ["Full Vehicle Detailing", "Detailing", 4999, 18, DEFAULT_SAC_CODE],
+          ["Paint Correction", "Polishing", 6999, 18, DEFAULT_SAC_CODE],
+          ["Ceramic Coating", "Protection", 14999, 18, DEFAULT_SAC_CODE]
         ];
 
         seededServices.forEach(([name, category, price, gstRate, sacCode]) => {
@@ -3816,7 +3838,7 @@ export class AppDatabase {
     return this.createBackup("auto", options).filePath;
   }
 
-  private backupCloudSnapshotStatusFromRow(row: Row): BackupCloudSnapshotStatus {
+  private backupCloudSnapshotStatusFromRow(row: Row | undefined | null): BackupCloudSnapshotStatus {
     return {
       included: rowNumber(row, "cloudSnapshotIncluded") === 1,
       exportedAt: rowText(row, "cloudSnapshotAt"),
@@ -4411,25 +4433,8 @@ export class AppDatabase {
         quantity: money(Math.max(0, finiteNumber(item.quantity ?? 0, "Item quantity"))),
         unitPrice: money(Math.max(0, finiteNumber(item.unitPrice ?? 0, "Item price"))),
         gstRate: money(Math.max(0, finiteNumber(item.gstRate ?? 0, "GST rate"))),
-        sacCode: item.sacCode || "9987"
+        sacCode: normalizeSacCode(item.sacCode)
       }));
-  }
-
-  private validateQuotation(input: QuotationSaveInput) {
-    if (!input.customer?.name?.trim()) throw new Error("Customer name is required.");
-    if (!input.vehicle?.registrationNumber?.trim()) throw new Error("Vehicle number is required.");
-    if (!Array.isArray(input.items) || !input.items.length) throw new Error("Add at least one service item.");
-    const normalizedMode: InvoiceMode = input.invoiceMode === "gst" ? "gst" : "simple";
-    let subTotal = 0;
-    input.items.forEach((item) => {
-      if (!String(item.description ?? "").trim()) throw new Error("Every quotation item needs a description.");
-      const quantity = positiveNumber(item.quantity, "Item quantity");
-      const unitPrice = nonNegativeNumber(item.unitPrice, "Item price");
-      if (normalizedMode === "gst") nonNegativeNumber(item.gstRate, "GST rate");
-      subTotal += quantity * unitPrice;
-    });
-    const discount = nonNegativeNumber(input.discount ?? 0, "Discount");
-    if (discount > subTotal) throw new Error("Discount cannot be greater than subtotal.");
   }
 
   private calculateInvoice(
@@ -4567,6 +4572,7 @@ export class AppDatabase {
     for (let index = 0; index < batches.length; index++) {
       const batch = batches[index];
       if (remaining <= 0) break;
+      if (!batch) continue;
       const used = money(Math.min(batch.quantityRemaining, remaining));
       remaining = money(remaining - used);
       const saleAmount = sale
@@ -4749,19 +4755,6 @@ export class AppDatabase {
     return `Draft bill - ${customerName}`;
   }
 
-  private allocateLocalPlaceholderNumber(table: "invoices" | "quotations" | "job_cards", column: "invoiceNumber" | "quotationNumber" | "jobNumber") {
-    const identity = this.ensureSyncDeviceIdentity();
-    const prefix = `LOCAL-${identity.deviceCode}`;
-    const usedNumbers = new Set(this.select<Row>(`SELECT ${column} AS value FROM ${table}`).map((row) => rowText(row, "value")));
-    let nextNumber = usedNumbers.size + 1;
-    let value = `${prefix}-${String(nextNumber).padStart(5, "0")}`;
-    while (usedNumbers.has(value)) {
-      nextNumber += 1;
-      value = `${prefix}-${String(nextNumber).padStart(5, "0")}`;
-    }
-    return value;
-  }
-
   private allocateNextInvoiceNumber(settings: BusinessSettings) {
     const prefix = settings.invoicePrefix.trim() || "AC24";
     let nextNumber = Math.max(1, Math.floor(Number(settings.nextInvoiceNumber) || 1));
@@ -4824,7 +4817,7 @@ export class AppDatabase {
       quantity: money(positiveNumber(item.quantity, "Item quantity")),
       unitPrice: money(nonNegativeNumber(item.unitPrice, "Item price")),
       gstRate: invoiceMode === "gst" ? money(nonNegativeNumber(item.gstRate ?? 0, "GST rate")) : 0,
-      sacCode: item.sacCode?.trim() || "9987"
+      sacCode: normalizeSacCode(item.sacCode)
     };
   }
 
@@ -4898,7 +4891,7 @@ export class AppDatabase {
       quantity: money(finiteNumber(item.quantity, "Estimate quantity")),
       unitPrice: money(finiteNumber(item.unitPrice, "Estimate price")),
       gstRate: money(finiteNumber(item.gstRate ?? 0, "Estimate GST rate")),
-      sacCode: item.sacCode?.trim() || "9987",
+      sacCode: normalizeSacCode(item.sacCode),
       lineSubTotal: money(finiteNumber(item.quantity, "Estimate quantity") * finiteNumber(item.unitPrice, "Estimate price"))
     }));
     const subTotal = money(normalized.reduce((sum, item) => sum + item.lineSubTotal, 0));
@@ -5366,7 +5359,7 @@ export class AppDatabase {
     `;
   }
 
-  private mapService = (row: Row): ServiceItem => ({
+  private mapService = (row: Row | undefined | null): ServiceItem => ({
     id: rowText(row, "id"),
     name: rowText(row, "name"),
     category: rowText(row, "category"),
@@ -5377,7 +5370,7 @@ export class AppDatabase {
     createdAt: rowText(row, "createdAt")
   });
 
-  private mapCustomer = (row: Row): Customer => ({
+  private mapCustomer = (row: Row | undefined | null): Customer => ({
     id: rowText(row, "id"),
     name: rowText(row, "name"),
     phone: rowText(row, "phone"),
@@ -5387,7 +5380,7 @@ export class AppDatabase {
     createdAt: rowText(row, "createdAt")
   });
 
-  private mapVehicle = (row: Row): Vehicle => ({
+  private mapVehicle = (row: Row | undefined | null): Vehicle => ({
     id: rowText(row, "id"),
     customerId: rowText(row, "customerId"),
     vehicleType: this.normalizeVehicleType(rowText(row, "vehicleType")),
@@ -5398,7 +5391,7 @@ export class AppDatabase {
     createdAt: rowText(row, "createdAt")
   });
 
-  private mapInvoiceSummary = (row: Row): InvoiceSummary => ({
+  private mapInvoiceSummary = (row: Row | undefined | null): InvoiceSummary => ({
     id: rowText(row, "id"),
     invoiceNumber: rowText(row, "invoiceNumber"),
     invoiceStatus: rowText(row, "invoiceStatus") === "cancelled" ? "cancelled" : "finalized",
@@ -5439,7 +5432,7 @@ export class AppDatabase {
     createdAt: rowText(row, "createdAt")
   });
 
-  private mapSyncOutboxEntry = (row: Row): SyncOutboxEntry => ({
+  private mapSyncOutboxEntry = (row: Row | undefined | null): SyncOutboxEntry => ({
     id: rowNumber(row, "id"),
     idempotencyKey: rowText(row, "idempotencyKey"),
     operationType: (rowText(row, "operationType") === "DELETE" ? "DELETE" : "UPSERT") as SyncOperationType,
@@ -5455,7 +5448,7 @@ export class AppDatabase {
     status: (rowText(row, "status") || "PENDING") as SyncOutboxStatus
   });
 
-  private mapSyncConflict = (row: Row): SyncConflictSummary => ({
+  private mapSyncConflict = (row: Row | undefined | null): SyncConflictSummary => ({
     id: rowNumber(row, "id"),
     conflictId: rowText(row, "conflictId"),
     entity: rowText(row, "entity") as SyncEntity,
@@ -5468,7 +5461,7 @@ export class AppDatabase {
     status: rowText(row, "status") === "RESOLVED" ? "RESOLVED" : "OPEN"
   });
 
-  private mapInvoiceDraft = (row: Row): InvoiceDraft => {
+  private mapInvoiceDraft = (row: Row | undefined | null): InvoiceDraft => {
     let payload: InvoiceDraftPayload;
     try {
       payload = JSON.parse(rowText(row, "payloadJson")) as InvoiceDraftPayload;
@@ -5498,7 +5491,7 @@ export class AppDatabase {
     };
   };
 
-  private mapInvoiceItem = (row: Row): InvoiceItem => ({
+  private mapInvoiceItem = (row: Row | undefined | null): InvoiceItem => ({
     id: rowText(row, "id"),
     invoiceId: rowText(row, "invoiceId"),
     serviceId: rowText(row, "serviceId"),
@@ -5513,7 +5506,7 @@ export class AppDatabase {
     lineTotal: money(rowNumber(row, "lineTotal"))
   });
 
-  private mapQuotationSummary = (row: Row): QuotationSummary => ({
+  private mapQuotationSummary = (row: Row | undefined | null): QuotationSummary => ({
     id: rowText(row, "id"),
     quotationNumber: rowText(row, "quotationNumber"),
     quotationStatus: this.normalizeQuotationStatus(rowText(row, "quotationStatus")),
@@ -5547,7 +5540,7 @@ export class AppDatabase {
     updatedAt: rowText(row, "updatedAt")
   });
 
-  private mapQuotationItem = (row: Row): QuotationItem => ({
+  private mapQuotationItem = (row: Row | undefined | null): QuotationItem => ({
     id: rowText(row, "id"),
     quotationId: rowText(row, "quotationId"),
     serviceId: rowText(row, "serviceId"),
@@ -5562,7 +5555,7 @@ export class AppDatabase {
     lineTotal: money(rowNumber(row, "lineTotal"))
   });
 
-  private mapPayment = (row: Row): Payment => ({
+  private mapPayment = (row: Row | undefined | null): Payment => ({
     id: rowText(row, "id"),
     invoiceId: rowText(row, "invoiceId"),
     amount: money(rowNumber(row, "amount")),
@@ -5572,7 +5565,7 @@ export class AppDatabase {
     createdAt: rowText(row, "createdAt")
   });
 
-  private mapPurchaseRecord = (row: Row): PurchaseRecord => {
+  private mapPurchaseRecord = (row: Row | undefined | null): PurchaseRecord => {
     let documents: PurchaseRecordDocument[] = [];
     try {
       const parsed = JSON.parse(rowText(row, "documents") || EMPTY_JSON_ARRAY);
@@ -5596,7 +5589,7 @@ export class AppDatabase {
     };
   };
 
-  private mapExpense = (row: Row): Expense => ({
+  private mapExpense = (row: Row | undefined | null): Expense => ({
     id: rowText(row, "id"),
     expenseDate: rowText(row, "expenseDate"),
     category: rowText(row, "category"),
@@ -5610,7 +5603,7 @@ export class AppDatabase {
     updatedAt: rowText(row, "updatedAt")
   });
 
-  private mapEnquiry = (row: Row): Enquiry => ({
+  private mapEnquiry = (row: Row | undefined | null): Enquiry => ({
     id: rowText(row, "id"),
     status: this.normalizeEnquiryStatus(rowText(row, "status")),
     source: this.normalizeEnquirySource(rowText(row, "source")),
@@ -5636,7 +5629,7 @@ export class AppDatabase {
     updatedAt: rowText(row, "updatedAt")
   });
 
-  private mapEnquiryFollowup = (row: Row): EnquiryFollowup => ({
+  private mapEnquiryFollowup = (row: Row | undefined | null): EnquiryFollowup => ({
     id: rowText(row, "id"),
     enquiryId: rowText(row, "enquiryId"),
     followupDate: rowText(row, "followupDate"),
@@ -5646,7 +5639,7 @@ export class AppDatabase {
     createdAt: rowText(row, "createdAt")
   });
 
-  private mapSupplier = (row: Row): Supplier => ({
+  private mapSupplier = (row: Row | undefined | null): Supplier => ({
     id: rowText(row, "id"),
     name: rowText(row, "name"),
     phone: rowText(row, "phone"),
@@ -5655,7 +5648,7 @@ export class AppDatabase {
     createdAt: rowText(row, "createdAt")
   });
 
-  private mapInventoryItem = (row: Row): InventoryItem => ({
+  private mapInventoryItem = (row: Row | undefined | null): InventoryItem => ({
     id: rowText(row, "id"),
     name: rowText(row, "name"),
     type: rowText(row, "type") === "retail" ? "retail" : "consumable",
@@ -5671,7 +5664,7 @@ export class AppDatabase {
     createdAt: rowText(row, "createdAt")
   });
 
-  private mapInventoryBatch = (row: Row): InventoryBatch => ({
+  private mapInventoryBatch = (row: Row | undefined | null): InventoryBatch => ({
     id: rowText(row, "id"),
     itemId: rowText(row, "itemId"),
     supplierId: rowText(row, "supplierId"),
@@ -5689,7 +5682,7 @@ export class AppDatabase {
     createdAt: rowText(row, "createdAt")
   });
 
-  private mapInventoryMovement = (row: Row): InventoryMovement => ({
+  private mapInventoryMovement = (row: Row | undefined | null): InventoryMovement => ({
     id: rowText(row, "id"),
     itemId: rowText(row, "itemId"),
     itemName: rowText(row, "itemName"),
@@ -5708,7 +5701,7 @@ export class AppDatabase {
     createdAt: rowText(row, "createdAt")
   });
 
-  private mapServiceConsumable = (row: Row): ServiceConsumable => ({
+  private mapServiceConsumable = (row: Row | undefined | null): ServiceConsumable => ({
     id: rowText(row, "id"),
     serviceId: rowText(row, "serviceId"),
     inventoryItemId: rowText(row, "inventoryItemId"),
@@ -5717,7 +5710,7 @@ export class AppDatabase {
     quantity: money(rowNumber(row, "quantity"))
   });
 
-  private mapJobCardSummary = (row: Row): JobCardSummary => ({
+  private mapJobCardSummary = (row: Row | undefined | null): JobCardSummary => ({
     id: rowText(row, "id"),
     jobNumber: rowText(row, "jobNumber"),
     status: this.normalizeJobCardStatus(rowText(row, "status")),
@@ -5752,7 +5745,7 @@ export class AppDatabase {
     updatedAt: rowText(row, "updatedAt")
   });
 
-  private mapJobCardItem = (row: Row): JobCardItem => ({
+  private mapJobCardItem = (row: Row | undefined | null): JobCardItem => ({
     id: rowText(row, "id"),
     jobCardId: rowText(row, "jobCardId"),
     serviceId: rowText(row, "serviceId"),
@@ -5767,7 +5760,7 @@ export class AppDatabase {
     lineTotal: money(rowNumber(row, "lineTotal"))
   });
 
-  private mapJobCardChecklistItem = (row: Row): JobCardChecklistItem => ({
+  private mapJobCardChecklistItem = (row: Row | undefined | null): JobCardChecklistItem => ({
     id: rowText(row, "id"),
     jobCardId: rowText(row, "jobCardId"),
     label: rowText(row, "label"),
@@ -5776,7 +5769,7 @@ export class AppDatabase {
     createdAt: rowText(row, "createdAt")
   });
 
-  private mapJobCardPhoto = (row: Row): JobCardPhoto => ({
+  private mapJobCardPhoto = (row: Row | undefined | null): JobCardPhoto => ({
     id: rowText(row, "id"),
     jobCardId: rowText(row, "jobCardId"),
     type: this.normalizeJobCardPhotoType(rowText(row, "type")),
@@ -5806,7 +5799,7 @@ export class AppDatabase {
     return "image/png";
   }
 
-  private mapJobCardStatusHistory = (row: Row): JobCardStatusHistory => ({
+  private mapJobCardStatusHistory = (row: Row | undefined | null): JobCardStatusHistory => ({
     id: rowText(row, "id"),
     jobCardId: rowText(row, "jobCardId"),
     status: this.normalizeJobCardStatus(rowText(row, "status")),
@@ -5882,7 +5875,7 @@ export class AppDatabase {
     return type === "bike" ? "Bike" : type === "other" ? "Other" : "Car";
   }
 
-  private mapUser = (row: Row): AppUser => {
+  private mapUser = (row: Row | undefined | null): AppUser => {
     const role = rowText(row, "role") === "owner" ? "owner" : "staff";
     const accessRoleId = role === "owner" ? OWNER_ACCESS_ROLE_ID : rowText(row, "accessRoleId") || STAFF_OPERATIONS_ROLE_ID;
     const accessRole = this.select<Row>("SELECT * FROM access_roles WHERE id = ? LIMIT 1", [accessRoleId])[0];
@@ -5895,14 +5888,14 @@ export class AppDatabase {
       role,
       accessRoleId,
       accessRoleName: role === "owner" ? "Owner" : mappedRole?.name || "Staff Operations",
-      permissions: role === "owner" ? ALL_PERMISSIONS : activeRole?.permissions || [],
+      permissions: role === "owner" ? [...ALL_PERMISSIONS] : activeRole?.permissions || [],
       active: rowNumber(row, "active") === 1,
       createdAt: rowText(row, "createdAt"),
       updatedAt: rowText(row, "updatedAt")
     };
   };
 
-  private mapAccessRole = (row: Row): AccessRole => ({
+  private mapAccessRole = (row: Row | undefined | null): AccessRole => ({
     id: rowText(row, "id"),
     name: rowText(row, "name"),
     description: rowText(row, "description"),

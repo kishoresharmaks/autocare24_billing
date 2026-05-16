@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { MessageCircle } from "lucide-react";
 import { hasPermission } from "../../../shared/access-control";
-import { calculateInvoiceTotals } from "../../../shared/billing-math";
+import { calculateInvoiceTotals, DEFAULT_SAC_CODE, money, normalizeSacCode } from "../../../shared/billing-math";
 import type { AppUser, BusinessSettings, CustomerWithVehicles, InventoryItem, InvoiceItemInput, InvoiceMode, JobCardDetail, JobCardInput, JobCardItemInput, JobCardPhotoType, JobCardStatus, JobCardSummary, ServiceItem, TaxScope, Vehicle, VehicleType } from "../../../shared/types";
 
 type DraftJobCardItem = JobCardItemInput & { key: string };
@@ -36,7 +36,6 @@ const todayLocal = () => {
   date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
   return date.toISOString().slice(0, 10);
 };
-const money = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
 const formatMoney = (value: number) =>
   `Rs ${money(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const statusLabel = (status: string) =>
@@ -69,7 +68,7 @@ const emptyJobCardItem = (settings?: BusinessSettings): DraftJobCardItem => ({
   quantity: 1,
   unitPrice: 0,
   gstRate: settings?.defaultGstRate ?? 18,
-  sacCode: "9987"
+  sacCode: DEFAULT_SAC_CODE
 });
 
 const emptyJobCardInput = (settings?: BusinessSettings): JobCardInput => ({
@@ -126,7 +125,7 @@ const jobCardToInput = (jobCard: JobCardDetail): JobCardInput => ({
     quantity,
     unitPrice,
     gstRate,
-    sacCode
+    sacCode: normalizeSacCode(sacCode)
   }))
 });
 
@@ -269,27 +268,27 @@ export function JobCardsPage({
 
   const pickService = (key: string, serviceId: string) => {
     const service = services.find((row) => row.id === serviceId);
-    if (!service) return updateItem(key, { serviceId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: "9987" });
+    if (!service) return updateItem(key, { serviceId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE });
     updateItem(key, {
       serviceId: service.id,
       inventoryItemId: "",
       description: service.name,
       unitPrice: service.defaultPrice,
       gstRate: service.gstRate,
-      sacCode: service.sacCode
+      sacCode: normalizeSacCode(service.sacCode)
     });
   };
 
   const pickRetailItem = (key: string, inventoryItemId: string) => {
     const item = retailItems.find((row) => row.id === inventoryItemId);
-    if (!item) return updateItem(key, { inventoryItemId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: "9987" });
+    if (!item) return updateItem(key, { inventoryItemId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE });
     updateItem(key, {
       serviceId: "",
       inventoryItemId: item.id,
       description: item.name,
       unitPrice: item.retailPrice,
       gstRate: item.gstRate,
-      sacCode: "9987"
+      sacCode: DEFAULT_SAC_CODE
     });
   };
 
@@ -307,7 +306,7 @@ export function JobCardsPage({
           quantity: item.quantity,
           unitPrice: item.unitPrice,
           gstRate: item.gstRate,
-          sacCode: item.sacCode
+          sacCode: normalizeSacCode(item.sacCode)
         }))
       });
       notify(`${saved.jobNumber} saved.`);

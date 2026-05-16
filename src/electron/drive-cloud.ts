@@ -88,13 +88,16 @@ const parseJson = <T>(value: string, fallback: T): T => {
 };
 
 const driveQueryValue = (value: string) => value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+const toErrorMessage = (error: unknown) => error instanceof Error ? error.message : String(error || "Unknown error");
+const isHttpStatus = (error: unknown, status: number) =>
+  error instanceof Error && (error as Error & { status?: number }).status === status;
 
 export class DriveCloudService {
   private readonly tokenPath: string;
   private readonly statePath: string;
   private readonly downloadDirectory: string;
 
-  constructor(private readonly userDataPath: string) {
+  constructor(userDataPath: string) {
     this.tokenPath = path.join(userDataPath, "google-drive-token.bin");
     this.statePath = path.join(userDataPath, "google-drive-state.json");
     this.downloadDirectory = path.join(userDataPath, "drive-downloads");
@@ -159,8 +162,17 @@ export class DriveCloudService {
         body: new URLSearchParams({ token: token.refreshToken }).toString()
       }).catch(() => undefined);
     }
-    if (fs.existsSync(this.tokenPath)) fs.unlinkSync(this.tokenPath);
-    this.writeState({ accountEmail: "", lastError: "" });
+    try {
+      if (fs.existsSync(this.tokenPath)) fs.unlinkSync(this.tokenPath);
+    } catch (error) {
+      const message = toErrorMessage(error);
+      this.writeState({ lastError: message });
+      return {
+        ok: false,
+        message: `Google Drive disconnected from Google, but the local token file could not be removed: ${message}`
+      };
+    }
+    this.writeState({ accountEmail: "", folderId: "", folderName: DRIVE_BACKUP_FOLDER_NAME, lastError: "" });
     return { ok: true, message: "Google Drive disconnected." };
   }
 
@@ -295,6 +307,7 @@ export class DriveCloudService {
     return new Promise<{ code: string; redirectUri: string; codeVerifier: string }>((resolve, reject) => {
       let settled = false;
       let redirectUri = "";
+      let timeout: ReturnType<typeof setTimeout> | null = null;
       const server = http.createServer((request, response) => {
         const requestUrl = new URL(request.url || "/", redirectUri || "http://127.0.0.1");
         if (requestUrl.pathname !== "/oauth2callback") {
@@ -306,19 +319,32 @@ export class DriveCloudService {
         const returnedState = requestUrl.searchParams.get("state");
         response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         response.end("<html><body><h2>Autocare24 Drive connected</h2><p>You can close this browser tab and return to Autocare24 Billing.</p></body></html>");
-        server.close();
+        finish(() => {
+          if (error) reject(new Error(`Google authorization failed: ${error}`));
+          else if (!code || returnedState !== state) reject(new Error("Google authorization response was invalid."));
+          else resolve({ code, redirectUri, codeVerifier });
+        });
+      });
+      const closeServer = () => {
+        try {
+          if (server.listening) server.close();
+        } catch {
+          // The promise is already being settled; cleanup must not mask the original result.
+        }
+      };
+      const finish = (callback: () => void) => {
         if (settled) return;
         settled = true;
-        if (error) reject(new Error(`Google authorization failed: ${error}`));
-        else if (!code || returnedState !== state) reject(new Error("Google authorization response was invalid."));
-        else resolve({ code, redirectUri, codeVerifier });
-      });
+        if (timeout) {
+          clearTimeout(timeout);
+          timeout = null;
+        }
+        closeServer();
+        callback();
+      };
 
       server.on("error", (error) => {
-        if (!settled) {
-          settled = true;
-          reject(error);
-        }
+        finish(() => reject(error));
       });
 
       server.listen(0, "127.0.0.1", () => {
@@ -337,20 +363,14 @@ export class DriveCloudService {
           state
         }).toString();
         shell.openExternal(authUrl.toString()).catch((error) => {
-          server.close();
-          if (!settled) {
-            settled = true;
-            reject(error);
-          }
+          finish(() => reject(error));
         });
       });
 
-      setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        server.close();
-        reject(new Error("Google authorization timed out."));
+      timeout = setTimeout(() => {
+        finish(() => reject(new Error("Google authorization timed out.")));
       }, AUTH_TIMEOUT_MS);
+      if (typeof timeout === "object" && "unref" in timeout && typeof timeout.unref === "function") timeout.unref();
     });
   }
 
@@ -421,7 +441,13 @@ export class DriveCloudService {
   private async ensureBackupFolder(credentials: DriveCredentials): Promise<{ id: string; name: string }> {
     const state = this.readState();
     if (state.folderId) {
-      const existing = await this.getFolder(credentials, state.folderId).catch(() => null);
+      let existing: DriveFileResponse | null = null;
+      try {
+        existing = await this.getFolder(credentials, state.folderId);
+      } catch (error) {
+        if (!isHttpStatus(error, 404)) throw error;
+        this.writeState({ folderId: "", folderName: DRIVE_BACKUP_FOLDER_NAME });
+      }
       if (existing?.id && !existing.trashed) return { id: existing.id, name: existing.name || DRIVE_BACKUP_FOLDER_NAME };
     }
 
@@ -489,7 +515,9 @@ export class DriveCloudService {
   private async responseError(response: Response, fallback: string) {
     const text = await response.text().catch(() => "");
     const parsed = parseJson<{ error?: { message?: string }; error_description?: string }>(text, {});
-    return new Error(parsed.error?.message || parsed.error_description || `${fallback} (${response.status})`);
+    return Object.assign(new Error(parsed.error?.message || parsed.error_description || `${fallback} (${response.status})`), {
+      status: response.status
+    });
   }
 
   private readToken(clientId: string): StoredDriveToken | null {

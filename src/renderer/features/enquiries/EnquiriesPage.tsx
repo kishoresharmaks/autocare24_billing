@@ -1,5 +1,6 @@
 ﻿import { Save, Search } from "lucide-react";
 import { useEffect, useState } from "react";
+import { DEFAULT_SAC_CODE, money } from "../../../shared/billing-math";
 import type { Enquiry, EnquiryFollowup, EnquiryInput, EnquirySource, EnquiryStatus, ServiceItem, VehicleType } from "../../../shared/types";
 
 type EnquiryTab = "open" | "followups" | "converted" | "lost";
@@ -18,7 +19,6 @@ const todayLocal = () => {
   date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
   return date.toISOString().slice(0, 10);
 };
-const money = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
 const formatMoney = (value: number) =>
   `Rs ${money(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const statusLabel = (status: string) =>
@@ -236,7 +236,7 @@ export function EnquiriesPage({
             quantity: 1,
             unitPrice: matchedService?.defaultPrice || enquiry.expectedBudget || 0,
             gstRate: matchedService?.gstRate || 18,
-            sacCode: matchedService?.sacCode || "9987"
+            sacCode: matchedService?.sacCode || DEFAULT_SAC_CODE
           }
         ]
       });

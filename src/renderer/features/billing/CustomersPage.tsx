@@ -25,7 +25,8 @@ export function CustomersPage({ refreshKey, notify }: { refreshKey: number; noti
       .listCustomers()
       .then((rows) => {
         setCustomers(rows);
-        if (!selectedId && rows.length) setSelectedId(rows[0].id);
+        const first = rows[0];
+        if (!selectedId && first) setSelectedId(first.id);
       })
       .catch((error) => notify(error.message));
 

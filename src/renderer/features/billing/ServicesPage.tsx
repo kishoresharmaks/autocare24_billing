@@ -1,8 +1,8 @@
 ﻿import { Save } from "lucide-react";
 import { useEffect, useState } from "react";
+import { DEFAULT_SAC_CODE, money, normalizeSacCode } from "../../../shared/billing-math";
 import type { BusinessSettings, InventoryItem, ServiceConsumable, ServiceItem } from "../../../shared/types";
 
-const money = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
 const formatMoney = (value: number) =>
   `Rs ${money(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -18,7 +18,7 @@ export function ServicesPage({ settings, notify }: { settings: BusinessSettings;
     category: "Detailing",
     defaultPrice: 0,
     gstRate: settings.defaultGstRate,
-    sacCode: "9987",
+    sacCode: DEFAULT_SAC_CODE,
     active: true
   });
 
@@ -35,9 +35,9 @@ export function ServicesPage({ settings, notify }: { settings: BusinessSettings;
 
   const save = async () => {
     try {
-      await window.autocare.saveService(form);
+      await window.autocare.saveService({ ...form, sacCode: normalizeSacCode(form.sacCode) });
       notify("Service saved.");
-      setForm({ name: "", category: "Detailing", defaultPrice: 0, gstRate: settings.defaultGstRate, sacCode: "9987", active: true });
+      setForm({ name: "", category: "Detailing", defaultPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE, active: true });
       await load();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to save service.");

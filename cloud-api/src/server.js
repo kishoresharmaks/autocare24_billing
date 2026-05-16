@@ -26,20 +26,43 @@ function loadEnvFile() {
 
 loadEnvFile();
 
+const RUNTIME_ENV = String(process.env.NODE_ENV || process.env.APP_ENV || "development").trim().toLowerCase();
+const IS_PRODUCTION = RUNTIME_ENV === "production" || RUNTIME_ENV === "prod";
+const envFlag = (name, fallback = false) => {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  return /^(1|true|yes|on)$/i.test(String(raw).trim());
+};
+const isFilesystemRoot = (value) => {
+  const parsed = path.parse(value);
+  return Boolean(value && parsed.root && path.resolve(value) === path.resolve(parsed.root));
+};
+const resolveUploadDir = () => {
+  const configured = process.env.UPLOAD_DIR || path.join(__dirname, "..", "uploads");
+  const resolved = path.resolve(configured);
+  if (isFilesystemRoot(resolved)) {
+    throw new Error("UPLOAD_DIR must point to a dedicated directory, not the filesystem root.");
+  }
+  return resolved;
+};
+
 const PORT = Number(process.env.PORT || 8080);
 const REGISTRATION_KEY = process.env.SYNC_REGISTRATION_KEY || "";
-const UPLOAD_DIR = path.resolve(process.env.UPLOAD_DIR || path.join(__dirname, "..", "uploads"));
+const UPLOAD_DIR = resolveUploadDir();
 const API_VERSION = "v1";
 const envPositiveInt = (name, fallback) => {
   const value = Number(process.env[name] || "");
   return Number.isFinite(value) && value > 0 ? Math.floor(value) : fallback;
 };
-const MAX_BODY_BYTES = envPositiveInt("MAX_BODY_BYTES", 24 * 1024 * 1024);
+const DEFAULT_MAX_BODY_BYTES = 32 * 1024 * 1024;
+const MAX_BODY_BYTES = envPositiveInt("MAX_BODY_BYTES", DEFAULT_MAX_BODY_BYTES);
 const AUTH_RATE_LIMIT_WINDOW_MS = envPositiveInt("AUTH_RATE_LIMIT_WINDOW_MS", 15 * 60 * 1000);
 const AUTH_RATE_LIMIT_MAX = envPositiveInt("AUTH_RATE_LIMIT_MAX", 10);
+const RATE_LIMIT_MAX_BUCKETS = envPositiveInt("RATE_LIMIT_MAX_BUCKETS", 50_000);
 const DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS = envPositiveInt("DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS", 15 * 60 * 1000);
 const DEVICE_REGISTRATION_RATE_LIMIT_MAX = envPositiveInt("DEVICE_REGISTRATION_RATE_LIMIT_MAX", 10);
-const TOKEN_HASH_SECRET = process.env.TOKEN_HASH_SECRET || "";
+const TOKEN_HASH_SECRET = String(process.env.TOKEN_HASH_SECRET || "").trim();
+const ALLOW_LEGACY_TOKEN_MIGRATION = envFlag("ALLOW_LEGACY_TOKEN_MIGRATION", !IS_PRODUCTION);
 const WHATSAPP_GRAPH_BASE_URL = String(process.env.WHATSAPP_API_BASE_URL || "https://graph.facebook.com").replace(/\/+$/, "");
 const WHATSAPP_GRAPH_VERSION = String(process.env.WHATSAPP_GRAPH_VERSION || "v20.0").replace(/^\/+/, "");
 const WHATSAPP_CUSTOMER_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -66,12 +89,43 @@ const SECURITY_HEADERS = {
   "strict-transport-security": "max-age=31536000; includeSubDomains"
 };
 
+const DB_HOST = process.env.DB_HOST || "localhost";
+const DB_PORT = Number(process.env.DB_PORT || 3306);
+const DB_NAME = process.env.DB_NAME || (IS_PRODUCTION ? "" : "autocare24_sync");
+const DB_USER = process.env.DB_USER || (IS_PRODUCTION ? "" : "root");
+const DB_PASSWORD = process.env.DB_PASSWORD || "";
+
+const validateRuntimeConfig = () => {
+  const warnings = [];
+  if (!TOKEN_HASH_SECRET) {
+    if (IS_PRODUCTION) {
+      throw new Error("TOKEN_HASH_SECRET is required when NODE_ENV=production.");
+    }
+    warnings.push("TOKEN_HASH_SECRET is not set; device tokens will use legacy SHA-256 hashes in non-production only.");
+  }
+  if (IS_PRODUCTION) {
+    if (!DB_HOST) throw new Error("DB_HOST is required when NODE_ENV=production.");
+    if (!DB_NAME) throw new Error("DB_NAME is required when NODE_ENV=production.");
+    if (!DB_USER) throw new Error("DB_USER is required when NODE_ENV=production.");
+    if (DB_USER.toLowerCase() === "root" && !envFlag("ALLOW_DB_ROOT_USER", false)) {
+      throw new Error("DB_USER=root is not allowed in production. Use a dedicated database user.");
+    }
+    if (!DB_PASSWORD) throw new Error("DB_PASSWORD is required when NODE_ENV=production.");
+    if (ALLOW_LEGACY_TOKEN_MIGRATION) {
+      warnings.push("ALLOW_LEGACY_TOKEN_MIGRATION is enabled in production; keep it temporary and turn it off after devices reconnect.");
+    }
+  }
+  warnings.forEach((message) => console.warn(`[config] ${message}`));
+};
+
+validateRuntimeConfig();
+
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || "localhost",
-  port: Number(process.env.DB_PORT || 3306),
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "",
-  database: process.env.DB_NAME || "autocare24_sync",
+  host: DB_HOST,
+  port: DB_PORT,
+  user: DB_USER,
+  password: DB_PASSWORD,
+  database: DB_NAME,
   waitForConnections: true,
   connectionLimit: Number(process.env.DB_POOL_SIZE || 6),
   namedPlaceholders: true
@@ -99,11 +153,18 @@ const noContent = (res) => {
   res.writeHead(204, SECURITY_HEADERS);
   res.end();
 };
+const rejectBrowserOrigin = (req, res) => {
+  const origin = String(req.headers.origin || "").trim();
+  if (!origin) return false;
+  error(res, 403, "browser_origin_not_allowed", "This API is desktop-only and does not accept browser Origin requests.");
+  return true;
+};
 const sha256 = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const hmacSha256 = (value) => crypto.createHmac("sha256", TOKEN_HASH_SECRET).update(value).digest("hex");
 const hashToken = (value) => TOKEN_HASH_SECRET ? hmacSha256(value) : sha256(value);
 const tokenHashCandidates = (value) => {
   const primary = hashToken(value);
+  if (!TOKEN_HASH_SECRET || !ALLOW_LEGACY_TOKEN_MIGRATION) return [primary];
   const legacy = sha256(value);
   return primary === legacy ? [primary] : [primary, legacy];
 };
@@ -137,7 +198,54 @@ const sequenceSuffix = (value, prefix) => {
   const suffix = text.slice(token.length);
   return /^\d+$/.test(suffix) ? Number(suffix) : 0;
 };
-const money = (value) => Math.round((Number.isFinite(Number(value)) ? Number(value) : 0) * 100) / 100;
+const MONEY_SCALE = 100n;
+const GST_RATE_SCALE = 10000n;
+const DEFAULT_SAC_CODE = "9987";
+const normalizeSacCode = (value, fallback = DEFAULT_SAC_CODE) => {
+  const code = String(value ?? "").trim();
+  return /^\d{4,8}$/.test(code) ? code : fallback;
+};
+const expandExponential = (value) => {
+  const [coefficient, exponentValue] = value.toLowerCase().split("e");
+  const exponent = Number(exponentValue);
+  if (!Number.isInteger(exponent)) return value;
+  const sign = coefficient.startsWith("-") ? "-" : "";
+  const unsignedCoefficient = coefficient.replace(/^-/, "");
+  const [integerPart, fractionalPart = ""] = unsignedCoefficient.split(".");
+  const digits = `${integerPart}${fractionalPart}`.replace(/^0+(?=\d)/, "") || "0";
+  const decimalIndex = integerPart.length + exponent;
+  if (decimalIndex <= 0) return `${sign}0.${"0".repeat(Math.abs(decimalIndex))}${digits}`;
+  if (decimalIndex >= digits.length) return `${sign}${digits}${"0".repeat(decimalIndex - digits.length)}`;
+  return `${sign}${digits.slice(0, decimalIndex)}.${digits.slice(decimalIndex)}`;
+};
+const toScaledInteger = (value, decimals) => {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return 0n;
+  const normalized = expandExponential(number.toString());
+  const sign = normalized.startsWith("-") ? -1n : 1n;
+  const unsignedValue = normalized.replace(/^-/, "");
+  const [integerPart = "0", fractionalPart = ""] = unsignedValue.split(".");
+  const scale = 10n ** BigInt(decimals);
+  const normalizedInteger = integerPart.replace(/\D/g, "") || "0";
+  const normalizedFraction = fractionalPart.replace(/\D/g, "");
+  const scaledFraction = normalizedFraction.padEnd(decimals + 1, "0");
+  const baseFraction = scaledFraction.slice(0, decimals) || "0";
+  const roundingDigit = Number(scaledFraction[decimals] || "0");
+  const base = BigInt(normalizedInteger) * scale + BigInt(baseFraction);
+  return sign * (base + (roundingDigit >= 5 ? 1n : 0n));
+};
+const divideRounded = (numerator, denominator) => {
+  if (denominator === 0n) return 0n;
+  const sign = (numerator < 0n) !== (denominator < 0n) ? -1n : 1n;
+  const absoluteNumerator = numerator < 0n ? -numerator : numerator;
+  const absoluteDenominator = denominator < 0n ? -denominator : denominator;
+  const quotient = absoluteNumerator / absoluteDenominator;
+  const remainder = absoluteNumerator % absoluteDenominator;
+  const rounded = remainder * 2n >= absoluteDenominator ? quotient + 1n : quotient;
+  return sign * rounded;
+};
+const compareBigIntDescending = (left, right) => (left === right ? 0 : left > right ? -1 : 1);
+const money = (value) => Number(toScaledInteger(value, 2)) / Number(MONEY_SCALE);
 const nowIso = () => new Date().toISOString();
 const localDate = (date = new Date()) => {
   const normalized = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
@@ -392,6 +500,12 @@ const enforceRateLimit = (req, scope, options = {}) => {
   const key = rateLimitKey(scope, req);
   const current = rateLimitBuckets.get(key);
   if (!current || current.resetAt <= now) {
+    if (!current && rateLimitBuckets.size >= RATE_LIMIT_MAX_BUCKETS) {
+      cleanupRateLimits();
+      if (rateLimitBuckets.size >= RATE_LIMIT_MAX_BUCKETS) {
+        throwHttpError(429, "rate_limited", "Too many clients are attempting requests. Try again later.");
+      }
+    }
     rateLimitBuckets.set(key, { count: 1, resetAt: now + windowMs });
     return;
   }
@@ -434,6 +548,13 @@ const normalizePermissions = (permissions) => {
 const validatePassword = (password) => {
   const text = String(password || "");
   if (text.length < 8) throw Object.assign(new Error("Password must be at least 8 characters."), { status: 422 });
+  if (text.length > 128) throw Object.assign(new Error("Password must be 128 characters or fewer."), { status: 422 });
+  if (!/[A-Za-z]/.test(text) || !/\d/.test(text)) {
+    throw Object.assign(new Error("Password must include at least one letter and one number."), { status: 422 });
+  }
+  if (/^(.)\1+$/.test(text)) throw Object.assign(new Error("Password is too easy to guess."), { status: 422 });
+  const commonPasswords = new Set(["password", "password1", "password123", "admin123", "autocare123", "qwerty123", "welcome123"]);
+  if (commonPasswords.has(text.toLowerCase())) throw Object.assign(new Error("Password is too common."), { status: 422 });
   return text;
 };
 const hashPassword = (password, salt = crypto.randomBytes(16).toString("hex")) => ({
@@ -455,67 +576,79 @@ const paymentStatus = (total, paid) => {
   return "unpaid";
 };
 
-const toCents = (value) => Math.round(money(value) * 100);
-const fromCents = (value) => money(value / 100);
+const toCents = (value) => toScaledInteger(value, 2);
+const fromCents = (value) => Number(value) / Number(MONEY_SCALE);
+const toGstRateUnits = (value) => toScaledInteger(value, 4);
+const calculatePercentCents = (amountCents, ratePercent) =>
+  divideRounded(amountCents * toGstRateUnits(ratePercent), 100n * GST_RATE_SCALE);
 const allocateProportionalCents = (amountCents, weights) => {
-  const normalizedAmount = Math.max(0, Math.round(amountCents));
-  const totalWeight = weights.reduce((total, weight) => total + Math.max(0, Math.round(weight)), 0);
-  if (!normalizedAmount || !totalWeight) return weights.map(() => 0);
-  const allocations = weights.map((weight, index) => {
-    const normalizedWeight = Math.max(0, Math.round(weight));
-    const exact = (normalizedAmount * normalizedWeight) / totalWeight;
-    return { index, base: Math.floor(exact), remainder: exact - Math.floor(exact), weight: normalizedWeight };
+  const normalizedAmount = amountCents > 0n ? amountCents : 0n;
+  const normalizedWeights = weights.map((weight) => (weight > 0n ? weight : 0n));
+  const totalWeight = normalizedWeights.reduce((total, weight) => total + weight, 0n);
+  if (!normalizedAmount || !totalWeight) return weights.map(() => 0n);
+  const allocations = normalizedWeights.map((weight, index) => {
+    const weightedAmount = normalizedAmount * weight;
+    return { index, base: weightedAmount / totalWeight, remainder: weightedAmount % totalWeight, weight };
   });
-  let remaining = normalizedAmount - allocations.reduce((total, item) => total + item.base, 0);
+  let remaining = normalizedAmount - allocations.reduce((total, item) => total + item.base, 0n);
   allocations
     .slice()
-    .sort((a, b) => b.remainder - a.remainder || b.weight - a.weight || a.index - b.index)
+    .sort((a, b) => compareBigIntDescending(a.remainder, b.remainder) || compareBigIntDescending(a.weight, b.weight) || a.index - b.index)
     .forEach((item) => {
-      if (remaining <= 0) return;
-      item.base += 1;
-      remaining -= 1;
+      if (remaining <= 0n) return;
+      item.base += 1n;
+      remaining -= 1n;
     });
   return allocations.sort((a, b) => a.index - b.index).map((item) => item.base);
 };
 const calculateInvoiceTotals = (invoiceMode, taxScope, items, rawDiscount) => {
   const normalizedMode = normalizeInvoiceMode(invoiceMode);
   const normalizedTaxScope = normalizeTaxScope(taxScope);
-  const normalized = (Array.isArray(items) ? items : []).map((item) => ({
-    ...item,
-    description: String(item.description || "").trim(),
-    quantity: money(finiteNumber(item.quantity)),
-    unitPrice: money(finiteNumber(item.unitPrice)),
-    gstRate: normalizedMode === "gst" ? money(finiteNumber(item.gstRate || 0)) : 0,
-    sacCode: String(item.sacCode || "9987").trim() || "9987",
-    lineSubTotal: money(finiteNumber(item.quantity) * finiteNumber(item.unitPrice))
-  })).filter((item) => item.description || item.serviceId || item.inventoryItemId || item.lineSubTotal > 0);
+  const normalized = (Array.isArray(items) ? items : []).map((item) => {
+    const quantityCents = toCents(finiteNumber(item.quantity));
+    const unitPriceCents = toCents(finiteNumber(item.unitPrice));
+    const lineSubTotalCents = divideRounded(quantityCents * unitPriceCents, MONEY_SCALE);
+    return {
+      ...item,
+      description: String(item.description || "").trim(),
+      quantity: fromCents(quantityCents),
+      unitPrice: fromCents(unitPriceCents),
+      gstRate: normalizedMode === "gst" ? money(finiteNumber(item.gstRate || 0)) : 0,
+      sacCode: normalizeSacCode(item.sacCode),
+      lineSubTotal: fromCents(lineSubTotalCents),
+      lineSubTotalCents
+    };
+  }).filter((item) => item.description || item.serviceId || item.inventoryItemId || item.lineSubTotalCents > 0n);
   if (!normalized.length) throw Object.assign(new Error("Add at least one invoice item."), { status: 422 });
-  const subTotal = money(normalized.reduce((sum, item) => sum + item.lineSubTotal, 0));
-  const discount = money(Math.min(Math.max(finiteNumber(rawDiscount), 0), subTotal));
-  const taxableBase = money(subTotal - discount);
+  const subTotalCents = normalized.reduce((sum, item) => sum + item.lineSubTotalCents, 0n);
+  const subTotal = fromCents(subTotalCents);
+  const discountCents = toCents(Math.min(Math.max(finiteNumber(rawDiscount), 0), subTotal));
+  const taxableBaseCents = subTotalCents - discountCents;
+  const taxableBase = fromCents(taxableBaseCents);
   const taxableLineCents = allocateProportionalCents(
-    toCents(taxableBase),
-    normalized.map((item) => toCents(item.lineSubTotal))
+    taxableBaseCents,
+    normalized.map((item) => item.lineSubTotalCents)
   );
   const calculatedItems = normalized.map((item, index) => {
-    const lineTaxable = fromCents(taxableLineCents[index] || 0);
-    const lineTax = normalizedMode === "gst" ? money((lineTaxable * item.gstRate) / 100) : 0;
-    return { ...item, lineTax, lineTotal: money(lineTaxable + lineTax) };
+    const lineTaxableCents = taxableLineCents[index] || 0n;
+    const lineTaxCents = normalizedMode === "gst" ? calculatePercentCents(lineTaxableCents, item.gstRate) : 0n;
+    const { lineSubTotalCents, ...publicItem } = item;
+    return { ...publicItem, lineTax: fromCents(lineTaxCents), lineTotal: fromCents(lineTaxableCents + lineTaxCents) };
   });
-  const totalTax = money(calculatedItems.reduce((sum, item) => sum + item.lineTax, 0));
-  const cgst = normalizedMode === "gst" && normalizedTaxScope === "intra" ? money(totalTax / 2) : 0;
-  const sgst = normalizedMode === "gst" && normalizedTaxScope === "intra" ? money(totalTax - cgst) : 0;
-  const igst = normalizedMode === "gst" && normalizedTaxScope === "inter" ? totalTax : 0;
+  const totalTaxCents = calculatedItems.reduce((sum, item) => sum + toCents(item.lineTax), 0n);
+  const cgstCents = normalizedMode === "gst" && normalizedTaxScope === "intra" ? divideRounded(totalTaxCents, 2n) : 0n;
+  const sgstCents = normalizedMode === "gst" && normalizedTaxScope === "intra" ? totalTaxCents - cgstCents : 0n;
+  const igstCents = normalizedMode === "gst" && normalizedTaxScope === "inter" ? totalTaxCents : 0n;
   return {
     items: calculatedItems,
     subTotal,
-    discount,
+    discount: fromCents(discountCents),
     taxableValue: normalizedMode === "gst" ? taxableBase : 0,
-    cgst,
-    sgst,
-    igst,
-    totalTax,
-    grandTotal: money(taxableBase + totalTax)
+    cgst: fromCents(cgstCents),
+    sgst: fromCents(sgstCents),
+    igst: fromCents(igstCents),
+    totalTax: fromCents(totalTaxCents),
+    grandTotal: fromCents(taxableBaseCents + totalTaxCents)
   };
 };
 
@@ -616,6 +749,23 @@ const validateUpload = (fileType, originalName, data) => {
   return { ext, mimeType: signature.mimeType };
 };
 
+const isInsideDirectory = (root, target) => {
+  const relative = path.relative(path.resolve(root), path.resolve(target));
+  return relative === "" || (relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+};
+
+const businessUploadDirectory = (businessId) => {
+  const safeBusinessId = String(businessId || "").trim();
+  if (!/^\d{1,20}$/.test(safeBusinessId)) {
+    throwHttpError(500, "server_misconfigured", "Business upload directory could not be resolved safely.");
+  }
+  const resolved = path.resolve(UPLOAD_DIR, safeBusinessId);
+  if (!isInsideDirectory(UPLOAD_DIR, resolved)) {
+    throwHttpError(500, "server_misconfigured", "Business upload directory escaped the configured upload root.");
+  }
+  return resolved;
+};
+
 async function ensureColumn(connection, table, column, definition) {
   const [rows] = await connection.query(
     `SELECT COLUMN_NAME
@@ -629,10 +779,92 @@ async function ensureColumn(connection, table, column, definition) {
   return true;
 }
 
+const findSqlDelimiterIndex = (sql, delimiter) => {
+  let quote = "";
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = 0; index < sql.length; index += 1) {
+    const char = sql[index];
+    const next = sql[index + 1] || "";
+    if (lineComment) {
+      if (char === "\n") lineComment = false;
+      continue;
+    }
+    if (blockComment) {
+      if (char === "*" && next === "/") {
+        blockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (quote) {
+      if (char === "\\") {
+        index += 1;
+        continue;
+      }
+      if (char === quote) {
+        if ((quote === "'" || quote === "\"") && next === quote) {
+          index += 1;
+          continue;
+        }
+        quote = "";
+      }
+      continue;
+    }
+    if (char === "-" && next === "-") {
+      const after = sql[index + 2] || "";
+      if (!after || /\s/.test(after)) {
+        lineComment = true;
+        index += 1;
+        continue;
+      }
+    }
+    if (char === "#") {
+      lineComment = true;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      blockComment = true;
+      index += 1;
+      continue;
+    }
+    if (char === "'" || char === "\"" || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (sql.startsWith(delimiter, index)) return index;
+  }
+  return -1;
+};
+
+const splitSqlStatements = (sql) => {
+  const statements = [];
+  let delimiter = ";";
+  let buffer = "";
+  for (const line of sql.split(/\r?\n/)) {
+    const directive = /^\s*DELIMITER\s+(\S+)\s*$/i.exec(line);
+    if (directive && !buffer.trim()) {
+      delimiter = directive[1];
+      continue;
+    }
+    buffer += `${line}\n`;
+    let delimiterIndex = findSqlDelimiterIndex(buffer, delimiter);
+    while (delimiterIndex >= 0) {
+      const statement = buffer.slice(0, delimiterIndex).trim();
+      if (statement) statements.push(statement);
+      buffer = buffer.slice(delimiterIndex + delimiter.length);
+      delimiterIndex = findSqlDelimiterIndex(buffer, delimiter);
+    }
+  }
+  const trailing = buffer.trim();
+  if (trailing) statements.push(trailing);
+  return statements;
+};
+
 async function migrate() {
   const schemaPath = path.join(__dirname, "..", "schema.sql");
   const sql = fs.readFileSync(schemaPath, "utf8");
-  const statements = sql.split(/;\s*(?:\r?\n|$)/).map((statement) => statement.trim()).filter(Boolean);
+  const statements = splitSqlStatements(sql);
   const connection = await pool.getConnection();
   try {
     for (const statement of statements) await connection.query(statement);
@@ -687,6 +919,21 @@ async function authenticate(req, options = {}) {
   if (!device) return null;
   if (TOKEN_HASH_SECRET && device.token_hash !== tokenHash) {
     await pool.query("UPDATE devices SET token_hash = ? WHERE id = ?", [tokenHash, device.id]);
+    try {
+      await insertAuditLog(pool, {
+        businessId: device.business_id,
+        deviceId: device.id,
+        userLabel: "cloud-api",
+        action: "DEVICE_TOKEN_HASH_MIGRATED",
+        entity: "devices",
+        entityId: device.id,
+        beforeState: { tokenHashAlgorithm: "sha256" },
+        afterState: { tokenHashAlgorithm: "hmac-sha256", migratedAt: new Date().toISOString() },
+        ipAddress: getRequestIp(req)
+      });
+    } catch (auditError) {
+      console.warn("[security] Failed to audit legacy token hash migration:", auditError?.message || auditError);
+    }
     device.token_hash = tokenHash;
   }
   const approvalStatus = normalizeDeviceApprovalStatus(device);
@@ -2031,7 +2278,7 @@ const actionItemInput = (item) => ({
   quantity: money(item.quantity),
   unitPrice: money(item.unitPrice),
   gstRate: money(item.gstRate),
-  sacCode: String(item.sacCode || "9987")
+  sacCode: normalizeSacCode(item.sacCode)
 });
 
 async function handleQuotationConvertToInvoice(req, res, device, quotationId) {
@@ -3175,15 +3422,17 @@ async function handleFileUpload(req, res, device) {
   if (!FILE_TYPES.has(fileType)) return error(res, 422, "validation_error", "Unsupported file type.");
   const fileId = uuid();
   const { ext, mimeType } = validateUpload(fileType, body.originalName, data);
-  const businessDir = path.join(UPLOAD_DIR, String(device.business_id));
-  fs.mkdirSync(businessDir, { recursive: true });
-  const storagePath = path.join(businessDir, `${fileId}${ext}`);
-  fs.writeFileSync(storagePath, data);
   const digest = sha256(data);
   if (body.sha256 && body.sha256 !== digest) {
-    fs.unlinkSync(storagePath);
     return error(res, 422, "hash_mismatch", "Uploaded file hash does not match.");
   }
+  const businessDir = businessUploadDirectory(device.business_id);
+  fs.mkdirSync(businessDir, { recursive: true });
+  const storagePath = path.resolve(businessDir, `${fileId}${ext}`);
+  if (!isInsideDirectory(businessDir, storagePath)) {
+    return error(res, 500, "server_misconfigured", "Upload file path could not be resolved safely.");
+  }
+  fs.writeFileSync(storagePath, data);
   await pool.query(
     `INSERT INTO file_metadata
       (id, business_id, entity, entity_id, file_type, original_name, mime_type, size_bytes, sha256, storage_path, uploaded_by)
@@ -4147,6 +4396,7 @@ async function handleMetaWebhookPost(req, res) {
 async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   try {
+    if (rejectBrowserOrigin(req, res)) return;
     if (url.pathname === UPDATE_FEED_PREFIX || url.pathname.startsWith(`${UPDATE_FEED_PREFIX}/`)) {
       return handleUpdateAsset(req, res, url);
     }

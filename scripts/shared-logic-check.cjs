@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 
-const { calculateInvoiceTotals, money } = require("../dist-electron/shared/billing-math.js");
+const { calculateInvoiceTotals, DEFAULT_SAC_CODE, money, normalizeSacCode } = require("../dist-electron/shared/billing-math.js");
 const {
   ALL_PERMISSIONS,
   DEFAULT_ACCESS_ROLES,
@@ -38,10 +38,19 @@ const run = () => {
 };
 
 test("money rounds and safely handles non-finite values", () => {
+  assert.equal(money(1.005), 1.01);
+  assert.equal(money(2.675), 2.68);
+  assert.equal(money(0.295), 0.3);
   assert.equal(money(10.005), 10.01);
   assert.equal(money(10.004), 10);
   assert.equal(money(Number.NaN), 0);
   assert.equal(money(Number.POSITIVE_INFINITY), 0);
+});
+
+test("SAC codes are normalized to numeric billing codes", () => {
+  assert.equal(normalizeSacCode(" 330749 "), "330749");
+  assert.equal(normalizeSacCode("bad-code"), DEFAULT_SAC_CODE);
+  assert.equal(normalizeSacCode(""), DEFAULT_SAC_CODE);
 });
 
 test("simple invoice mode ignores GST and clamps discount to subtotal", () => {
@@ -97,6 +106,21 @@ test("GST inter-state totals use IGST only", () => {
   assert.equal(totals.sgst, 0);
   assert.equal(totals.igst, 18);
   assert.equal(totals.grandTotal, 118);
+});
+
+test("GST odd paise are deterministic for intra and inter-state tax buckets", () => {
+  const item = { description: "Rounding check", quantity: 1, unitPrice: 0.05, gstRate: 100, sacCode: "9987" };
+  const intraTotals = calculateInvoiceTotals("gst", "intra", [item], 0);
+  const interTotals = calculateInvoiceTotals("gst", "inter", [item], 0);
+
+  assert.equal(intraTotals.totalTax, 0.05);
+  assert.equal(intraTotals.cgst, 0.03);
+  assert.equal(intraTotals.sgst, 0.02);
+  assert.equal(intraTotals.igst, 0);
+  assert.equal(interTotals.totalTax, 0.05);
+  assert.equal(interTotals.cgst, 0);
+  assert.equal(interTotals.sgst, 0);
+  assert.equal(interTotals.igst, 0.05);
 });
 
 test("proportional cents allocation preserves rounded totals for tiny values", () => {
@@ -164,6 +188,8 @@ test("default access roles remain consistent and permission groups cover all key
   assert.ok(staffOpsRole, "Staff operations role missing");
   assert.equal(ownerRole.locked, true);
   assert.equal(ownerRole.active, true);
+  assert.equal(Object.isFrozen(ALL_PERMISSIONS), true);
+  assert.notEqual(ownerRole.permissions, ALL_PERMISSIONS);
   assert.equal(new Set(ownerRole.permissions).size, ALL_PERMISSIONS.length);
 
   ALL_PERMISSIONS.forEach((permission) => assert.equal(ownerRole.permissions.includes(permission), true));
