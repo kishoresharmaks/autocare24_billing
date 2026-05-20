@@ -30,7 +30,7 @@ export function InvoiceTable({ invoices, compact }: { invoices: InvoiceSummary[]
             <tr key={invoice.id}>
               <td>{invoice.invoiceNumber}</td>
               <td>{invoice.invoiceDate}</td>
-              <td>{invoice.customerName}</td>
+              <td>{invoice.customerCode ? `${invoice.customerCode} - ` : ""}{invoice.customerName}</td>
               <td>{vehicleTypeLabel(invoice.vehicleType)} {invoice.vehicleNumber}</td>
               <td>{formatMoney(invoice.grandTotal)}</td>
               <td>{formatMoney(invoice.balanceDue)}</td>

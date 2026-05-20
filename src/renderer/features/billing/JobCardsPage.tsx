@@ -4,6 +4,7 @@ import { MessageCircle } from "lucide-react";
 import { hasPermission } from "../../../shared/access-control";
 import { calculateInvoiceTotals, DEFAULT_SAC_CODE, money, normalizeSacCode } from "../../../shared/billing-math";
 import type { AppUser, BusinessSettings, CustomerWithVehicles, InventoryItem, InvoiceItemInput, InvoiceMode, JobCardDetail, JobCardInput, JobCardItemInput, JobCardPhotoType, JobCardStatus, JobCardSummary, ServiceItem, TaxScope, Vehicle, VehicleType } from "../../../shared/types";
+import { CustomerSearchSelect } from "./CustomerSearchSelect";
 
 type DraftJobCardItem = JobCardItemInput & { key: string };
 type JobCardTab = "today" | "open" | "approval" | "progress" | "ready" | "closed";
@@ -495,14 +496,14 @@ export function JobCardsPage({
         </div>
         <div className="search-box">
           <Search size={18} />
-          <input placeholder="Search job, customer, phone, vehicle" value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
+          <input placeholder="Search job, customer ID, customer, phone, vehicle" value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
         </div>
         <div className="record-list">
           {jobCards.map((jobCard) => (
             <button key={jobCard.id} className={selectedId === jobCard.id ? "record active" : "record"} onClick={() => setSelectedId(jobCard.id)}>
               <strong>{jobCard.jobNumber} - {jobCard.customerName}</strong>
               <em className={`status ${jobCard.status}`}>{statusLabel(jobCard.status)}</em>
-              <span>{vehicleTypeLabel(jobCard.vehicleType)} {jobCard.vehicleNumber} | {formatMoney(jobCard.grandTotal)}</span>
+              <span>{jobCard.customerCode || "Customer ID pending"} | {vehicleTypeLabel(jobCard.vehicleType)} {jobCard.vehicleNumber} | {formatMoney(jobCard.grandTotal)}</span>
               <span>Delivery: {[jobCard.expectedDeliveryDate, jobCard.expectedDeliveryTime].filter(Boolean).join(" ") || "-"}</span>
             </button>
           ))}
@@ -525,8 +526,9 @@ export function JobCardsPage({
             <label>Expected delivery date<input type="date" disabled={readOnly} value={form.expectedDeliveryDate} onChange={(event) => setForm({ ...form, expectedDeliveryDate: event.currentTarget.value })} /></label>
             <label>Expected delivery time<input type="time" disabled={readOnly} value={form.expectedDeliveryTime} onChange={(event) => setForm({ ...form, expectedDeliveryTime: event.currentTarget.value })} /></label>
             <label>Status<select disabled={readOnly} value={form.status} onChange={(event) => setForm({ ...form, status: event.currentTarget.value as JobCardStatus })}>{(locked ? jobCardStatuses : editableJobCardStatuses).map((status) => <option key={status} value={status}>{statusLabel(status)}</option>)}</select></label>
-            <label>Existing customer<select disabled={readOnly} value={form.customerId || ""} onChange={(event) => chooseCustomer(event.currentTarget.value)}><option value="">New customer</option>{customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name} {customer.phone ? `- ${customer.phone}` : ""}</option>)}</select></label>
+            <CustomerSearchSelect customers={customers} value={form.customerId || ""} onChange={chooseCustomer} disabled={readOnly} />
             <label>Existing vehicle<select disabled={readOnly || !form.customerId} value={form.vehicleId || ""} onChange={(event) => chooseVehicle(event.currentTarget.value)}><option value="">New vehicle</option>{vehicleOptions.map((vehicle) => <option key={vehicle.id} value={vehicle.id}>{vehicleTypeLabel(vehicle.vehicleType)} - {vehicle.registrationNumber}</option>)}</select></label>
+            <label>Customer ID<input readOnly value={form.customer.customerCode || detail?.customerCode || "Assigned after save"} /></label>
             <label>Customer name<input disabled={readOnly} value={form.customer.name} onChange={(event) => setForm({ ...form, customer: { ...form.customer, name: event.currentTarget.value } })} /></label>
             <label>Phone<input disabled={readOnly} value={form.customer.phone || ""} onChange={(event) => setForm({ ...form, customer: { ...form.customer, phone: event.currentTarget.value } })} /></label>
             <label>Vehicle type<select disabled={readOnly} value={form.vehicle.vehicleType || "car"} onChange={(event) => setForm({ ...form, vehicle: { ...form.vehicle, vehicleType: event.currentTarget.value as VehicleType } })}>{vehicleTypes.map((type) => <option key={type} value={type}>{vehicleTypeLabel(type)}</option>)}</select></label>
@@ -676,7 +678,7 @@ function JobCardPrintView({ jobCard, settings }: { jobCard: JobCardDetail; setti
         </div>
       </div>
       <div className="invoice-meta-grid">
-        <div><span>Customer</span><strong>{jobCard.customerName}</strong><p>{jobCard.customerPhone}</p></div>
+        <div><span>Customer</span><strong>{jobCard.customerName}</strong><p>{[jobCard.customerCode, jobCard.customerPhone].filter(Boolean).join(" | ")}</p></div>
         <div><span>Vehicle</span><strong>{vehicleTypeLabel(jobCard.vehicleType)} {jobCard.vehicleNumber}</strong><p>{[jobCard.vehicle.make, jobCard.vehicle.model, jobCard.vehicle.color].filter(Boolean).join(" | ")}</p></div>
         <div><span>Job date</span><strong>{jobCard.jobDate}</strong><p>Delivery: {[jobCard.expectedDeliveryDate, jobCard.expectedDeliveryTime].filter(Boolean).join(" ") || "-"}</p></div>
       </div>

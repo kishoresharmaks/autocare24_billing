@@ -2,6 +2,9 @@ import { ALL_PERMISSION_KEYS, type AccessRole, type AppUser, type PermissionKey 
 
 export const OWNER_ACCESS_ROLE_ID = "owner";
 export const STAFF_OPERATIONS_ROLE_ID = "staff-operations";
+export const OPERATOR_ACCESS_ROLE_ID = "operator";
+export const BUSINESS_DIRECTOR_ACCESS_ROLE_ID = "business-director";
+export const INVESTOR_ACCESS_ROLE_ID = "investor";
 
 export type PermissionItem = {
   key: PermissionKey;
@@ -158,8 +161,80 @@ const staffOperationsPermissions: PermissionKey[] = [
   "stock.purchase",
   "stock.adjust",
   "stock.suppliers",
+  "reports.view",
+  "reports.export",
+  "documents.printPdf",
+  "sharing.whatsapp",
+  "exports.csv"
+];
+
+const operatorPermissions: PermissionKey[] = [
+  "dashboard.view",
+  "billing.view",
+  "billing.create",
+  "billing.recordPayments",
+  "quotations.view",
+  "quotations.manage",
+  "quotations.convert",
+  "customers.view",
+  "customers.manage",
+  "jobCards.view",
+  "jobCards.manage",
+  "jobCards.photos",
+  "enquiries.view",
+  "enquiries.manage",
+  "enquiries.convert",
+  "services.view",
+  "stock.view",
+  "stock.adjust",
   "documents.printPdf",
   "sharing.whatsapp"
+];
+
+const businessDirectorPermissions: PermissionKey[] = ALL_PERMISSION_KEYS.filter(
+  (permission) => permission !== "developer.access"
+);
+
+const investorPermissions: PermissionKey[] = [
+  "dashboard.view",
+  "reports.view",
+  "reports.export"
+];
+
+const billingStaffPermissions: PermissionKey[] = [
+  "dashboard.view",
+  "billing.view",
+  "billing.create",
+  "billing.manageInvoices",
+  "billing.recordPayments",
+  "billing.cancelInvoices",
+  "quotations.view",
+  "quotations.manage",
+  "quotations.convert",
+  "customers.view",
+  "customers.manage",
+  "jobCards.view",
+  "jobCards.manage",
+  "jobCards.photos",
+  "enquiries.view",
+  "enquiries.manage",
+  "enquiries.convert",
+  "services.view",
+  "stock.view",
+  "documents.printPdf",
+  "sharing.whatsapp"
+];
+
+const stockStaffPermissions: PermissionKey[] = [
+  "dashboard.view",
+  "stock.view",
+  "stock.manageItems",
+  "stock.purchase",
+  "stock.adjust",
+  "stock.suppliers",
+  "reports.view",
+  "reports.export",
+  "exports.csv"
 ];
 
 export const DEFAULT_ACCESS_ROLES: Array<Omit<AccessRole, "createdAt" | "updatedAt">> = [
@@ -174,49 +249,48 @@ export const DEFAULT_ACCESS_ROLES: Array<Omit<AccessRole, "createdAt" | "updated
   {
     id: STAFF_OPERATIONS_ROLE_ID,
     name: "Staff Operations",
-    description: "Preserves the previous staff access for billing, enquiries, services, and stock operations.",
+    description: "Broad daily operations access for billing, job cards, enquiries, services, stock, reports, document sharing, and CSV exports.",
     permissions: staffOperationsPermissions,
+    locked: false,
+    active: true
+  },
+  {
+    id: OPERATOR_ACCESS_ROLE_ID,
+    name: "Operator",
+    description: "Daily counter and operations access for billing, customers, job cards, enquiries, stock removal, documents, and WhatsApp.",
+    permissions: operatorPermissions,
+    locked: false,
+    active: true
+  },
+  {
+    id: BUSINESS_DIRECTOR_ACCESS_ROLE_ID,
+    name: "Business Director",
+    description: "Business management access for operations, reports, expenses, settings, users, backups, and exports without developer repair tools.",
+    permissions: businessDirectorPermissions,
+    locked: false,
+    active: true
+  },
+  {
+    id: INVESTOR_ACCESS_ROLE_ID,
+    name: "Investor",
+    description: "Read-only business visibility for dashboards and report exports.",
+    permissions: investorPermissions,
     locked: false,
     active: true
   },
   {
     id: "billing-staff",
     name: "Billing Staff",
-    description: "Counter billing, customers, job cards, print/PDF, and WhatsApp sharing.",
-    permissions: [
-      "dashboard.view",
-      "billing.view",
-      "billing.create",
-      "billing.recordPayments",
-      "quotations.view",
-      "quotations.manage",
-      "quotations.convert",
-      "customers.view",
-      "customers.manage",
-      "jobCards.view",
-      "jobCards.manage",
-      "enquiries.view",
-      "enquiries.manage",
-      "services.view",
-      "stock.view",
-      "documents.printPdf",
-      "sharing.whatsapp"
-    ],
+    description: "Counter billing access for bills, corrections, cancellations, payments, quotations, customers, job cards, print/PDF, and WhatsApp.",
+    permissions: billingStaffPermissions,
     locked: false,
     active: true
   },
   {
     id: "stock-staff",
     name: "Stock Staff",
-    description: "Stock viewing, item management, stock purchases, purchase records, adjustments, suppliers, and basic dashboard access.",
-    permissions: [
-      "dashboard.view",
-      "stock.view",
-      "stock.manageItems",
-      "stock.purchase",
-      "stock.adjust",
-      "stock.suppliers"
-    ],
+    description: "Stock control access for inventory, purchases, purchase records, adjustments, suppliers, stock reports, and inventory exports.",
+    permissions: stockStaffPermissions,
     locked: false,
     active: true
   }

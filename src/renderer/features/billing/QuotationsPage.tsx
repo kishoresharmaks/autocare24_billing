@@ -20,6 +20,7 @@ import type {
   Vehicle,
   VehicleType
 } from "../../../shared/types";
+import { CustomerSearchSelect } from "./CustomerSearchSelect";
 import { InvoicePreview } from "./InvoicePreview";
 
 type DraftItem = InvoiceItemInput & { key: string };
@@ -479,6 +480,7 @@ export function QuotationsPage({
     vehicleId: selectedVehicleId || activeQuotation?.vehicleId || "",
     jobCardId: "",
     vehicleType: (vehicle.vehicleType || "car") as VehicleType,
+    customerCode: customer.customerCode || activeQuotation?.customerCode || "",
     customerName: customer.name || "Customer",
     customerPhone: customer.phone || "",
     vehicleNumber: vehicle.registrationNumber || "",
@@ -505,6 +507,7 @@ export function QuotationsPage({
     createdAt: activeQuotation?.createdAt || todayLocal(),
     customer: {
       id: selectedCustomerId || activeQuotation?.customerId || "quotation-customer",
+      customerCode: customer.customerCode || activeQuotation?.customerCode || "",
       name: customer.name || "Customer",
       phone: customer.phone || "",
       email: customer.email || "",
@@ -548,7 +551,7 @@ export function QuotationsPage({
       <section className="panel list-panel no-print">
         <div className="search-box">
           <Search size={18} />
-          <input placeholder="Quotation, customer, phone, vehicle" value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
+          <input placeholder="Quotation, customer ID, customer, phone, vehicle" value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
         </div>
         {canManage && (
           <button className="primary-action full-width-action" onClick={resetForm}>
@@ -560,7 +563,7 @@ export function QuotationsPage({
           {quotations.map((item) => (
             <button key={item.id} className={selectedId === item.id ? "record active" : "record"} onClick={() => setSelectedId(item.id)}>
               <strong>{item.quotationNumber}</strong>
-              <span>{item.customerName || "No customer"} - {vehicleTypeLabel(item.vehicleType)} {item.vehicleNumber || "No vehicle"}</span>
+              <span>{item.customerCode ? `${item.customerCode} - ` : ""}{item.customerName || "No customer"} - {vehicleTypeLabel(item.vehicleType)} {item.vehicleNumber || "No vehicle"}</span>
               <b>{formatMoney(item.grandTotal)}</b>
               <em className={`status ${item.quotationStatus}`}>{statusLabel(item.quotationStatus)}</em>
             </button>
@@ -678,15 +681,7 @@ export function QuotationsPage({
 
             <div className="section-title">Customer and vehicle</div>
             <div className="form-grid two">
-              <label>
-                Existing customer
-                <select value={selectedCustomerId} disabled={!canEditCurrent} onChange={(event) => chooseCustomer(event.currentTarget.value)}>
-                  <option value="">New customer</option>
-                  {customers.map((item) => (
-                    <option key={item.id} value={item.id}>{item.name} {item.phone ? `- ${item.phone}` : ""}</option>
-                  ))}
-                </select>
-              </label>
+              <CustomerSearchSelect customers={customers} value={selectedCustomerId} onChange={chooseCustomer} disabled={!canEditCurrent} />
               <label>
                 Existing vehicle
                 <select value={selectedVehicleId} disabled={!canEditCurrent || !selectedCustomerId} onChange={(event) => chooseVehicle(event.currentTarget.value)}>
@@ -696,6 +691,7 @@ export function QuotationsPage({
                   ))}
                 </select>
               </label>
+              <label>Customer ID<input readOnly value={customer.customerCode || activeQuotation?.customerCode || "Assigned after bill conversion"} /></label>
               <label>Customer name<input disabled={!canEditCurrent} value={customer.name} onChange={(event) => setCustomer({ ...customer, name: event.currentTarget.value })} /></label>
               <label>Phone<input disabled={!canEditCurrent} value={customer.phone ?? ""} onChange={(event) => setCustomer({ ...customer, phone: event.currentTarget.value })} /></label>
               <label>Customer email<input type="email" disabled={!canEditCurrent} value={customer.email ?? ""} onChange={(event) => setCustomer({ ...customer, email: event.currentTarget.value })} /></label>

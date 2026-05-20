@@ -6,6 +6,9 @@ const {
   DEFAULT_ACCESS_ROLES,
   OWNER_ACCESS_ROLE_ID,
   STAFF_OPERATIONS_ROLE_ID,
+  OPERATOR_ACCESS_ROLE_ID,
+  BUSINESS_DIRECTOR_ACCESS_ROLE_ID,
+  INVESTOR_ACCESS_ROLE_ID,
   PERMISSION_GROUPS,
   hasAllPermissions,
   hasAnyPermission,
@@ -184,8 +187,18 @@ test("permission checks handle owner bypass, staff permissions, and null users",
 test("default access roles remain consistent and permission groups cover all keys", () => {
   const ownerRole = DEFAULT_ACCESS_ROLES.find((role) => role.id === OWNER_ACCESS_ROLE_ID);
   const staffOpsRole = DEFAULT_ACCESS_ROLES.find((role) => role.id === STAFF_OPERATIONS_ROLE_ID);
+  const operatorRole = DEFAULT_ACCESS_ROLES.find((role) => role.id === OPERATOR_ACCESS_ROLE_ID);
+  const businessDirectorRole = DEFAULT_ACCESS_ROLES.find((role) => role.id === BUSINESS_DIRECTOR_ACCESS_ROLE_ID);
+  const investorRole = DEFAULT_ACCESS_ROLES.find((role) => role.id === INVESTOR_ACCESS_ROLE_ID);
+  const billingStaffRole = DEFAULT_ACCESS_ROLES.find((role) => role.id === "billing-staff");
+  const stockStaffRole = DEFAULT_ACCESS_ROLES.find((role) => role.id === "stock-staff");
   assert.ok(ownerRole, "Owner role missing");
   assert.ok(staffOpsRole, "Staff operations role missing");
+  assert.ok(operatorRole, "Operator role missing");
+  assert.ok(businessDirectorRole, "Business Director role missing");
+  assert.ok(investorRole, "Investor role missing");
+  assert.ok(billingStaffRole, "Billing Staff role missing");
+  assert.ok(stockStaffRole, "Stock Staff role missing");
   assert.equal(ownerRole.locked, true);
   assert.equal(ownerRole.active, true);
   assert.equal(Object.isFrozen(ALL_PERMISSIONS), true);
@@ -194,7 +207,22 @@ test("default access roles remain consistent and permission groups cover all key
 
   ALL_PERMISSIONS.forEach((permission) => assert.equal(ownerRole.permissions.includes(permission), true));
   assert.equal(staffOpsRole.permissions.includes("billing.create"), true);
-  assert.equal(staffOpsRole.permissions.includes("reports.view"), false);
+  assert.equal(staffOpsRole.permissions.includes("reports.view"), true);
+  assert.equal(staffOpsRole.permissions.includes("exports.csv"), true);
+  assert.equal(staffOpsRole.permissions.includes("users.manage"), false);
+  assert.equal(operatorRole.permissions.includes("billing.create"), true);
+  assert.equal(operatorRole.permissions.includes("users.manage"), false);
+  assert.equal(businessDirectorRole.permissions.includes("users.manage"), true);
+  assert.equal(businessDirectorRole.permissions.includes("developer.access"), false);
+  assert.equal(investorRole.permissions.includes("reports.view"), true);
+  assert.equal(investorRole.permissions.includes("billing.create"), false);
+  assert.equal(billingStaffRole.permissions.includes("billing.manageInvoices"), true);
+  assert.equal(billingStaffRole.permissions.includes("billing.cancelInvoices"), true);
+  assert.equal(billingStaffRole.permissions.includes("jobCards.photos"), true);
+  assert.equal(billingStaffRole.permissions.includes("reports.view"), false);
+  assert.equal(stockStaffRole.permissions.includes("stock.purchase"), true);
+  assert.equal(stockStaffRole.permissions.includes("reports.view"), true);
+  assert.equal(stockStaffRole.permissions.includes("billing.create"), false);
 
   const groupedPermissions = PERMISSION_GROUPS.flatMap((group) => group.permissions.map((permission) => permission.key));
   assert.equal(new Set(groupedPermissions).size, groupedPermissions.length, "Duplicate permission key in PERMISSION_GROUPS");

@@ -155,9 +155,10 @@ const moduleNavItems: Record<WorkModule, ModuleNavItem[]> = {
     { key: inventoryNavKeys.items, label: "Stock List", icon: Package, page: "inventory", inventoryTab: "items", permission: "stock.view" },
     { key: inventoryNavKeys.purchases, label: "Add Stock", icon: PlusCircle, page: "inventory", inventoryTab: "purchases", permission: "stock.purchase" },
     { key: inventoryNavKeys.purchaseRecords, label: "Purchase Records", icon: ReceiptText, page: "inventory", inventoryTab: "purchaseRecords", permission: "stock.view" },
-    { key: inventoryNavKeys.remove, label: "Remove Stock", icon: Package, page: "inventory", inventoryTab: "remove", permission: "stock.adjust" },
+    { key: inventoryNavKeys.remove, label: "Stock Action", icon: Package, page: "inventory", inventoryTab: "remove", permission: "stock.adjust" },
     { key: inventoryNavKeys.suppliers, label: "Suppliers", icon: Users, page: "inventory", inventoryTab: "suppliers", permission: "stock.suppliers" },
-    { key: inventoryNavKeys.movements, label: "Stock History", icon: ClipboardList, page: "inventory", inventoryTab: "movements", permission: "stock.view" }
+    { key: inventoryNavKeys.movements, label: "Stock History", icon: ClipboardList, page: "inventory", inventoryTab: "movements", permission: "stock.view" },
+    { key: inventoryNavKeys.reports, label: "Stock Reports", icon: FileText, page: "inventory", inventoryTab: "reports", permission: "stock.view" }
   ],
   enquiries: [
     { key: enquiryNavKeys.followups, label: "Follow-ups", icon: LayoutDashboard, page: "enquiries", enquiryTab: "followups", permission: "enquiries.view" },
@@ -1210,8 +1211,16 @@ function AuthGate({
         setStaffStatus(status);
         setCloudUrl(status.cloudUrl || "");
         setDeviceName(status.deviceName || "");
-        if (status.connected) setSetupFlow("login");
-        else if (status.configured) setSetupFlow("staff");
+        if (status.connected) {
+          window.autocare
+            .authStatus()
+            .then((auth) => {
+              if (auth.hasUsers) setSetupFlow("login");
+            })
+            .catch(() => undefined);
+        } else if (status.state === "pending_approval" || status.approvalStatus === "PENDING") {
+          setSetupFlow("staff");
+        }
       })
       .catch(() => undefined);
   }, [mode]);
@@ -1573,16 +1582,16 @@ function OverviewPage({
       <section className="overview-kpi-strip" aria-label="Today summary">
         <OverviewKpi
           icon={Wallet}
-          label="Today paid"
+          label="Today revenue"
           value={formatMoney(dashboard.todayRevenue)}
           hint="Cash collected today"
           tone="green"
         />
         <OverviewKpi
           icon={Clock}
-          label="Pending dues"
+          label="Pending revenue"
           value={formatMoney(dashboard.pendingDues)}
-          hint={dashboard.pendingDues > 0 ? "Payment follow-up needed" : "No pending dues"}
+          hint={dashboard.pendingDues > 0 ? "Payment follow-up needed" : "No Pending revenue"}
           tone="gold"
         />
         <OverviewKpi
@@ -1623,8 +1632,8 @@ function OverviewPage({
             actionLabel="Open billing workspace"
             onClick={() => openModule("billing")}
             stats={[
-              { label: "Today paid", value: formatMoney(dashboard.todayRevenue), icon: Wallet },
-              { label: "Pending dues", value: formatMoney(dashboard.pendingDues), icon: Clock },
+              { label: "Today revenue", value: formatMoney(dashboard.todayRevenue), icon: Wallet },
+              { label: "Pending revenue", value: formatMoney(dashboard.pendingDues), icon: Clock },
               { label: "Open jobs", value: String(dashboard.jobCards.openJobs), icon: ClipboardList }
             ]}
           />}
@@ -1829,4 +1838,3 @@ function SalesActivityChart({ points }: { points: WeeklySalesPoint[] }) {
     </div>
   );
 }
-

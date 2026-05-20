@@ -1,4 +1,26 @@
-import { Archive, CalendarDays, Download, FileSpreadsheet, FileText, FolderOpen, HardDriveUpload, Printer, RefreshCw, Save } from "lucide-react";
+import {
+  Archive,
+  BarChart3,
+  CalendarDays,
+  ClipboardList,
+  CreditCard,
+  Download,
+  FileClock,
+  FileSpreadsheet,
+  FileText,
+  FolderOpen,
+  HardDriveUpload,
+  Landmark,
+  PackageSearch,
+  Printer,
+  ReceiptText,
+  RefreshCw,
+  Save,
+  TrendingUp,
+  UsersRound,
+  WalletCards,
+  type LucideIcon
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type {
   AppUser,
@@ -19,23 +41,70 @@ import { InvoiceTable } from "../../components/tables/InvoiceTable";
 import { emptyExpenseInput } from "./ProfitReportView";
 
 type LegacyReportView = "all" | "billing" | "stock" | "enquiries" | "profit";
-type ReportTab = "summary" | "sales" | "gst" | "payments" | "stock" | "enquiries" | "jobCards" | "profit";
+type ReportTab =
+  | "daySummary"
+  | "daily"
+  | "sales"
+  | "gst"
+  | "payments"
+  | "pendingPayments"
+  | "dues"
+  | "stock"
+  | "enquiries"
+  | "jobCards"
+  | "profit";
 type ChartPoint = { label: string; [key: string]: string | number };
-type ReportTabConfig = { id: ReportTab; label: string; exportKind: ReportExportKind };
+type ReportTabConfig = { id: ReportTab; label: string; description: string; exportKind: ReportExportKind; icon: LucideIcon };
+type ReportGroup = { label: string; items: ReportTabConfig[] };
 
 const presets: DateRangePreset[] = ["7d", "30d", "90d", "all"];
 const paymentModes: PaymentMode[] = ["Cash", "UPI", "Card", "Bank Transfer", "Other"];
-const defaultReportTab: ReportTabConfig = { id: "summary", label: "Full Business Summary", exportKind: "full" };
-const reportTabs: ReportTabConfig[] = [
-  defaultReportTab,
-  { id: "sales", label: "Sales Report", exportKind: "sales" },
-  { id: "gst", label: "GST / Tax Report", exportKind: "gst" },
-  { id: "payments", label: "Payment & Dues", exportKind: "payments" },
-  { id: "stock", label: "Stock Report", exportKind: "stock" },
-  { id: "enquiries", label: "Enquiry Report", exportKind: "enquiries" },
-  { id: "jobCards", label: "Job Card Report", exportKind: "jobCards" },
-  { id: "profit", label: "Profit & Expense", exportKind: "profit" }
+const defaultReportTab: ReportTabConfig = {
+  id: "daySummary",
+  label: "Day Summary",
+  description: "Owner summary for sales, collection, dues, jobs, leads, and profit.",
+  exportKind: "full",
+  icon: BarChart3
+};
+const reportGroups: ReportGroup[] = [
+  {
+    label: "Daily",
+    items: [
+      defaultReportTab,
+      { id: "daily", label: "Daily Report", description: "Day-wise billing, collection, tax, and pending movement.", exportKind: "daily", icon: FileClock }
+    ]
+  },
+  {
+    label: "Billing",
+    items: [
+      { id: "sales", label: "Billing / Sales", description: "Invoice billed value, quick stock sales, collection, dues, and top services.", exportKind: "sales", icon: ReceiptText },
+      { id: "gst", label: "GST / Tax", description: "Taxable value, CGST, SGST, IGST, and total tax.", exportKind: "gst", icon: Landmark }
+    ]
+  },
+  {
+    label: "Payments",
+    items: [
+      { id: "payments", label: "Collection", description: "Payment mode collections and daily collected amount.", exportKind: "payments", icon: CreditCard },
+      { id: "pendingPayments", label: "Received Pending", description: "Payments received later against older invoices.", exportKind: "pendingPayments", icon: WalletCards },
+      { id: "dues", label: "Pending Balance", description: "Invoices that still have unpaid balance.", exportKind: "dues", icon: FileText }
+    ]
+  },
+  {
+    label: "Operations",
+    items: [
+      { id: "jobCards", label: "Job Cards", description: "Open, progress, completed, billed, and turnaround status.", exportKind: "jobCards", icon: ClipboardList },
+      { id: "enquiries", label: "Enquiries", description: "Lead status, source performance, and conversion.", exportKind: "enquiries", icon: UsersRound },
+      { id: "stock", label: "Stock", description: "Stock value, low stock, retail products, and movements.", exportKind: "stock", icon: PackageSearch }
+    ]
+  },
+  {
+    label: "Finance",
+    items: [
+      { id: "profit", label: "Profit & Expense", description: "Paid revenue, stock cost, expenses, profit, and margin.", exportKind: "profit", icon: TrendingUp }
+    ]
+  }
 ];
+const reportTabs = reportGroups.flatMap((group) => group.items);
 
 const money = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
 const formatMoney = (value: number) =>
@@ -46,9 +115,15 @@ const statusLabel = (status: string) =>
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 const percent = (value: number, total: number) => (total > 0 ? Math.round((value / total) * 100) : 0);
 const legacyToTab = (view?: LegacyReportView): ReportTab =>
-  view === "stock" ? "stock" : view === "enquiries" ? "enquiries" : view === "profit" ? "profit" : view === "billing" ? "sales" : "summary";
+  view === "stock" ? "stock" : view === "enquiries" ? "enquiries" : view === "profit" ? "profit" : view === "billing" ? "sales" : "daySummary";
 const reportExportLabel = (kind: ReportExportKind) =>
-  kind === "full" ? "full-business-summary" : kind === "jobCards" ? "job-card-report" : `${kind}-report`;
+  kind === "full"
+    ? "day-summary"
+    : kind === "jobCards"
+      ? "job-card-report"
+      : kind === "pendingPayments"
+        ? "received-pending-payments"
+        : `${kind}-report`;
 const safeFilePart = (value: string) =>
   value
     .toLowerCase()
@@ -225,16 +300,41 @@ export function ReportsPage({
     }
   };
 
+  const ActiveIcon = active.icon;
+
   return (
-    <div className="reports-workspace">
+    <div className="reports-workspace report-center-workspace">
       <section className="reports-toolbar no-print">
         <div>
           <span className="eyebrow">Owner reports</span>
-          <h2>Reports</h2>
-          <p>{report.rangeLabel}</p>
+          <h2>Report Center</h2>
+          <p>{active.description}</p>
         </div>
         <div className="report-actions">
           <button className="ghost-button" onClick={() => void loadReports()}><RefreshCw size={17} /> Refresh</button>
+        </div>
+      </section>
+
+      <section className="report-filter-panel no-print">
+        <div className="segmented">
+          {presets.map((item) => (
+            <button
+              key={item}
+              className={!fromDate && !toDate && preset === item ? "active" : ""}
+              onClick={() => {
+                setPreset(item);
+                setFromDate("");
+                setToDate("");
+              }}
+            >
+              {item}
+            </button>
+          ))}
+        </div>
+        <div className="report-date-filters">
+          <label><CalendarDays size={16} /> From<input type="date" value={fromDate} onChange={(event) => setFromDate(event.currentTarget.value)} /></label>
+          <label><CalendarDays size={16} /> To<input type="date" value={toDate} onChange={(event) => setToDate(event.currentTarget.value)} /></label>
+          {(fromDate || toDate) && <button className="ghost-button small" onClick={() => { setFromDate(""); setToDate(""); }}>Clear custom</button>}
         </div>
       </section>
 
@@ -308,37 +408,6 @@ export function ReportsPage({
         </div>
       </section>}
 
-      <section className="report-filter-panel no-print">
-        <div className="segmented">
-          {presets.map((item) => (
-            <button
-              key={item}
-              className={!fromDate && !toDate && preset === item ? "active" : ""}
-              onClick={() => {
-                setPreset(item);
-                setFromDate("");
-                setToDate("");
-              }}
-            >
-              {item}
-            </button>
-          ))}
-        </div>
-        <div className="report-date-filters">
-          <label><CalendarDays size={16} /> From<input type="date" value={fromDate} onChange={(event) => setFromDate(event.currentTarget.value)} /></label>
-          <label><CalendarDays size={16} /> To<input type="date" value={toDate} onChange={(event) => setToDate(event.currentTarget.value)} /></label>
-          {(fromDate || toDate) && <button className="ghost-button small" onClick={() => { setFromDate(""); setToDate(""); }}>Clear custom</button>}
-        </div>
-      </section>
-
-      <nav className="report-tabs no-print" aria-label="Report sections">
-        {reportTabs.map((tab) => (
-          <button key={tab.id} className={activeTab === tab.id ? "active" : ""} onClick={() => setActiveTab(tab.id)}>
-            {tab.label}
-          </button>
-        ))}
-      </nav>
-
       <section className="report-print-header print-only">
         <div>
           <span>Autocare24 Billing</span>
@@ -351,24 +420,249 @@ export function ReportsPage({
         </div>
       </section>
 
-      {(activeTab === "summary" || activeTab === "sales") && (
-        <SalesReport report={report} profit={profit} conversionRate={conversionRate} summary={activeTab === "summary"} />
-      )}
-      {activeTab === "gst" && <GstReport report={report} />}
-      {activeTab === "payments" && <PaymentsReport report={report} />}
-      {activeTab === "stock" && <StockReport report={report} />}
-      {activeTab === "enquiries" && <EnquiryReport report={report} conversionRate={conversionRate} />}
-      {activeTab === "jobCards" && <JobCardReport report={report} />}
-      {activeTab === "profit" && (
-        <ProfitExpenseReport
-          profit={profit}
-          expenseForm={hasPermission(currentUser, "expenses.manage") ? expenseForm : undefined}
-          setExpenseForm={hasPermission(currentUser, "expenses.manage") ? setExpenseForm : undefined}
-          savingExpense={savingExpense}
-          saveExpense={hasPermission(currentUser, "expenses.manage") ? saveExpense : undefined}
-          deleteExpense={hasPermission(currentUser, "expenses.manage") ? deleteExpense : undefined}
-        />
-      )}
+      <section className="report-center-shell">
+        <aside className="report-sidebar no-print" aria-label="Report sections">
+          {reportGroups.map((group) => (
+            <div className="report-sidebar-group" key={group.label}>
+              <span>{group.label}</span>
+              {group.items.map((tab) => {
+                const Icon = tab.icon;
+                return (
+                  <button key={tab.id} className={activeTab === tab.id ? "active" : ""} onClick={() => setActiveTab(tab.id)}>
+                    <Icon size={17} />
+                    <div>
+                      <strong>{tab.label}</strong>
+                      <small>{tab.description}</small>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </aside>
+
+        <main className="report-center-main">
+          <section className="report-active-header no-print">
+            <div className="report-active-title">
+              <span><ActiveIcon size={18} /> {report.rangeLabel}</span>
+              <h2>{active.label}</h2>
+              <p>{active.description}</p>
+            </div>
+            <div className="report-active-meta">
+              <span>Generated</span>
+              <strong>{new Date().toLocaleString()}</strong>
+            </div>
+          </section>
+
+          {activeTab === "daySummary" && <DaySummaryReport report={report} profit={profit} conversionRate={conversionRate} />}
+          {activeTab === "daily" && <DailyReport report={report} />}
+          {activeTab === "sales" && <SalesReport report={report} profit={profit} conversionRate={conversionRate} />}
+          {activeTab === "gst" && <GstReport report={report} />}
+          {activeTab === "payments" && <PaymentsReport report={report} />}
+          {activeTab === "pendingPayments" && <PendingPaymentsReport report={report} />}
+          {activeTab === "dues" && <DuesReport report={report} />}
+          {activeTab === "stock" && <StockReport report={report} />}
+          {activeTab === "enquiries" && <EnquiryReport report={report} conversionRate={conversionRate} />}
+          {activeTab === "jobCards" && <JobCardReport report={report} />}
+          {activeTab === "profit" && (
+            <ProfitExpenseReport
+              profit={profit}
+              expenseForm={hasPermission(currentUser, "expenses.manage") ? expenseForm : undefined}
+              setExpenseForm={hasPermission(currentUser, "expenses.manage") ? setExpenseForm : undefined}
+              savingExpense={savingExpense}
+              saveExpense={hasPermission(currentUser, "expenses.manage") ? saveExpense : undefined}
+              deleteExpense={hasPermission(currentUser, "expenses.manage") ? deleteExpense : undefined}
+            />
+          )}
+        </main>
+      </section>
+    </div>
+  );
+}
+
+function DaySummaryReport({ report, profit, conversionRate }: { report: ReportData; profit: ProfitReportData; conversionRate: number }) {
+  return (
+    <div className="report-grid">
+      <div className="metric-strip">
+        <Metric label="Total sales" value={formatMoney(report.totalSales ?? report.revenue)} />
+        <Metric label="Collected" value={formatMoney(report.paidAmount)} tone="ok" />
+        <Metric label="Pending balance" value={formatMoney(report.balanceDue)} tone={report.balanceDue ? "warn" : "ok"} />
+        <Metric label="Cash profit" value={formatMoney(profit.cashProfit)} tone={profit.cashProfit >= 0 ? "ok" : "warn"} />
+        <Metric label="Open jobs" value={String(report.jobCards.open)} tone={report.jobCards.open ? "warn" : "ok"} />
+        <Metric label="Lead conversion" value={`${conversionRate}%`} tone={conversionRate > 0 ? "ok" : undefined} />
+      </div>
+
+      <section className="panel wide-panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Daily business movement</h2>
+            <p>Billing, collection, pending receipt, and balance by date.</p>
+          </div>
+        </div>
+        <DailyReportTable rows={report.dailyRows || []} compact />
+      </section>
+
+      <section className="panel">
+        <h2>Collection by mode</h2>
+        <HorizontalBars rows={report.paymentModes.map((item) => ({ label: item.mode, value: item.amount }))} />
+      </section>
+
+      <JobCardReport report={report} compact />
+      <ProfitExpenseReport profit={profit} compact />
+    </div>
+  );
+}
+
+function DailyReport({ report }: { report: ReportData }) {
+  const totals = (report.dailyRows || []).reduce(
+    (acc, row) => ({
+      totalSales: money(acc.totalSales + row.totalSales),
+      collected: money(acc.collected + row.collected),
+      pendingReceived: money(acc.pendingReceived + row.pendingReceived),
+      balanceCreated: money(acc.balanceCreated + row.balanceCreated),
+      tax: money(acc.tax + row.tax),
+      invoiceCount: acc.invoiceCount + row.invoiceCount
+    }),
+    { totalSales: 0, collected: 0, pendingReceived: 0, balanceCreated: 0, tax: 0, invoiceCount: 0 }
+  );
+  return (
+    <div className="report-grid single-report-grid">
+      <div className="metric-strip">
+        <Metric label="Grand sales" value={formatMoney(totals.totalSales)} />
+        <Metric label="Collected" value={formatMoney(totals.collected)} tone="ok" />
+        <Metric label="Pending received" value={formatMoney(totals.pendingReceived)} />
+        <Metric label="New balance" value={formatMoney(totals.balanceCreated)} tone={totals.balanceCreated ? "warn" : "ok"} />
+        <Metric label="Tax" value={formatMoney(totals.tax)} />
+        <Metric label="Invoices" value={String(totals.invoiceCount)} />
+      </div>
+      <section className="panel wide-panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Daily report</h2>
+            <p>Easy Software-style day-wise table for billing and collections.</p>
+          </div>
+        </div>
+        <DailyReportTable rows={report.dailyRows || []} />
+      </section>
+    </div>
+  );
+}
+
+function DailyReportTable({ rows, compact }: { rows: ReportData["dailyRows"]; compact?: boolean }) {
+  if (!rows.length) return <div className="empty-state subtle">No daily report data in this range.</div>;
+  return (
+    <div className="table-wrap report-table-wrap">
+      <table className="compact-table report-detail-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Invoices</th>
+            <th>Service</th>
+            <th>Product</th>
+            <th>Quick sale</th>
+            <th>Collected</th>
+            <th>Pending received</th>
+            {!compact && <th>New balance</th>}
+            {!compact && <th>Tax</th>}
+            <th>Grand sales</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.date}>
+              <td>{row.date}</td>
+              <td>{row.invoiceCount}{row.cancelledCount ? ` / ${row.cancelledCount} cancelled` : ""}</td>
+              <td>{formatMoney(row.serviceAmount)}</td>
+              <td>{formatMoney(row.productAmount)}</td>
+              <td>{formatMoney(row.quickStockSales)}</td>
+              <td>{formatMoney(row.collected)}</td>
+              <td>{formatMoney(row.pendingReceived)}</td>
+              {!compact && <td>{formatMoney(row.balanceCreated)}</td>}
+              {!compact && <td>{formatMoney(row.tax)}</td>}
+              <td><strong>{formatMoney(row.grandSales)}</strong></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function PendingPaymentsReport({ report }: { report: ReportData }) {
+  const total = money((report.pendingPayments || []).reduce((sum, row) => sum + row.amount, 0));
+  return (
+    <div className="report-grid single-report-grid">
+      <div className="metric-strip">
+        <Metric label="Pending received" value={formatMoney(total)} tone={total ? "ok" : undefined} />
+        <Metric label="Receipts" value={String(report.pendingPayments?.length || 0)} />
+        <Metric label="Open dues" value={formatMoney(report.balanceDue)} tone={report.balanceDue ? "warn" : "ok"} />
+      </div>
+      <section className="panel wide-panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Received pending payments</h2>
+            <p>Payments collected in this range for invoices created earlier.</p>
+          </div>
+        </div>
+        <PendingPaymentsTable rows={report.pendingPayments || []} />
+      </section>
+    </div>
+  );
+}
+
+function PendingPaymentsTable({ rows }: { rows: ReportData["pendingPayments"] }) {
+  if (!rows.length) return <div className="empty-state subtle">No pending payment receipts in this range.</div>;
+  return (
+    <div className="table-wrap report-table-wrap">
+      <table className="compact-table report-detail-table">
+        <thead>
+          <tr>
+            <th>Payment date</th>
+            <th>Invoice</th>
+            <th>Invoice date</th>
+            <th>Customer</th>
+            <th>Vehicle</th>
+            <th>Mode</th>
+            <th>Received</th>
+            <th>Balance now</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.id}>
+              <td>{row.paymentDate}</td>
+              <td>{row.invoiceNumber}</td>
+              <td>{row.invoiceDate}</td>
+              <td>{row.customerName}<span className="muted-cell">{row.customerPhone}</span></td>
+              <td>{row.vehicleNumber || "-"}</td>
+              <td>{row.mode}</td>
+              <td>{formatMoney(row.amount)}</td>
+              <td>{formatMoney(row.invoiceBalanceDue)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function DuesReport({ report }: { report: ReportData }) {
+  return (
+    <div className="report-grid single-report-grid">
+      <div className="metric-strip">
+        <Metric label="Pending balance" value={formatMoney(report.balanceDue)} tone={report.balanceDue ? "warn" : "ok"} />
+        <Metric label="Due invoices" value={String(report.dues.length)} tone={report.dues.length ? "warn" : "ok"} />
+        <Metric label="Collected" value={formatMoney(report.paidAmount)} tone="ok" />
+      </div>
+      <section className="panel wide-panel">
+        <div className="panel-heading">
+          <div>
+            <h2>Pending balance</h2>
+            <p>Invoices that still have unpaid balance after recorded payments.</p>
+          </div>
+        </div>
+        <InvoiceTable invoices={report.dues} compact />
+      </section>
     </div>
   );
 }
@@ -476,21 +770,22 @@ function GstReport({ report, compact }: { report: ReportData; compact?: boolean 
 }
 
 function PaymentsReport({ report }: { report: ReportData }) {
+  const pendingReceived = money((report.pendingPayments || []).reduce((sum, row) => sum + row.amount, 0));
   return (
     <div className="report-grid">
       <div className="metric-strip">
         <Metric label="Collected" value={formatMoney(report.paidAmount)} tone="ok" />
-        <Metric label="Pending due" value={formatMoney(report.balanceDue)} tone={report.balanceDue ? "warn" : "ok"} />
+        <Metric label="Pending received" value={formatMoney(pendingReceived)} tone={pendingReceived ? "ok" : undefined} />
+        <Metric label="Quick stock sales" value={formatMoney(report.quickStockSales)} />
         <Metric label="Payment modes" value={String(report.paymentModes.length)} />
-        <Metric label="Due invoices" value={String(report.dues.length)} tone={report.dues.length ? "warn" : "ok"} />
       </div>
       <section className="panel">
         <h2>Payment mode collection</h2>
         <HorizontalBars rows={report.paymentModes.map((item) => ({ label: item.mode, value: item.amount }))} />
       </section>
       <section className="panel wide-panel">
-        <h2>Pending dues</h2>
-        <InvoiceTable invoices={report.dues} compact />
+        <h2>Daily collection</h2>
+        <DailyReportTable rows={(report.dailyRows || []).filter((row) => row.collected > 0 || row.pendingReceived > 0)} compact />
       </section>
     </div>
   );

@@ -90,6 +90,15 @@ const requiredText = (value: unknown, label: string) => {
   if (!text) throw new Error(`${label} is required.`);
   return text;
 };
+const finiteNumber = (value: unknown) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+};
+const nonNegativeNumber = (value: unknown, label: string) => {
+  const number = finiteNumber(value);
+  if (number < 0) throw new Error(`${label} cannot be negative.`);
+  return number;
+};
 const normalizeVehicleType = (value: unknown): VehicleType => {
   const text = String(value || "");
   return text === "bike" || text === "other" ? text : "car";
@@ -509,6 +518,7 @@ export class CloudDataClient {
   saveCustomer(customer: Partial<Customer> & Pick<Customer, "name">) {
     return this.save<Customer>("customers", {
       id: customer.id || randomUUID(),
+      customerCode: customer.customerCode || "",
       name: requiredText(customer.name, "Customer name"),
       phone: customer.phone || "",
       email: customer.email || "",
@@ -550,12 +560,12 @@ export class CloudDataClient {
       unit: item.unit || "piece",
       sku: item.sku || "",
       category: item.category || "Studio stock",
-      retailPrice: money(Number(item.retailPrice || 0)),
-      gstRate: money(Number(item.gstRate || 0)),
-      lowStockLevel: money(Number(item.lowStockLevel || 0)),
+      retailPrice: money(nonNegativeNumber(item.retailPrice ?? 0, "Selling price")),
+      gstRate: money(nonNegativeNumber(item.gstRate ?? 0, "GST rate")),
+      lowStockLevel: money(nonNegativeNumber(item.lowStockLevel ?? 0, "Low stock level")),
       active: item.active !== false,
-      currentQuantity: money(Number(item.currentQuantity || 0)),
-      stockValue: money(Number(item.stockValue || 0)),
+      currentQuantity: money(nonNegativeNumber(item.currentQuantity ?? 0, "Current quantity")),
+      stockValue: money(nonNegativeNumber(item.stockValue ?? 0, "Stock value")),
       createdAt: item.createdAt || nowIso()
     });
   }
@@ -721,7 +731,9 @@ export class CloudDataClient {
   async listInvoices(query = "") {
     const params = new URLSearchParams();
     if (query) params.set("query", query);
-    const response = await this.cloud.cloudRequest<{ invoices: InvoiceSummary[] }>(`/api/v1/invoices${params.toString() ? `?${params}` : ""}`);
+    const response = await this.cloud.cloudRequest<{ invoices: InvoiceSummary[] }>(`/api/v1/invoices${params.toString() ? `?${params}` : ""}`, {
+      timeoutMs: 6500
+    });
     return response.invoices;
   }
 
@@ -775,6 +787,7 @@ export class CloudDataClient {
       customerId,
       vehicleId,
       vehicleType,
+      customerCode: input.customer?.customerCode || "",
       customerName: input.customer?.name || "",
       customerPhone: input.customer?.phone || "",
       customerEmail: input.customer?.email || "",
@@ -806,9 +819,14 @@ export class CloudDataClient {
   }
 
   async listQuotations(query = "") {
-    const rows = await this.list<QuotationSummary>("quotations", { includeInactive: true });
+    const [rows, customers] = await Promise.all([
+      this.list<QuotationSummary>("quotations", { includeInactive: true }),
+      this.list<Customer>("customers")
+    ]);
+    const customerById = new Map(customers.map((customer) => [customer.id, customer]));
     const q = query.trim().toLowerCase();
     return rows
+      .map((row) => ({ ...row, customerCode: row.customerCode || customerById.get(row.customerId)?.customerCode || "" }))
       .filter((row) => !q || searchBlob(row).includes(q))
       .sort((a, b) => String(b.quotationDate).localeCompare(String(a.quotationDate)) || String(b.updatedAt).localeCompare(String(a.updatedAt)))
       .slice(0, 300);
@@ -826,6 +844,7 @@ export class CloudDataClient {
     if (!quotation) throw new Error("Quotation not found.");
     const customer = customers.find((row) => row.id === quotation.customerId) || ({
       id: quotation.customerId,
+      customerCode: quotation.customerCode || "",
       name: quotation.customerName || "",
       phone: quotation.customerPhone || "",
       email: quotation.customerEmail || "",
@@ -845,6 +864,7 @@ export class CloudDataClient {
     } as Vehicle);
     return {
       ...quotation,
+      customerCode: quotation.customerCode || customer.customerCode || "",
       customer,
       vehicle,
       items: items.filter((row) => row.quotationId === id),
@@ -927,6 +947,9 @@ export class CloudDataClient {
       addSection("Daily Sales Trend", report.salesTrend || []);
       addSection("Top Services", report.topServices || []);
     }
+    if (include("daily")) {
+      addSection("Daily Report", (report.dailyRows || []).map((row) => ({ ...row })));
+    }
     if (include("gst")) {
       addSection("GST Tax Summary", [{
         taxableValue: report.taxableValue,
@@ -938,6 +961,11 @@ export class CloudDataClient {
     }
     if (include("payments")) {
       addSection("Payment Modes", report.paymentModes || []);
+    }
+    if (include("pendingPayments")) {
+      addSection("Received Pending Payments", (report.pendingPayments || []).map((row) => ({ ...row })));
+    }
+    if (include("dues")) {
       addSection("Pending Dues", (report.dues || []).map((invoice) => ({
         invoiceNumber: invoice.invoiceNumber,
         invoiceDate: invoice.invoiceDate,
@@ -1024,6 +1052,7 @@ export class CloudDataClient {
         ? (await this.listInvoices("")).map((invoice) => ({
             invoiceNumber: invoice.invoiceNumber,
             date: invoice.invoiceDate,
+            customerId: invoice.customerCode,
             customer: invoice.customerName,
             vehicleType: invoice.vehicleType,
             vehicle: invoice.vehicleNumber,
@@ -1039,6 +1068,7 @@ export class CloudDataClient {
           }))
         : kind === "customers"
           ? (await this.listCustomers()).map((customer) => ({
+              customerId: customer.customerCode,
               name: customer.name,
               phone: customer.phone,
               email: customer.email,
@@ -1084,6 +1114,7 @@ export class CloudDataClient {
                     jobNumber: jobCard.jobNumber,
                     status: jobCard.status,
                     jobDate: jobCard.jobDate,
+                    customerId: jobCard.customerCode,
                     customer: jobCard.customerName,
                     phone: jobCard.customerPhone,
                     vehicleType: jobCard.vehicleType,
@@ -1216,9 +1247,34 @@ export class CloudDataClient {
   }
 
   async listJobCards(filter: { query?: string; status?: JobCardStatus | "today" | "open" | "approval" | "progress" | "ready" | "closed" } = {}) {
-    const rows = await this.list<JobCardDetail>("job_cards", { includeInactive: true });
+    const [rows, customers] = await Promise.all([
+      this.list<JobCardDetail>("job_cards", { includeInactive: true }),
+      this.list<Customer>("customers")
+    ]);
+    const customerById = new Map(customers.map((customer) => [customer.id, customer]));
     const q = String(filter.query || "").trim().toLowerCase();
-    return rows.filter((row) => !q || searchBlob(row).includes(q));
+    const today = localDate();
+    const statuses =
+      filter.status === "open"
+        ? ["draft", "estimate_pending", "approved", "in_progress", "quality_check", "ready_delivery"]
+        : filter.status === "approval"
+          ? ["estimate_pending"]
+          : filter.status === "progress"
+            ? ["approved", "in_progress", "quality_check"]
+            : filter.status === "ready"
+              ? ["ready_delivery", "delivered"]
+              : filter.status === "closed"
+                ? ["billed", "cancelled"]
+                : filter.status && filter.status !== "today"
+                  ? [filter.status]
+                  : [];
+    return rows
+      .map((row) => ({ ...row, customerCode: row.customerCode || customerById.get(row.customerId)?.customerCode || "" }))
+      .filter((row) => filter.status !== "today" || row.jobDate === today)
+      .filter((row) => !statuses.length || statuses.includes(row.status))
+      .filter((row) => !q || searchBlob(row).includes(q))
+      .sort((a, b) => String(b.jobDate || "").localeCompare(String(a.jobDate || "")) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+      .slice(0, 300);
   }
 
   async getJobCard(id: string): Promise<JobCardDetail> {
@@ -1235,9 +1291,11 @@ export class CloudDataClient {
     const job = jobs.find((row) => row.id === id);
     if (!job) throw new Error("Job card not found.");
     const jobPhotos = await this.hydrateJobCardPhotos(photos.filter((row) => row.jobCardId === id));
+    const customer = customers.find((row) => row.id === job.customerId) || ({ id: job.customerId, customerCode: job.customerCode || "", name: job.customerName } as Customer);
     return {
       ...job,
-      customer: customers.find((row) => row.id === job.customerId) || ({ id: job.customerId, name: job.customerName } as Customer),
+      customerCode: job.customerCode || customer.customerCode || "",
+      customer,
       vehicle: vehicles.find((row) => row.id === job.vehicleId) || ({ id: job.vehicleId, customerId: job.customerId, registrationNumber: job.vehicleNumber, vehicleType: job.vehicleType } as Vehicle),
       items: items.filter((row) => row.jobCardId === id),
       checklist: checklist.filter((row) => row.jobCardId === id),
@@ -1309,6 +1367,7 @@ export class CloudDataClient {
       customerId: customer.id,
       vehicleId: vehicle.id,
       invoiceId: "",
+      customerCode: customer.customerCode,
       customerName: customer.name,
       customerPhone: customer.phone,
       vehicleType: vehicle.vehicleType,

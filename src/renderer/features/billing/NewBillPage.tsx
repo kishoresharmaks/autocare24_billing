@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { calculateInvoiceTotals, DEFAULT_SAC_CODE, money, normalizeSacCode } from "../../../shared/billing-math";
 import type { BusinessSettings, Customer, CustomerWithVehicles, InventoryItem, InvoiceDetail, InvoiceDraft, InvoiceDraftCorrectionType, InvoiceDraftPayload, InvoiceItemInput, InvoiceMode, PaymentMode, ServiceItem, TaxScope, Vehicle, VehicleType } from "../../../shared/types";
+import { CustomerSearchSelect } from "./CustomerSearchSelect";
 
 type DraftItem = InvoiceItemInput & { key: string };
 const paymentModes: PaymentMode[] = ["Cash", "UPI", "Card", "Bank Transfer", "Other"];
@@ -500,17 +501,7 @@ export function NewBillPage({
 
         <div className="section-title">Customer and vehicle</div>
         <div className="form-grid two">
-          <label>
-            Existing customer
-            <select value={selectedCustomerId} onChange={(event) => chooseCustomer(event.currentTarget.value)}>
-              <option value="">New customer</option>
-              {customers.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name} {item.phone ? `- ${item.phone}` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
+          <CustomerSearchSelect customers={customers} value={selectedCustomerId} onChange={chooseCustomer} />
           <label>
             Existing vehicle
             <select value={selectedVehicleId} disabled={!selectedCustomerId} onChange={(event) => chooseVehicle(event.currentTarget.value)}>
@@ -521,6 +512,10 @@ export function NewBillPage({
                 </option>
               ))}
             </select>
+          </label>
+          <label>
+            Customer ID
+            <input readOnly value={customer.customerCode || "Assigned after finalize"} />
           </label>
           <label>
             Customer name

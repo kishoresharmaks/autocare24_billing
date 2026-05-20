@@ -31,6 +31,7 @@
 
       CREATE TABLE IF NOT EXISTS customers (
         id TEXT PRIMARY KEY,
+        customerCode TEXT,
         name TEXT NOT NULL,
         phone TEXT,
         email TEXT,
@@ -495,6 +496,7 @@
 `;
 
 export const SCHEMA_COLUMNS = [
+  { table: "customers", column: "customerCode", definition: "TEXT" },
   { table: "users", column: "accessRoleId", definition: "TEXT" },
   { table: "invoice_items", column: "inventoryItemId", definition: "TEXT" },
   { table: "invoices", column: "jobCardId", definition: "TEXT" },
@@ -536,6 +538,9 @@ export const SCHEMA_COLUMNS = [
 
 export const INVOICES_JOB_CARD_INDEX_SQL =
   "CREATE UNIQUE INDEX IF NOT EXISTS idx_invoices_jobCardId_unique ON invoices(jobCardId) WHERE jobCardId IS NOT NULL AND jobCardId <> ''";
+
+export const CUSTOMERS_CODE_INDEX_SQL =
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_customerCode_unique ON customers(customerCode) WHERE customerCode IS NOT NULL AND customerCode <> ''";
 
 export const DATA_TABLES = [
   "users",

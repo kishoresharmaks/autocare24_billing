@@ -223,10 +223,13 @@ Expected result:
   "data": {
     "ok": true,
     "version": "v1",
-    "serverTime": "..."
+    "serverTime": "...",
+    "database": "ok"
   }
 }
 ```
+
+If the database is not reachable, the health endpoint returns HTTP `503` with `database_unavailable`.
 
 If this URL does not work, do not connect the desktop app yet.
 

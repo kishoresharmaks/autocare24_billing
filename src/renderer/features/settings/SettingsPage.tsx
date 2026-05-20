@@ -406,6 +406,7 @@ const sampleInvoice: InvoiceDetail = {
   vehicleId: "preview-vehicle",
   jobCardId: "",
   vehicleType: "car",
+  customerCode: "CUS-00001",
   customerName: "Kishore",
   customerPhone: "9876543210",
   vehicleNumber: "TN54YY67N",
@@ -432,6 +433,7 @@ const sampleInvoice: InvoiceDetail = {
   createdAt: todayLocal(),
   customer: {
     id: "preview-customer",
+    customerCode: "CUS-00001",
     name: "Kishore",
     phone: "9876543210",
     email: "",

@@ -160,6 +160,20 @@ const run = async () => {
   assert.equal(db.listCustomers().some((row) => row.email === "billing.customer@example.com"), true, "New bill email should be stored on customer");
   passed.push("New bill customer email is stored on the customer record");
 
+  assert.throws(
+    () => db.saveInventoryItem({ name: "Bad negative price", retailPrice: -1, gstRate: 18, lowStockLevel: 0, active: true }),
+    /Selling price cannot be negative/
+  );
+  assert.throws(
+    () => db.saveInventoryItem({ name: "Bad negative GST", retailPrice: 0, gstRate: -1, lowStockLevel: 0, active: true }),
+    /GST rate cannot be negative/
+  );
+  assert.throws(
+    () => db.saveInventoryItem({ name: "Bad negative low stock", retailPrice: 0, gstRate: 18, lowStockLevel: -1, active: true }),
+    /Low stock level cannot be negative/
+  );
+  passed.push("Inventory item rejects negative selling price, GST rate, and low stock level");
+
   const retail = db.saveInventoryItem({
     name: "Retail Wax",
     type: "retail",

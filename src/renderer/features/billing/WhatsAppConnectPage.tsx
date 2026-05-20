@@ -126,6 +126,7 @@ export function WhatsAppConnectPage({
           const whatsappPhone = normalizeWhatsAppPhone(customer.phone);
           const conversation = conversationByCustomer.get(customer.id) || conversationByPhone.get(whatsappPhone.value);
           const searchText = [
+            customer.customerCode,
             customer.name,
             customer.phone,
             customer.email,
@@ -297,7 +298,7 @@ export function WhatsAppConnectPage({
         <div className="whatsapp-list-search-row">
           <div className="search-box whatsapp-chat-search">
             <Search size={18} />
-            <input placeholder="Search customer, phone, vehicle" value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
+            <input placeholder="Search customer ID, customer, phone, vehicle" value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
           </div>
         </div>
 
@@ -315,7 +316,7 @@ export function WhatsAppConnectPage({
             >
               <span className="whatsapp-contact-avatar">{customerInitials(customer.name)}</span>
               <span className="whatsapp-contact-main">
-                <strong>{customer.name}</strong>
+                <strong>{customer.customerCode ? `${customer.customerCode} - ` : ""}{customer.name}</strong>
                 <span>{customer.conversation?.lastMessagePreview || `${customer.whatsappPhone.display} - ${plural(customer.vehicles.length, "vehicle")}`}</span>
               </span>
               <span className="whatsapp-contact-meta">

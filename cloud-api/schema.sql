@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS devices (
   registration_ip VARCHAR(45) DEFAULT NULL,
   last_seen_at DATETIME,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_devices_token_hash (token_hash),
+  KEY idx_devices_business_created (business_id, created_at),
   CONSTRAINT fk_devices_business FOREIGN KEY (business_id) REFERENCES businesses(id)
 );
 
@@ -31,7 +33,8 @@ CREATE TABLE IF NOT EXISTS business_records (
   deleted_at DATETIME DEFAULT NULL,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uq_business_record (business_id, entity, record_id),
-  KEY idx_business_records_revision (business_id, revision)
+  KEY idx_business_records_revision (business_id, revision),
+  KEY idx_business_records_entity_active (business_id, entity, deleted_at, revision)
 );
 
 CREATE TABLE IF NOT EXISTS sync_revisions (
@@ -44,6 +47,7 @@ CREATE TABLE IF NOT EXISTS sync_revisions (
   payload JSON NOT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   KEY idx_sync_revisions_business (business_id, id),
+  KEY idx_sync_revisions_record (business_id, entity, record_id, id),
   CONSTRAINT fk_sync_revisions_device FOREIGN KEY (device_id) REFERENCES devices(id)
 );
 
@@ -67,15 +71,18 @@ CREATE TABLE IF NOT EXISTS file_metadata (
   sha256 VARCHAR(64),
   storage_path VARCHAR(500),
   uploaded_by VARCHAR(36),
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_file_metadata_entity (business_id, entity, entity_id, created_at)
 );
 
 CREATE TABLE IF NOT EXISTS idempotency_keys (
-  idempotency_key VARCHAR(80) PRIMARY KEY,
+  idempotency_key VARCHAR(80) NOT NULL,
   business_id INT NOT NULL,
   device_id VARCHAR(36) NOT NULL,
   response_json JSON NOT NULL,
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (business_id, idempotency_key),
+  KEY idx_idempotency_business_created (business_id, created_at)
 );
 
 CREATE TABLE IF NOT EXISTS sync_conflicts (
@@ -90,7 +97,8 @@ CREATE TABLE IF NOT EXISTS sync_conflicts (
   resolution ENUM('KEEP_LOCAL','KEEP_SERVER','MANUAL') DEFAULT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   resolved_at DATETIME DEFAULT NULL,
-  KEY idx_conflicts_device (business_id, device_id, status)
+  KEY idx_conflicts_device (business_id, device_id, status),
+  KEY idx_conflicts_device_created (business_id, device_id, status, created_at)
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -104,7 +112,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
   before_state JSON,
   after_state JSON,
   ip_address VARCHAR(45),
-  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_audit_log_business_created (business_id, created_at),
+  KEY idx_audit_log_entity (business_id, entity, entity_id, created_at)
 );
 
 CREATE TABLE IF NOT EXISTS whatsapp_settings (

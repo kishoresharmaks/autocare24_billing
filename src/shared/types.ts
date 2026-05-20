@@ -6,7 +6,18 @@ export type PaymentStatus = "paid" | "partial" | "unpaid";
 export type PaymentMode = "Cash" | "UPI" | "Card" | "Bank Transfer" | "Other";
 export type TaxScope = "intra" | "inter";
 export type DateRangePreset = "7d" | "30d" | "90d" | "all";
-export type ReportExportKind = "full" | "sales" | "gst" | "payments" | "stock" | "enquiries" | "jobCards" | "profit";
+export type ReportExportKind =
+  | "full"
+  | "daily"
+  | "sales"
+  | "gst"
+  | "payments"
+  | "pendingPayments"
+  | "dues"
+  | "stock"
+  | "enquiries"
+  | "jobCards"
+  | "profit";
 export type InvoicePaperSize = "A4" | "Letter" | "Legal";
 export type InvoiceFontStyle = "modern" | "classic" | "system";
 export type InvoiceTextSize = "compact" | "standard" | "large";
@@ -337,6 +348,7 @@ export interface SyncTriggerResult extends SaveResult {
 
 export interface Customer {
   id: string;
+  customerCode: string;
   name: string;
   phone: string;
   email: string;
@@ -457,6 +469,7 @@ export interface InvoiceSummary {
   jobCardId: string;
   vehicleType: VehicleType;
   customerName: string;
+  customerCode: string;
   customerPhone: string;
   vehicleNumber: string;
   subTotal: number;
@@ -542,6 +555,7 @@ export interface QuotationSummary {
   vehicleId: string;
   vehicleType: VehicleType;
   customerName: string;
+  customerCode: string;
   customerPhone: string;
   customerEmail: string;
   customerGstin: string;
@@ -604,12 +618,45 @@ export interface ReportData {
   totalTax: number;
   cancelledCount: number;
   dues: InvoiceSummary[];
+  pendingPayments: PendingPaymentReportRow[];
+  dailyRows: DailyReportRow[];
   topServices: Array<{ name: string; quantity: number; revenue: number }>;
   paymentModes: Array<{ mode: PaymentMode; amount: number }>;
   salesTrend: Array<{ date: string; label: string; billedValue: number; quickStockSales: number; totalSales: number; paidAmount: number; balanceDue: number }>;
   inventory: InventoryDashboardData;
   enquiries: EnquiryReportData;
   jobCards: JobCardReportData;
+}
+
+export interface DailyReportRow {
+  date: string;
+  label: string;
+  invoiceCount: number;
+  cancelledCount: number;
+  serviceAmount: number;
+  productAmount: number;
+  quickStockSales: number;
+  invoiceBilled: number;
+  totalSales: number;
+  collected: number;
+  pendingReceived: number;
+  balanceCreated: number;
+  tax: number;
+  grandSales: number;
+}
+
+export interface PendingPaymentReportRow {
+  id: string;
+  paymentDate: string;
+  invoiceDate: string;
+  invoiceNumber: string;
+  customerName: string;
+  customerPhone: string;
+  vehicleNumber: string;
+  amount: number;
+  mode: PaymentMode;
+  reference: string;
+  invoiceBalanceDue: number;
 }
 
 export interface Expense {
@@ -1285,6 +1332,7 @@ export interface JobCardSummary {
   vehicleId: string;
   invoiceId: string;
   customerName: string;
+  customerCode: string;
   customerPhone: string;
   vehicleType: VehicleType;
   vehicleNumber: string;

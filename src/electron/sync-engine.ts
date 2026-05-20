@@ -23,6 +23,7 @@ type ApiErrorBody = { error?: { code?: string; message?: string }; message?: str
 type CloudRequestOptions = {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   body?: unknown;
+  timeoutMs?: number;
 };
 
 const LOCAL_DEV_API_PATTERN = /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i;
@@ -346,7 +347,7 @@ export class CloudSyncEngine {
         method: options.method || "GET",
         headers: this.authHeaders(token),
         body: options.body === undefined ? undefined : JSON.stringify(options.body)
-      });
+      }, options.timeoutMs);
     } catch (error) {
       throw new Error(this.markCloudUnavailable(error));
     }

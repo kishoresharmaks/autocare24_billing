@@ -403,6 +403,7 @@ function PremiumPartyCards({ invoice, settings }: { invoice: InvoiceDetail; sett
       <div className="premium-detail-card">
         <div className="premium-card-title"><span><User size={18} /></span> {invoiceLabel(settings.billToLabel, "Bill To")}</div>
         <strong>{invoice.customer.name}</strong>
+        {invoice.customer.customerCode && <PremiumInfoLine icon={FileText} text={`Customer ID: ${invoice.customer.customerCode}`} />}
         {settingEnabled(settings.showCustomerPhone) && invoice.customer.phone && <PremiumInfoLine icon={Phone} text={invoice.customer.phone} />}
         {settingEnabled(settings.showCustomerAddress) && invoice.customer.address && <PremiumInfoLine icon={MapPin} text={invoice.customer.address} />}
         {settingEnabled(settings.showGstin) && settingEnabled(settings.showCustomerGstin) && invoice.customer.gstin && <PremiumInfoLine icon={FileText} text={`GSTIN: ${invoice.customer.gstin}`} />}

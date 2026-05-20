@@ -14,7 +14,7 @@ import {
   normalizePermissions
 } from "../../shared/access-control";
 import { calculateInvoiceTotals, DEFAULT_SAC_CODE, normalizeSacCode } from "../../shared/billing-math";
-import { CORE_SCHEMA_SQL, DATA_TABLES, INVOICES_JOB_CARD_INDEX_SQL, SCHEMA_COLUMNS } from "./schema";
+import { CORE_SCHEMA_SQL, CUSTOMERS_CODE_INDEX_SQL, DATA_TABLES, INVOICES_JOB_CARD_INDEX_SQL, SCHEMA_COLUMNS } from "./schema";
 import { BUSINESS_SETTINGS_SYNC_ID, JOB_CARD_SETTINGS_SYNC_ID } from "../../shared/types";
 import type {
   AccessRole,
@@ -25,6 +25,7 @@ import type {
   Customer,
   CustomerWithVehicles,
   DashboardData,
+  DailyReportRow,
   DataHealthIssue,
   DataHealthReport,
   DateRangePreset,
@@ -79,6 +80,7 @@ import type {
   Payment,
   PaymentMode,
   PaymentStatus,
+  PendingPaymentReportRow,
   PermissionKey,
   ProfitReportData,
   PurchaseRecord,
@@ -145,6 +147,31 @@ const EMPTY_JSON_OBJECT = "{}";
 const EMPTY_JSON_ARRAY = "[]";
 const SYNC_SIDE_TABLES = new Set(["sync_outbox", "sync_state", "sync_conflicts", "sync_files", "sync_device"]);
 const CLOUD_SYNC_SKIP_TABLES = new Set(["backups", "settings", ...SYNC_SIDE_TABLES]);
+const CLOUD_RECORD_APPLY_ORDER = new Map([
+  ["settings", 0],
+  ["access_roles", 1],
+  ["users", 2],
+  ["customers", 10],
+  ["vehicles", 11],
+  ["services", 20],
+  ["inventory_items", 30],
+  ["suppliers", 31],
+  ["inventory_batches", 32],
+  ["service_consumables", 33],
+  ["invoices", 40],
+  ["invoice_items", 41],
+  ["payments", 42],
+  ["inventory_movements", 43],
+  ["quotations", 50],
+  ["quotation_items", 51],
+  ["job_cards", 60],
+  ["job_card_items", 61],
+  ["job_card_checklist_items", 62],
+  ["job_card_status_history", 63],
+  ["job_card_photos", 64],
+  ["purchase_records", 80],
+  ["expenses", 90]
+]);
 
 const localDate = (date = new Date()) => {
   const normalized = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
@@ -177,6 +204,8 @@ const JOB_CARD_PHOTO_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".g
 const MAX_JOB_CARD_PHOTO_BYTES = 10 * 1024 * 1024;
 const AUTOCAR24_INVOICE_ACCENT = "#d71920";
 const LEGACY_INVOICE_ACCENTS = ["#1c5d52", "#00583f"];
+const CUSTOMER_CODE_PREFIX = "CUS";
+const CUSTOMER_CODE_PAD_LENGTH = 5;
 const BACKUP_BUNDLE_EXTENSION = ".ac24backup";
 const BACKUP_DATABASE_ENTRY = "autocare24.sqlite";
 const BACKUP_MANIFEST_ENTRY = "backup-manifest.json";
@@ -413,6 +442,11 @@ const csvEscape = (value: unknown) => {
   const text = String(value ?? "");
   if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
   return text;
+};
+const formatCustomerCode = (number: number) => `${CUSTOMER_CODE_PREFIX}-${String(number).padStart(CUSTOMER_CODE_PAD_LENGTH, "0")}`;
+const parseCustomerCodeNumber = (code: string) => {
+  const match = new RegExp(`^${CUSTOMER_CODE_PREFIX}-(\\d+)$`, "i").exec(code.trim());
+  return match ? Number(match[1]) : 0;
 };
 
 export class AppDatabase {
@@ -654,7 +688,7 @@ export class AppDatabase {
       this.select<Row>(`SELECT * FROM ${table}`).forEach((row) => {
         const localId = rowText(row, "id");
         if (!localId || localId.length > 36) return;
-        queue(table as SyncEntity, localId, this.rowPayload(row));
+        queue(table as SyncEntity, localId, this.cloudPayloadForLocalRow(table, row));
       });
     });
 
@@ -895,7 +929,12 @@ export class AppDatabase {
   }
 
   private applyCloudRecordsInCurrentTransaction(records: CloudRecord[]) {
-    records.forEach((record) => {
+    const orderedRecords = records.slice().sort((left, right) => {
+      const leftRank = CLOUD_RECORD_APPLY_ORDER.get(String(left.entity || "")) ?? 500;
+      const rightRank = CLOUD_RECORD_APPLY_ORDER.get(String(right.entity || "")) ?? 500;
+      return leftRank - rightRank || Number(left.revision || 0) - Number(right.revision || 0);
+    });
+    orderedRecords.forEach((record) => {
       const entity = String(record.entity || "");
       const data = this.normalizeCloudRecordData(record.data);
       if (entity === "settings") {
@@ -911,7 +950,7 @@ export class AppDatabase {
         this.applyCloudTombstone(entity, recordId, columns);
         return;
       }
-      const payload: Record<string, unknown> = { ...data, id: data.id || recordId };
+      const payload = this.localPayloadForCloudRecord(entity, data, recordId);
       const writableColumns = [...columns].filter((column) => Object.prototype.hasOwnProperty.call(payload, column));
       if (!writableColumns.length) return;
       const placeholders = writableColumns.map(() => "?").join(", ");
@@ -953,6 +992,15 @@ export class AppDatabase {
     return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, value]));
   }
 
+  private cloudPayloadForLocalRow(table: string, row: Row | undefined | null): Record<string, unknown> {
+    const payload = this.rowPayload(row);
+    if (table !== "access_roles") return payload;
+    return {
+      ...payload,
+      permissions: this.parsePermissions(rowText(row, "permissionsJson"))
+    };
+  }
+
   private normalizeCloudRecordData(data: CloudRecord["data"]): Record<string, unknown> {
     if (!data) return {};
     if (typeof data === "string") {
@@ -964,6 +1012,48 @@ export class AppDatabase {
       }
     }
     return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+  }
+
+  private localPayloadForCloudRecord(entity: string, data: Record<string, unknown>, recordId: string): Record<string, unknown> {
+    const payload: Record<string, unknown> = { ...data, id: data.id || recordId };
+    if (entity !== "access_roles") return payload;
+
+    const defaultRole = DEFAULT_ACCESS_ROLES.find((role) => role.id === recordId);
+    const permissions = this.cloudRolePermissions(data, defaultRole?.permissions || []);
+    const createdAt = String(data.createdAt || nowIso());
+    return {
+      ...payload,
+      name: String(data.name || defaultRole?.name || "Access Role"),
+      description: String(data.description || defaultRole?.description || ""),
+      permissionsJson: JSON.stringify(permissions),
+      locked: this.cloudBoolean(data.locked, defaultRole?.locked || false) ? 1 : 0,
+      active: this.cloudBoolean(data.active, defaultRole?.active !== false) ? 1 : 0,
+      createdAt,
+      updatedAt: String(data.updatedAt || createdAt)
+    };
+  }
+
+  private cloudRolePermissions(data: Record<string, unknown>, fallback: readonly PermissionKey[]) {
+    const direct = normalizePermissions(data.permissions);
+    if (direct.length) return direct;
+    const json = data.permissionsJson ?? data.permissions_json;
+    if (typeof json === "string" && json.trim()) {
+      try {
+        const parsed = JSON.parse(json);
+        const parsedPermissions = normalizePermissions(parsed);
+        if (parsedPermissions.length) return parsedPermissions;
+      } catch {
+        return normalizePermissions(fallback);
+      }
+    }
+    return normalizePermissions(fallback);
+  }
+
+  private cloudBoolean(value: unknown, fallback: boolean) {
+    if (value === undefined || value === null || value === "") return fallback;
+    if (typeof value === "boolean") return value;
+    if (typeof value === "number") return value !== 0;
+    return !["0", "false", "no", "off"].includes(String(value).trim().toLowerCase());
   }
 
   private applyCloudSettings(recordId: string, data: Record<string, unknown>) {
@@ -1168,14 +1258,14 @@ export class AppDatabase {
     return { hasUsers: count > 0 };
   }
 
-  setupOwner(input: SetupOwnerInput) {
+  setupOwner(input: SetupOwnerInput, preferredId: string = randomUUID()) {
     const existingCount = rowNumber(this.select<Row>("SELECT COUNT(*) AS value FROM users")[0], "value");
     if (existingCount > 0) throw new Error("Owner account is already configured.");
     const displayName = input.displayName.trim();
     const username = normalizeUsername(input.username);
     this.validateUserFields(displayName, username, input.password, true);
 
-    const id = randomUUID();
+    const id = preferredId || randomUUID();
     const password = hashPassword(input.password);
     const createdAt = nowIso();
     this.runWrite(
@@ -2029,8 +2119,8 @@ export class AppDatabase {
     }
     if (filter.query?.trim()) {
       const q = `%${filter.query.trim()}%`;
-      clauses.push("(jc.jobNumber LIKE ? OR c.name LIKE ? OR c.phone LIKE ? OR v.registrationNumber LIKE ? OR v.vehicleType LIKE ?)");
-      params.push(q, q, q, q, q);
+      clauses.push("(jc.jobNumber LIKE ? OR c.customerCode LIKE ? OR c.name LIKE ? OR c.phone LIKE ? OR v.registrationNumber LIKE ? OR v.vehicleType LIKE ?)");
+      params.push(q, q, q, q, q, q);
     }
 
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
@@ -2290,18 +2380,27 @@ export class AppDatabase {
     }));
   }
 
+  private findCustomerRowByIdOrCode(reference: string | undefined) {
+    const value = String(reference || "").trim();
+    if (!value) return undefined;
+    return this.select<Row>("SELECT * FROM customers WHERE id = ? LIMIT 1", [value])[0] ||
+      this.select<Row>("SELECT * FROM customers WHERE UPPER(customerCode) = UPPER(?) LIMIT 1", [value])[0];
+  }
+
   saveCustomer(input: Partial<Customer> & Pick<Customer, "name">): Customer {
-    const id = input.id || randomUUID();
-    const existing = input.id ? this.select<Row>("SELECT * FROM customers WHERE id = ?", [input.id])[0] : undefined;
+    const existing = this.findCustomerRowByIdOrCode(input.id || input.customerCode);
+    const id = rowText(existing || {}, "id") || input.id || randomUUID();
     const createdAt = rowText(existing || {}, "createdAt") || nowIso();
+    const customerCode = rowText(existing || {}, "customerCode") || input.customerCode?.trim().toUpperCase() || this.allocateCustomerCode();
     const name = requiredText(input.name, "Customer name");
 
     this.runWrite(
       `INSERT OR REPLACE INTO customers
-        (id, name, phone, email, gstin, address, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        (id, customerCode, name, phone, email, gstin, address, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
+        customerCode,
         name,
         input.phone?.trim() || "",
         input.email?.trim() || "",
@@ -2495,9 +2594,9 @@ export class AppDatabase {
   listInvoices(query = ""): InvoiceSummary[] {
     const q = `%${query.trim()}%`;
     const where = query.trim()
-      ? `WHERE i.invoiceNumber LIKE ? OR c.name LIKE ? OR c.phone LIKE ? OR v.registrationNumber LIKE ? OR v.vehicleType LIKE ?`
+      ? `WHERE i.invoiceNumber LIKE ? OR c.customerCode LIKE ? OR c.name LIKE ? OR c.phone LIKE ? OR v.registrationNumber LIKE ? OR v.vehicleType LIKE ?`
       : "";
-    const params = query.trim() ? [q, q, q, q, q] : [];
+    const params = query.trim() ? [q, q, q, q, q, q] : [];
 
     return this.select<Row>(
       `${this.invoiceSummarySql()} ${where} ORDER BY i.invoiceDate DESC, i.createdAt DESC LIMIT 300`,
@@ -2509,8 +2608,28 @@ export class AppDatabase {
     const summary = this.select<Row>(`${this.invoiceSummarySql()} WHERE i.id = ?`, [id]).map(this.mapInvoiceSummary)[0];
     if (!summary) throw new Error("Invoice not found.");
 
-    const customer = this.mapCustomer(this.select<Row>("SELECT * FROM customers WHERE id = ?", [summary.customerId])[0]);
-    const vehicle = this.mapVehicle(this.select<Row>("SELECT * FROM vehicles WHERE id = ?", [summary.vehicleId])[0]);
+    const customerRow = this.select<Row>("SELECT * FROM customers WHERE id = ?", [summary.customerId])[0];
+    const vehicleRow = this.select<Row>("SELECT * FROM vehicles WHERE id = ?", [summary.vehicleId])[0];
+    const customer = this.mapCustomer(customerRow || {
+      id: summary.customerId,
+      customerCode: summary.customerCode,
+      name: summary.customerName,
+      phone: summary.customerPhone,
+      email: "",
+      gstin: "",
+      address: "",
+      createdAt: summary.createdAt
+    });
+    const vehicle = this.mapVehicle(vehicleRow || {
+      id: summary.vehicleId,
+      customerId: summary.customerId,
+      vehicleType: summary.vehicleType,
+      registrationNumber: summary.vehicleNumber,
+      make: "",
+      model: "",
+      color: "",
+      createdAt: summary.createdAt
+    });
     const items = this.select<Row>("SELECT * FROM invoice_items WHERE invoiceId = ? ORDER BY rowid ASC", [id]).map(
       this.mapInvoiceItem
     );
@@ -2776,9 +2895,9 @@ export class AppDatabase {
   listQuotations(query = ""): QuotationSummary[] {
     const q = `%${query.trim()}%`;
     const where = query.trim()
-      ? `WHERE q.quotationNumber LIKE ? OR q.quotationStatus LIKE ? OR q.customerName LIKE ? OR q.customerPhone LIKE ? OR q.customerEmail LIKE ? OR q.vehicleNumber LIKE ? OR q.vehicleType LIKE ?`
+      ? `WHERE q.quotationNumber LIKE ? OR q.quotationStatus LIKE ? OR c.customerCode LIKE ? OR q.customerName LIKE ? OR q.customerPhone LIKE ? OR q.customerEmail LIKE ? OR q.vehicleNumber LIKE ? OR q.vehicleType LIKE ?`
       : "";
-    const params = query.trim() ? [q, q, q, q, q, q, q] : [];
+    const params = query.trim() ? [q, q, q, q, q, q, q, q] : [];
 
     return this.select<Row>(
       `${this.quotationSummarySql()} ${where} ORDER BY q.quotationDate DESC, q.updatedAt DESC LIMIT 300`,
@@ -2796,6 +2915,7 @@ export class AppDatabase {
       ? this.mapCustomer(customerRow)
       : {
           id: summary.customerId,
+          customerCode: summary.customerCode,
           name: summary.customerName,
           phone: summary.customerPhone,
           email: summary.customerEmail,
@@ -3067,6 +3187,8 @@ export class AppDatabase {
       invoiceCount: invoices.length,
       cancelledCount,
       dues: invoices.filter((invoice) => invoice.balanceDue > 0),
+      pendingPayments: this.getPendingPaymentRows(filter),
+      dailyRows: this.getDailyReportRows(filter),
       topServices,
       paymentModes,
       salesTrend: this.getSalesTrend(filter),
@@ -3247,6 +3369,7 @@ export class AppDatabase {
         ? this.listInvoices("").map((invoice) => ({
             invoiceNumber: invoice.invoiceNumber,
             date: invoice.invoiceDate,
+            customerId: invoice.customerCode,
             customer: invoice.customerName,
             vehicleType: invoice.vehicleType,
             vehicle: invoice.vehicleNumber,
@@ -3262,6 +3385,7 @@ export class AppDatabase {
           }))
         : kind === "customers"
           ? this.listCustomers().map((customer) => ({
+              customerId: customer.customerCode,
               name: customer.name,
               phone: customer.phone,
               email: customer.email,
@@ -3309,6 +3433,7 @@ export class AppDatabase {
                     jobNumber: jobCard.jobNumber,
                     status: jobCard.status,
                     jobDate: jobCard.jobDate,
+                    customerId: jobCard.customerCode,
                     customer: jobCard.customerName,
                     phone: jobCard.customerPhone,
                     vehicleType: jobCard.vehicleType,
@@ -3353,6 +3478,10 @@ export class AppDatabase {
       addSection("Top Services", report.topServices);
     }
 
+    if (include("daily")) {
+      addSection("Daily Report", report.dailyRows.map((row) => ({ ...row })));
+    }
+
     if (include("gst")) {
       addSection("GST Tax Summary", [
         {
@@ -3367,6 +3496,13 @@ export class AppDatabase {
 
     if (include("payments")) {
       addSection("Payment Modes", report.paymentModes);
+    }
+
+    if (include("pendingPayments")) {
+      addSection("Received Pending Payments", report.pendingPayments.map((row) => ({ ...row })));
+    }
+
+    if (include("dues")) {
       addSection(
         "Pending Dues",
         report.dues.map((invoice) => ({
@@ -3499,10 +3635,56 @@ export class AppDatabase {
       this.addColumnIfMissing(column.table, column.column, column.definition);
     }
 
+    this.backfillCustomerCodes();
     this.ensureLooseQuotationSchema();
     this.normalizeOptionalForeignKeys();
     this.normalizeJobCardInvoiceLinks();
+    this.requireDb().run(CUSTOMERS_CODE_INDEX_SQL);
     this.requireDb().run(INVOICES_JOB_CARD_INDEX_SQL);
+  }
+
+  private backfillCustomerCodes() {
+    const columns = this.tableColumnNames("customers");
+    if (!columns.has("customerCode")) return;
+    const usedCodes = this.customerCodeSet();
+    let nextNumber = this.nextCustomerCodeNumber(usedCodes);
+    const rows = this.select<Row>(
+      "SELECT id FROM customers WHERE COALESCE(customerCode, '') = '' ORDER BY createdAt ASC, name ASC, id ASC"
+    );
+    rows.forEach((row) => {
+      let customerCode = formatCustomerCode(nextNumber);
+      while (usedCodes.has(customerCode)) {
+        nextNumber += 1;
+        customerCode = formatCustomerCode(nextNumber);
+      }
+      this.requireDb().run("UPDATE customers SET customerCode = ? WHERE id = ?", [customerCode, rowText(row, "id")]);
+      usedCodes.add(customerCode);
+      nextNumber += 1;
+    });
+  }
+
+  private customerCodeSet() {
+    return new Set(
+      this.select<Row>("SELECT customerCode FROM customers WHERE COALESCE(customerCode, '') <> ''")
+        .map((row) => rowText(row, "customerCode").trim().toUpperCase())
+        .filter(Boolean)
+    );
+  }
+
+  private nextCustomerCodeNumber(usedCodes = this.customerCodeSet()) {
+    const maxUsed = [...usedCodes].reduce((max, code) => Math.max(max, parseCustomerCodeNumber(code)), 0);
+    return maxUsed + 1;
+  }
+
+  private allocateCustomerCode() {
+    const usedCodes = this.customerCodeSet();
+    let nextNumber = this.nextCustomerCodeNumber(usedCodes);
+    let customerCode = formatCustomerCode(nextNumber);
+    while (usedCodes.has(customerCode)) {
+      nextNumber += 1;
+      customerCode = formatCustomerCode(nextNumber);
+    }
+    return customerCode;
   }
 
   private ensureLooseQuotationSchema() {
@@ -3722,8 +3904,10 @@ export class AppDatabase {
         [ownerRole.name, ownerRole.description, JSON.stringify(ALL_PERMISSIONS), createdAt, OWNER_ACCESS_ROLE_ID]
       );
     }
-    this.appendRolePermissions(STAFF_OPERATIONS_ROLE_ID, ["quotations.view", "quotations.manage", "quotations.convert"]);
-    this.appendRolePermissions("billing-staff", ["quotations.view", "quotations.manage", "quotations.convert"]);
+    [STAFF_OPERATIONS_ROLE_ID, "billing-staff", "stock-staff"].forEach((roleId) => {
+      const role = DEFAULT_ACCESS_ROLES.find((item) => item.id === roleId);
+      if (role) this.appendRolePermissions(roleId, role.permissions);
+    });
   }
 
   private appendRolePermissions(roleId: string, permissions: PermissionKey[]) {
@@ -4676,15 +4860,17 @@ export class AppDatabase {
   }
 
   private saveCustomerInTransaction(customerId: string | undefined, input: InvoiceCreateInput["customer"]): Customer {
-    const id = customerId || randomUUID();
-    const existing = customerId ? this.select<Row>("SELECT * FROM customers WHERE id = ?", [customerId])[0] : undefined;
+    const existing = this.findCustomerRowByIdOrCode(customerId || input.customerCode);
+    const id = rowText(existing || {}, "id") || customerId || randomUUID();
     const createdAt = rowText(existing || {}, "createdAt") || nowIso();
+    const customerCode = rowText(existing || {}, "customerCode") || input.customerCode?.trim().toUpperCase() || this.allocateCustomerCode();
     const name = requiredText(input.name, "Customer name");
     this.requireDb().run(
-      `INSERT OR REPLACE INTO customers (id, name, phone, email, gstin, address, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT OR REPLACE INTO customers (id, customerCode, name, phone, email, gstin, address, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
+        customerCode,
         name,
         input.phone?.trim() || "",
         input.email?.trim() || "",
@@ -5222,6 +5408,173 @@ export class AppDatabase {
     });
   }
 
+  private getDailyReportRows(filter: ReportFilterInput): DailyReportRow[] {
+    const invoiceRange = this.rangeCondition(filter, "i.invoiceDate");
+    const paymentRange = this.rangeCondition(filter, "p.paymentDate");
+    const saleRange = this.rangeCondition(filter, "im.movementDate");
+    const rows = this.select<Row>(
+      `SELECT date,
+              COALESCE(SUM(invoiceCount), 0) AS invoiceCount,
+              COALESCE(SUM(cancelledCount), 0) AS cancelledCount,
+              COALESCE(SUM(serviceAmount), 0) AS serviceAmount,
+              COALESCE(SUM(productAmount), 0) AS productAmount,
+              COALESCE(SUM(quickStockSales), 0) AS quickStockSales,
+              COALESCE(SUM(invoiceBilled), 0) AS invoiceBilled,
+              COALESCE(SUM(collected), 0) AS collected,
+              COALESCE(SUM(pendingReceived), 0) AS pendingReceived,
+              COALESCE(SUM(balanceCreated), 0) AS balanceCreated,
+              COALESCE(SUM(tax), 0) AS tax,
+              COALESCE(SUM(grandSales), 0) AS grandSales
+       FROM (
+         SELECT i.invoiceDate AS date,
+                COUNT(*) AS invoiceCount,
+                0 AS cancelledCount,
+                0 AS serviceAmount,
+                0 AS productAmount,
+                0 AS quickStockSales,
+                SUM(i.grandTotal) AS invoiceBilled,
+                0 AS collected,
+                0 AS pendingReceived,
+                SUM(i.balanceDue) AS balanceCreated,
+                SUM(i.totalTax) AS tax,
+                SUM(i.grandTotal) AS grandSales
+         FROM invoices i
+         WHERE i.invoiceStatus <> 'cancelled' ${invoiceRange.condition}
+         GROUP BY i.invoiceDate
+         UNION ALL
+         SELECT i.invoiceDate AS date,
+                0 AS invoiceCount,
+                COUNT(*) AS cancelledCount,
+                0 AS serviceAmount,
+                0 AS productAmount,
+                0 AS quickStockSales,
+                0 AS invoiceBilled,
+                0 AS collected,
+                0 AS pendingReceived,
+                0 AS balanceCreated,
+                0 AS tax,
+                0 AS grandSales
+         FROM invoices i
+         WHERE i.invoiceStatus = 'cancelled' ${invoiceRange.condition}
+         GROUP BY i.invoiceDate
+         UNION ALL
+         SELECT i.invoiceDate AS date,
+                0 AS invoiceCount,
+                0 AS cancelledCount,
+                SUM(CASE WHEN NULLIF(ii.inventoryItemId, '') IS NULL THEN ii.lineTotal ELSE 0 END) AS serviceAmount,
+                SUM(CASE WHEN NULLIF(ii.inventoryItemId, '') IS NOT NULL THEN ii.lineTotal ELSE 0 END) AS productAmount,
+                0 AS quickStockSales,
+                0 AS invoiceBilled,
+                0 AS collected,
+                0 AS pendingReceived,
+                0 AS balanceCreated,
+                0 AS tax,
+                0 AS grandSales
+         FROM invoice_items ii
+         JOIN invoices i ON i.id = ii.invoiceId
+         WHERE i.invoiceStatus <> 'cancelled' ${invoiceRange.condition}
+         GROUP BY i.invoiceDate
+         UNION ALL
+         SELECT p.paymentDate AS date,
+                0 AS invoiceCount,
+                0 AS cancelledCount,
+                0 AS serviceAmount,
+                0 AS productAmount,
+                0 AS quickStockSales,
+                0 AS invoiceBilled,
+                SUM(p.amount) AS collected,
+                SUM(CASE WHEN i.invoiceDate < p.paymentDate THEN p.amount ELSE 0 END) AS pendingReceived,
+                0 AS balanceCreated,
+                0 AS tax,
+                0 AS grandSales
+         FROM payments p
+         JOIN invoices i ON i.id = p.invoiceId
+         WHERE i.invoiceStatus <> 'cancelled' ${paymentRange.condition}
+         GROUP BY p.paymentDate
+         UNION ALL
+         SELECT im.movementDate AS date,
+                0 AS invoiceCount,
+                0 AS cancelledCount,
+                0 AS serviceAmount,
+                0 AS productAmount,
+                SUM(im.saleAmount) AS quickStockSales,
+                0 AS invoiceBilled,
+                SUM(im.saleAmount) AS collected,
+                0 AS pendingReceived,
+                0 AS balanceCreated,
+                0 AS tax,
+                0 AS grandSales
+         FROM inventory_movements im
+         WHERE im.type = 'stock_sale'
+           AND im.saleAmount > 0 ${saleRange.condition}
+         GROUP BY im.movementDate
+       ) totals
+       GROUP BY date
+       ORDER BY date DESC`,
+      [...invoiceRange.params, ...invoiceRange.params, ...invoiceRange.params, ...paymentRange.params, ...saleRange.params]
+    );
+
+    return rows.map((row) => {
+      const date = rowText(row, "date");
+      const invoiceBilled = money(rowNumber(row, "invoiceBilled"));
+      const quickStockSales = money(rowNumber(row, "quickStockSales"));
+      const totalSales = money(invoiceBilled + quickStockSales);
+      return {
+        date,
+        label: date ? date.slice(5) : "-",
+        invoiceCount: rowNumber(row, "invoiceCount"),
+        cancelledCount: rowNumber(row, "cancelledCount"),
+        serviceAmount: money(rowNumber(row, "serviceAmount")),
+        productAmount: money(rowNumber(row, "productAmount")),
+        quickStockSales,
+        invoiceBilled,
+        totalSales,
+        collected: money(rowNumber(row, "collected")),
+        pendingReceived: money(rowNumber(row, "pendingReceived")),
+        balanceCreated: money(rowNumber(row, "balanceCreated")),
+        tax: money(rowNumber(row, "tax")),
+        grandSales: totalSales
+      };
+    });
+  }
+
+  private getPendingPaymentRows(filter: ReportFilterInput): PendingPaymentReportRow[] {
+    const paymentRange = this.rangeCondition(filter, "p.paymentDate");
+    return this.select<Row>(
+      `SELECT p.id AS id,
+              p.paymentDate AS paymentDate,
+              i.invoiceDate AS invoiceDate,
+              i.invoiceNumber AS invoiceNumber,
+              c.name AS customerName,
+              c.phone AS customerPhone,
+              v.registrationNumber AS vehicleNumber,
+              p.amount AS amount,
+              p.mode AS mode,
+              p.reference AS reference,
+              i.balanceDue AS invoiceBalanceDue
+       FROM payments p
+       JOIN invoices i ON i.id = p.invoiceId
+       JOIN customers c ON c.id = i.customerId
+       JOIN vehicles v ON v.id = i.vehicleId
+       WHERE i.invoiceStatus <> 'cancelled'
+         AND i.invoiceDate < p.paymentDate ${paymentRange.condition}
+       ORDER BY p.paymentDate DESC, p.createdAt DESC`,
+      paymentRange.params
+    ).map((row) => ({
+      id: rowText(row, "id"),
+      paymentDate: rowText(row, "paymentDate"),
+      invoiceDate: rowText(row, "invoiceDate"),
+      invoiceNumber: rowText(row, "invoiceNumber"),
+      customerName: rowText(row, "customerName"),
+      customerPhone: rowText(row, "customerPhone"),
+      vehicleNumber: rowText(row, "vehicleNumber"),
+      amount: money(rowNumber(row, "amount")),
+      mode: this.normalizePaymentMode(rowText(row, "mode")),
+      reference: rowText(row, "reference"),
+      invoiceBalanceDue: money(rowNumber(row, "invoiceBalanceDue"))
+    }));
+  }
+
   private getProfitTrend(filter: ReportFilterInput) {
     const paymentRange = this.rangeCondition(filter, "p.paymentDate");
     const stockRange = this.rangeCondition(filter, "im.movementDate");
@@ -5282,13 +5635,14 @@ export class AppDatabase {
     return `
       SELECT
         i.*,
+        c.customerCode AS customerCode,
         c.name AS customerName,
         c.phone AS customerPhone,
         v.vehicleType AS vehicleType,
         v.registrationNumber AS vehicleNumber
       FROM invoices i
-      JOIN customers c ON c.id = i.customerId
-      JOIN vehicles v ON v.id = i.vehicleId
+      LEFT JOIN customers c ON c.id = i.customerId
+      LEFT JOIN vehicles v ON v.id = i.vehicleId
     `;
   }
 
@@ -5304,6 +5658,7 @@ export class AppDatabase {
         q.validUntil,
         q.customerId,
         q.vehicleId,
+        COALESCE(c.customerCode, '') AS customerCode,
         COALESCE(c.name, q.customerName, '') AS customerName,
         COALESCE(c.phone, q.customerPhone, '') AS customerPhone,
         COALESCE(c.email, q.customerEmail, '') AS customerEmail,
@@ -5336,6 +5691,7 @@ export class AppDatabase {
     return `
       SELECT
         jc.*,
+        c.customerCode AS customerCode,
         c.name AS customerName,
         c.phone AS customerPhone,
         v.vehicleType AS vehicleType,
@@ -5372,6 +5728,7 @@ export class AppDatabase {
 
   private mapCustomer = (row: Row | undefined | null): Customer => ({
     id: rowText(row, "id"),
+    customerCode: rowText(row, "customerCode"),
     name: rowText(row, "name"),
     phone: rowText(row, "phone"),
     email: rowText(row, "email"),
@@ -5406,6 +5763,7 @@ export class AppDatabase {
     vehicleId: rowText(row, "vehicleId"),
     jobCardId: rowText(row, "jobCardId"),
     vehicleType: this.normalizeVehicleType(rowText(row, "vehicleType")),
+    customerCode: rowText(row, "customerCode"),
     customerName: rowText(row, "customerName"),
     customerPhone: rowText(row, "customerPhone"),
     vehicleNumber: rowText(row, "vehicleNumber"),
@@ -5517,6 +5875,7 @@ export class AppDatabase {
     customerId: rowText(row, "customerId"),
     vehicleId: rowText(row, "vehicleId"),
     vehicleType: this.normalizeVehicleType(rowText(row, "vehicleType")),
+    customerCode: rowText(row, "customerCode"),
     customerName: rowText(row, "customerName"),
     customerPhone: rowText(row, "customerPhone"),
     customerEmail: rowText(row, "customerEmail"),
@@ -5722,6 +6081,7 @@ export class AppDatabase {
     customerId: rowText(row, "customerId"),
     vehicleId: rowText(row, "vehicleId"),
     invoiceId: rowText(row, "invoiceId"),
+    customerCode: rowText(row, "customerCode"),
     customerName: rowText(row, "customerName"),
     customerPhone: rowText(row, "customerPhone"),
     vehicleType: this.normalizeVehicleType(rowText(row, "vehicleType")),

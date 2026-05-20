@@ -1,6 +1,7 @@
 ﻿import { FileText, Printer, Search } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Copy, MessageCircle } from "lucide-react";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 import { hasPermission } from "../../../shared/access-control";
 import { DEFAULT_SAC_CODE, money, normalizeSacCode } from "../../../shared/billing-math";
 import type { AppUser, BusinessSettings, InventoryItem, InvoiceDetail, InvoiceItemInput, InvoiceSummary, PaymentMode, ServiceItem, VehicleType } from "../../../shared/types";
@@ -17,6 +18,8 @@ const todayLocal = () => {
 
 const formatMoney = (value: number) =>
   `Rs ${money(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const readableError = (error: unknown, fallback: string) =>
+  error instanceof Error ? error.message : typeof error === "string" && error.trim() ? error : fallback;
 const parsePaymentAmount = (value: string | number, maxAmount: number) => {
   const amount = Number(value);
   const balanceDue = Number(maxAmount);
@@ -107,8 +110,13 @@ export function InvoicesPage({
 }) {
   const [query, setQuery] = useState("");
   const [invoices, setInvoices] = useState<InvoiceSummary[]>([]);
+  const [invoiceLoading, setInvoiceLoading] = useState(false);
+  const [invoiceLoadError, setInvoiceLoadError] = useState("");
   const [selectedId, setSelectedId] = useState("");
   const [invoice, setInvoice] = useState<InvoiceDetail | null>(null);
+  const [invoiceDetailLoading, setInvoiceDetailLoading] = useState(false);
+  const [invoiceDetailError, setInvoiceDetailError] = useState("");
+  const [invoiceDetailRetryKey, setInvoiceDetailRetryKey] = useState(0);
   const [paymentAmount, setPaymentAmount] = useState(0);
   const [paymentMode, setPaymentMode] = useState<PaymentMode>("UPI");
   const [paymentReference, setPaymentReference] = useState("");
@@ -136,6 +144,7 @@ export function InvoicesPage({
   const whatsappPhone = normalizeWhatsAppPhone(invoice?.customerPhone || invoice?.customer.phone || "");
 
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       invoiceListRequestRef.current += 1;
@@ -145,10 +154,13 @@ export function InvoicesPage({
 
   const loadInvoices = async () => {
     const requestId = ++invoiceListRequestRef.current;
+    setInvoiceLoading(true);
+    setInvoiceLoadError("");
     try {
       const rows = await window.autocare.listInvoices(query);
       if (!mountedRef.current || requestId !== invoiceListRequestRef.current) return rows;
       setInvoices(rows);
+      setInvoiceLoadError("");
       setSelectedId((currentSelectedId) => {
         if (currentSelectedId && rows.some((row) => row.id === currentSelectedId)) return currentSelectedId;
         return rows[0]?.id || "";
@@ -156,9 +168,21 @@ export function InvoicesPage({
       return rows;
     } catch (error) {
       if (mountedRef.current && requestId === invoiceListRequestRef.current) {
-        notify(error instanceof Error ? error.message : "Unable to load invoices.");
+        const message = readableError(error, "Unable to load invoices.");
+        console.error("[InvoicesPage] Failed to load invoice list", { query, error });
+        setInvoices([]);
+        setSelectedId("");
+        setInvoice(null);
+        setInvoiceLoadError(message);
+        setInvoiceDetailLoading(false);
+        setInvoiceDetailError("");
+        notify(message);
       }
       return [];
+    } finally {
+      if (mountedRef.current && requestId === invoiceListRequestRef.current) {
+        setInvoiceLoading(false);
+      }
     }
   };
 
@@ -182,7 +206,8 @@ export function InvoicesPage({
         setRetailItems(inventoryRows.filter((item) => item.type === "retail" && item.active));
       })
       .catch((error) => {
-        if (active) notify(error.message);
+        console.error("[InvoicesPage] Failed to load invoice support data", { error });
+        if (active) notify(readableError(error, "Unable to load invoice support data."));
       });
     return () => {
       active = false;
@@ -194,10 +219,15 @@ export function InvoicesPage({
     let active = true;
     if (!selectedId) {
       setInvoice(null);
+      setInvoiceDetailLoading(false);
+      setInvoiceDetailError("");
       return () => {
         active = false;
       };
     }
+    setInvoice(null);
+    setInvoiceDetailLoading(true);
+    setInvoiceDetailError("");
     setShowCancelPanel(false);
     setCancelReason("");
     setShowAddItemPanel(false);
@@ -206,15 +236,29 @@ export function InvoicesPage({
     window.autocare
       .getInvoice(selectedId)
       .then((row) => {
-        if (active && mountedRef.current && requestId === invoiceDetailRequestRef.current) setInvoice(row);
+        if (active && mountedRef.current && requestId === invoiceDetailRequestRef.current) {
+          setInvoice(row);
+          setInvoiceDetailError("");
+        }
       })
       .catch((error) => {
-        if (active && mountedRef.current && requestId === invoiceDetailRequestRef.current) notify(error.message);
+        if (active && mountedRef.current && requestId === invoiceDetailRequestRef.current) {
+          const message = readableError(error, "Unable to load invoice details.");
+          console.error("[InvoicesPage] Failed to load invoice details", { invoiceId: selectedId, error });
+          setInvoice(null);
+          setInvoiceDetailError(message);
+          notify(message);
+        }
+      })
+      .finally(() => {
+        if (active && mountedRef.current && requestId === invoiceDetailRequestRef.current) {
+          setInvoiceDetailLoading(false);
+        }
       });
     return () => {
       active = false;
     };
-  }, [selectedId, defaultGstRate]);
+  }, [selectedId, defaultGstRate, invoiceDetailRetryKey]);
 
   const recordPayment = async () => {
     if (!invoice) return;
@@ -456,24 +500,55 @@ export function InvoicesPage({
       <section className="panel list-panel">
         <div className="search-box">
           <Search size={18} />
-          <input placeholder="Invoice, customer, phone, vehicle" value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
+          <input placeholder="Invoice, customer ID, customer, phone, vehicle" value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
         </div>
         <div className="record-list invoice-list">
-          {invoices.map((item) => (
+          {invoiceLoading && <div className="empty-state subtle invoice-list-state">Loading invoices...</div>}
+          {!invoiceLoading && invoiceLoadError && (
+            <div className="empty-state subtle invoice-list-state invoice-list-error">
+              <AlertTriangle size={18} />
+              <span>{invoiceLoadError}</span>
+              <button className="ghost-button small" onClick={() => void loadInvoices()}>
+                <RefreshCw size={14} /> Retry
+              </button>
+            </div>
+          )}
+          {!invoiceLoading && !invoiceLoadError && invoices.map((item) => (
             <button key={item.id} className={selectedId === item.id ? "record active" : "record"} onClick={() => setSelectedId(item.id)}>
               <strong>{item.invoiceNumber}</strong>
-              <span>{item.customerName} - {vehicleTypeLabel(item.vehicleType)} {item.vehicleNumber}</span>
+              <span>{item.customerCode ? `${item.customerCode} - ` : ""}{item.customerName} - {vehicleTypeLabel(item.vehicleType)} {item.vehicleNumber}</span>
               <b>{formatMoney(item.grandTotal)}</b>
               <em className={`status ${item.invoiceStatus === "cancelled" ? "cancelled" : item.paymentStatus}`}>
                 {item.invoiceStatus === "cancelled" ? "Cancelled" : statusLabel(item.paymentStatus)}
               </em>
             </button>
           ))}
+          {!invoiceLoading && !invoiceLoadError && !invoices.length && (
+            <div className="empty-state subtle invoice-list-state">
+              {query.trim() ? "No invoices match this search." : "No invoices found for this cloud business."}
+            </div>
+          )}
         </div>
       </section>
 
       <section className="invoice-detail">
-        {invoice ? (
+        {invoiceDetailLoading ? (
+          <div className="empty-state subtle invoice-detail-state">
+            <RefreshCw size={20} />
+            <strong>Loading invoice details...</strong>
+            <span>Opening the selected invoice from the local system database.</span>
+          </div>
+        ) : invoiceDetailError ? (
+          <div className="empty-state subtle invoice-detail-state invoice-detail-error">
+            <AlertTriangle size={22} />
+            <strong>Invoice could not be loaded</strong>
+            <span>{invoiceDetailError}</span>
+            {selectedId && <code>Invoice ID: {selectedId}</code>}
+            <button className="ghost-button small" onClick={() => setInvoiceDetailRetryKey((value) => value + 1)}>
+              <RefreshCw size={14} /> Retry
+            </button>
+          </div>
+        ) : invoice ? (
           <>
             <div className="invoice-actions no-print">
               {canPrintPdf && canShareWhatsapp && !invoiceNeedsCloudNumber && invoice.invoiceStatus !== "cancelled" && (

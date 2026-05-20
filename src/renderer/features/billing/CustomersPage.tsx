@@ -35,7 +35,7 @@ export function CustomersPage({ refreshKey, notify }: { refreshKey: number; noti
   }, [refreshKey]);
 
   const filtered = customers.filter((customer) => {
-    const text = `${customer.name} ${customer.phone} ${customer.vehicles
+    const text = `${customer.customerCode} ${customer.name} ${customer.phone} ${customer.vehicles
       .map((vehicle) => `${vehicle.registrationNumber} ${vehicle.vehicleType}`)
       .join(" ")}`.toLowerCase();
     return text.includes(query.toLowerCase());
@@ -89,13 +89,13 @@ export function CustomersPage({ refreshKey, notify }: { refreshKey: number; noti
       <section className="panel list-panel">
         <div className="search-box">
           <Search size={18} />
-          <input placeholder="Search customer, phone, vehicle" value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
+          <input placeholder="Search customer ID, customer, phone, vehicle" value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
         </div>
         <div className="record-list">
           {filtered.map((customer) => (
             <button key={customer.id} className={selectedId === customer.id ? "record active" : "record"} onClick={() => setSelectedId(customer.id)}>
               <strong>{customer.name}</strong>
-              <span>{customer.phone || "No phone"} - {customer.vehicles.length} vehicle(s)</span>
+              <span>{customer.customerCode || "Customer ID pending"} - {customer.phone || "No phone"} - {customer.vehicles.length} vehicle(s)</span>
             </button>
           ))}
           {!filtered.length && <div className="empty-state subtle">No customers found.</div>}
@@ -117,6 +117,7 @@ export function CustomersPage({ refreshKey, notify }: { refreshKey: number; noti
           </button>
         </div>
         <div className="form-grid two">
+          <label>Customer ID<input readOnly value={form.customerCode || "Assigned after save"} /></label>
           <label>Name<input value={form.name} onChange={(event) => setForm({ ...form, name: event.currentTarget.value })} /></label>
           <label>Phone<input value={form.phone ?? ""} onChange={(event) => setForm({ ...form, phone: event.currentTarget.value })} /></label>
           <label>Email<input value={form.email ?? ""} onChange={(event) => setForm({ ...form, email: event.currentTarget.value })} /></label>

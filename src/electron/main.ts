@@ -113,6 +113,7 @@ const PACKAGED_RENDERER_CSP = [
 const DEVELOPMENT_RENDERER_CSP = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline'",
+  "worker-src 'self' blob:",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: file:",
   "font-src 'self' data:",
@@ -1657,6 +1658,17 @@ const registerIpcHandlers = () => {
     }
     try {
       user = await cloudData().setupOwner(input);
+      if (!database.getAuthStatus().hasUsers) {
+        try {
+          database.setupOwner(input, user.id);
+          logAppEvent("info", "Owner account mirrored to local database", { username: user.username });
+        } catch (mirrorError) {
+          logAppEvent("warn", "Cloud owner account was created but local mirror failed", {
+            username: user.username,
+            message: mirrorError instanceof Error ? mirrorError.message : String(mirrorError)
+          });
+        }
+      }
     } catch (error) {
       if (cloudSync().status().connected) throw error;
       user = database.setupOwner(input);

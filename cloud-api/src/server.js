@@ -61,6 +61,7 @@ const AUTH_RATE_LIMIT_MAX = envPositiveInt("AUTH_RATE_LIMIT_MAX", 10);
 const RATE_LIMIT_MAX_BUCKETS = envPositiveInt("RATE_LIMIT_MAX_BUCKETS", 50_000);
 const DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS = envPositiveInt("DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS", 15 * 60 * 1000);
 const DEVICE_REGISTRATION_RATE_LIMIT_MAX = envPositiveInt("DEVICE_REGISTRATION_RATE_LIMIT_MAX", 10);
+const HEALTHCHECK_DB_TIMEOUT_MS = envPositiveInt("HEALTHCHECK_DB_TIMEOUT_MS", 3000);
 const TOKEN_HASH_SECRET = String(process.env.TOKEN_HASH_SECRET || "").trim();
 const ALLOW_LEGACY_TOKEN_MIGRATION = envFlag("ALLOW_LEGACY_TOKEN_MIGRATION", !IS_PRODUCTION);
 const WHATSAPP_GRAPH_BASE_URL = String(process.env.WHATSAPP_API_BASE_URL || "https://graph.facebook.com").replace(/\/+$/, "");
@@ -252,6 +253,13 @@ const localDate = (date = new Date()) => {
   return normalized.toISOString().slice(0, 10);
 };
 const dateOnly = (value) => String(value || "").slice(0, 10);
+const CUSTOMER_CODE_PREFIX = "CUS";
+const CUSTOMER_CODE_PAD_LENGTH = 5;
+const formatCustomerCode = (number) => `${CUSTOMER_CODE_PREFIX}-${String(number).padStart(CUSTOMER_CODE_PAD_LENGTH, "0")}`;
+const customerCodeNumber = (code) => {
+  const match = /^CUS-(\d+)$/i.exec(String(code || "").trim());
+  return match ? Number(match[1]) : 0;
+};
 const ALLOWED_RECORD_ENTITIES = new Set([
   "settings",
   "users",
@@ -303,6 +311,9 @@ const PASSWORD_KEY_LENGTH = 32;
 const PASSWORD_DIGEST = "sha256";
 const OWNER_ACCESS_ROLE_ID = "owner";
 const STAFF_OPERATIONS_ROLE_ID = "staff-operations";
+const OPERATOR_ACCESS_ROLE_ID = "operator";
+const BUSINESS_DIRECTOR_ACCESS_ROLE_ID = "business-director";
+const INVESTOR_ACCESS_ROLE_ID = "investor";
 const ALL_PERMISSION_KEYS = [
   "dashboard.view",
   "billing.view",
@@ -341,6 +352,30 @@ const ALL_PERMISSION_KEYS = [
   "developer.access"
 ];
 const ALL_PERMISSIONS = [...ALL_PERMISSION_KEYS];
+const OPERATOR_PERMISSIONS = [
+  "dashboard.view",
+  "billing.view",
+  "billing.create",
+  "billing.recordPayments",
+  "quotations.view",
+  "quotations.manage",
+  "quotations.convert",
+  "customers.view",
+  "customers.manage",
+  "jobCards.view",
+  "jobCards.manage",
+  "jobCards.photos",
+  "enquiries.view",
+  "enquiries.manage",
+  "enquiries.convert",
+  "services.view",
+  "stock.view",
+  "stock.adjust",
+  "documents.printPdf",
+  "sharing.whatsapp"
+];
+const BUSINESS_DIRECTOR_PERMISSIONS = ALL_PERMISSION_KEYS.filter((permission) => permission !== "developer.access");
+const INVESTOR_PERMISSIONS = ["dashboard.view", "reports.view", "reports.export"];
 const DEFAULT_ACCESS_ROLES = [
   {
     id: OWNER_ACCESS_ROLE_ID,
@@ -353,7 +388,7 @@ const DEFAULT_ACCESS_ROLES = [
   {
     id: STAFF_OPERATIONS_ROLE_ID,
     name: "Staff Operations",
-    description: "Preserves the previous staff access for billing, enquiries, services, and stock operations.",
+    description: "Broad daily operations access for billing, job cards, enquiries, services, stock, reports, document sharing, and CSV exports.",
     permissions: [
       "dashboard.view",
       "billing.view",
@@ -379,21 +414,50 @@ const DEFAULT_ACCESS_ROLES = [
       "stock.purchase",
       "stock.adjust",
       "stock.suppliers",
+      "reports.view",
+      "reports.export",
       "documents.printPdf",
-      "sharing.whatsapp"
+      "sharing.whatsapp",
+      "exports.csv"
     ],
+    locked: false,
+    active: true
+  },
+  {
+    id: OPERATOR_ACCESS_ROLE_ID,
+    name: "Operator",
+    description: "Daily counter and operations access for billing, customers, job cards, enquiries, stock removal, documents, and WhatsApp.",
+    permissions: OPERATOR_PERMISSIONS,
+    locked: false,
+    active: true
+  },
+  {
+    id: BUSINESS_DIRECTOR_ACCESS_ROLE_ID,
+    name: "Business Director",
+    description: "Business management access for operations, reports, expenses, settings, users, backups, and exports without developer repair tools.",
+    permissions: BUSINESS_DIRECTOR_PERMISSIONS,
+    locked: false,
+    active: true
+  },
+  {
+    id: INVESTOR_ACCESS_ROLE_ID,
+    name: "Investor",
+    description: "Read-only business visibility for dashboards and report exports.",
+    permissions: INVESTOR_PERMISSIONS,
     locked: false,
     active: true
   },
   {
     id: "billing-staff",
     name: "Billing Staff",
-    description: "Counter billing, customers, job cards, print/PDF, and WhatsApp sharing.",
+    description: "Counter billing access for bills, corrections, cancellations, payments, quotations, customers, job cards, print/PDF, and WhatsApp.",
     permissions: [
       "dashboard.view",
       "billing.view",
       "billing.create",
+      "billing.manageInvoices",
       "billing.recordPayments",
+      "billing.cancelInvoices",
       "quotations.view",
       "quotations.manage",
       "quotations.convert",
@@ -401,8 +465,10 @@ const DEFAULT_ACCESS_ROLES = [
       "customers.manage",
       "jobCards.view",
       "jobCards.manage",
+      "jobCards.photos",
       "enquiries.view",
       "enquiries.manage",
+      "enquiries.convert",
       "services.view",
       "stock.view",
       "documents.printPdf",
@@ -414,12 +480,13 @@ const DEFAULT_ACCESS_ROLES = [
   {
     id: "stock-staff",
     name: "Stock Staff",
-    description: "Stock viewing, item management, stock purchases, purchase records, adjustments, suppliers, and basic dashboard access.",
-    permissions: ["dashboard.view", "stock.view", "stock.manageItems", "stock.purchase", "stock.adjust", "stock.suppliers"],
+    description: "Stock control access for inventory, purchases, purchase records, adjustments, suppliers, stock reports, and inventory exports.",
+    permissions: ["dashboard.view", "stock.view", "stock.manageItems", "stock.purchase", "stock.adjust", "stock.suppliers", "reports.view", "reports.export", "exports.csv"],
     locked: false,
     active: true
   }
 ];
+const DEFAULT_ROLE_PERMISSION_REFRESH_IDS = new Set([STAFF_OPERATIONS_ROLE_ID, "billing-staff", "stock-staff"]);
 
 const requiredText = (value, label) => {
   const text = String(value || "").trim();
@@ -544,6 +611,20 @@ const normalizePermissions = (permissions) => {
   const rows = Array.isArray(permissions) ? permissions : [];
   const allowed = new Set(ALL_PERMISSION_KEYS);
   return Array.from(new Set(rows.filter((permission) => allowed.has(permission))));
+};
+const rolePermissionsFromData = (role = {}, fallback = []) => {
+  const direct = normalizePermissions(role.permissions);
+  if (direct.length) return direct;
+  const json = role.permissionsJson ?? role.permissions_json;
+  if (Array.isArray(json)) return normalizePermissions(json);
+  if (typeof json === "string" && json.trim()) return normalizePermissions(parseJsonColumn(json, []));
+  return normalizePermissions(fallback);
+};
+const recordFlag = (value, fallback = false) => {
+  if (value === undefined || value === null || value === "") return fallback;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  return /^(1|true|yes|on)$/i.test(String(value).trim());
 };
 const validatePassword = (password) => {
   const text = String(password || "");
@@ -779,6 +860,38 @@ async function ensureColumn(connection, table, column, definition) {
   return true;
 }
 
+async function ensureIndex(connection, table, indexName, definition) {
+  const [rows] = await connection.query(
+    `SELECT INDEX_NAME
+     FROM INFORMATION_SCHEMA.STATISTICS
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?
+     LIMIT 1`,
+    [table, indexName]
+  );
+  if (rows.length) return false;
+  await connection.query(`ALTER TABLE ${table} ADD INDEX ${indexName} ${definition}`);
+  return true;
+}
+
+async function ensurePrimaryKey(connection, table, columns) {
+  const [rows] = await connection.query(
+    `SELECT COLUMN_NAME
+     FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND CONSTRAINT_NAME = 'PRIMARY'
+     ORDER BY ORDINAL_POSITION`,
+    [table]
+  );
+  const currentColumns = rows.map((row) => String(row.COLUMN_NAME || row.column_name || ""));
+  if (JSON.stringify(currentColumns) === JSON.stringify(columns)) return false;
+  const columnList = columns.join(", ");
+  await connection.query(
+    currentColumns.length
+      ? `ALTER TABLE ${table} DROP PRIMARY KEY, ADD PRIMARY KEY (${columnList})`
+      : `ALTER TABLE ${table} ADD PRIMARY KEY (${columnList})`
+  );
+  return true;
+}
+
 const findSqlDelimiterIndex = (sql, delimiter) => {
   let quote = "";
   let lineComment = false;
@@ -861,6 +974,58 @@ const splitSqlStatements = (sql) => {
   return statements;
 };
 
+async function backfillCustomerCodes(connection) {
+  const [businessRows] = await connection.query(
+    "SELECT DISTINCT business_id AS businessId FROM business_records WHERE entity = 'customers' AND deleted_at IS NULL"
+  );
+  for (const business of businessRows) {
+    const businessId = Number(business.businessId || business.business_id || 0);
+    if (!businessId) continue;
+    const [rows] = await connection.query(
+      `SELECT id AS rowId, record_id AS recordId, data, revision
+       FROM business_records
+       WHERE business_id = ? AND entity = 'customers' AND deleted_at IS NULL
+       ORDER BY
+         COALESCE(JSON_UNQUOTE(JSON_EXTRACT(data, '$.createdAt')), ''),
+         COALESCE(JSON_UNQUOTE(JSON_EXTRACT(data, '$.name')), ''),
+         record_id`,
+      [businessId]
+    );
+    const parsedRows = rows.map((row) => ({ ...row, data: parseJsonColumn(row.data, {}) }));
+    const [revisionRows] = await connection.query("SELECT COALESCE(MAX(revision), 0) AS maxRevision FROM business_records WHERE business_id = ?", [businessId]);
+    const usedCodes = new Set(parsedRows.map((row) => String(row.data.customerCode || "").trim().toUpperCase()).filter(Boolean));
+    let nextNumber = Math.max(0, ...[...usedCodes].map(customerCodeNumber)) + 1;
+    let maxAssignedNumber = nextNumber - 1;
+    let nextRevision = Number(revisionRows[0]?.maxRevision || 0);
+    for (const row of parsedRows) {
+      if (String(row.data.customerCode || "").trim()) continue;
+      let customerCode = formatCustomerCode(nextNumber);
+      while (usedCodes.has(customerCode)) {
+        nextNumber += 1;
+        customerCode = formatCustomerCode(nextNumber);
+      }
+      const nextData = { ...row.data, customerCode };
+      nextRevision += 1;
+      await connection.query("UPDATE business_records SET data = ?, revision = ? WHERE id = ?", [
+        JSON.stringify(nextData),
+        nextRevision,
+        row.rowId
+      ]);
+      usedCodes.add(customerCode);
+      maxAssignedNumber = Math.max(maxAssignedNumber, nextNumber);
+      nextNumber += 1;
+    }
+    const floor = Math.max(maxAssignedNumber, ...[...usedCodes].map(customerCodeNumber));
+    await alignNumberSequence(connection, businessId, "customer", CUSTOMER_CODE_PREFIX, floor);
+  }
+}
+
+async function alignSyncRevisionAutoIncrement(connection) {
+  const [rows] = await connection.query("SELECT COALESCE(MAX(revision), 0) AS maxRevision FROM business_records");
+  const nextRevision = Math.max(1, Math.floor(Number(rows[0]?.maxRevision || 0)) + 1);
+  await connection.query(`ALTER TABLE sync_revisions AUTO_INCREMENT = ${nextRevision}`);
+}
+
 async function migrate() {
   const schemaPath = path.join(__dirname, "..", "schema.sql");
   const sql = fs.readFileSync(schemaPath, "utf8");
@@ -897,8 +1062,20 @@ async function migrate() {
     );
     await connection.query("UPDATE devices SET is_revoked = FALSE WHERE approval_status = 'PENDING'");
     await connection.query("ALTER TABLE file_metadata MODIFY file_type ENUM('LOGO','SIGNATURE','WATERMARK','PHOTO','DOCUMENT') NOT NULL");
+    await ensureIndex(connection, "devices", "idx_devices_token_hash", "(token_hash)");
+    await ensureIndex(connection, "devices", "idx_devices_business_created", "(business_id, created_at)");
+    await ensureIndex(connection, "business_records", "idx_business_records_entity_active", "(business_id, entity, deleted_at, revision)");
+    await ensureIndex(connection, "sync_revisions", "idx_sync_revisions_record", "(business_id, entity, record_id, id)");
+    await ensureIndex(connection, "file_metadata", "idx_file_metadata_entity", "(business_id, entity, entity_id, created_at)");
+    await ensurePrimaryKey(connection, "idempotency_keys", ["business_id", "idempotency_key"]);
+    await ensureIndex(connection, "idempotency_keys", "idx_idempotency_business_created", "(business_id, created_at)");
+    await ensureIndex(connection, "sync_conflicts", "idx_conflicts_device_created", "(business_id, device_id, status, created_at)");
+    await ensureIndex(connection, "audit_log", "idx_audit_log_business_created", "(business_id, created_at)");
+    await ensureIndex(connection, "audit_log", "idx_audit_log_entity", "(business_id, entity, entity_id, created_at)");
     await connection.query("INSERT IGNORE INTO businesses (id, name) VALUES (1, 'Autocare24')");
-    await connection.query("INSERT IGNORE INTO number_sequences (business_id, sequence_key, prefix, last_number) VALUES (1, 'invoice', 'INV', 0), (1, 'quotation', 'QT', 0), (1, 'job_card', 'JC', 0)");
+    await connection.query("INSERT IGNORE INTO number_sequences (business_id, sequence_key, prefix, last_number) VALUES (1, 'invoice', 'INV', 0), (1, 'quotation', 'QT', 0), (1, 'job_card', 'JC', 0), (1, 'customer', 'CUS', 0)");
+    await backfillCustomerCodes(connection);
+    await alignSyncRevisionAutoIncrement(connection);
   } finally {
     connection.release();
   }
@@ -1114,9 +1291,10 @@ async function persistBusinessRecord(connection, device, req, entity, recordId, 
   );
   const current = records[0] || null;
   const revisionOperation = operation === "DELETE" ? "DELETE" : current ? "UPDATE" : "INSERT";
+  const currentData = current ? parseJsonColumn(current.data, {}) : {};
   const canonicalData = operation === "DELETE"
     ? data
-    : await canonicalizeOperation(connection, device.business_id, { entity, data: { ...(data || {}), id: data?.id || recordId } });
+    : await canonicalizeOperation(connection, device.business_id, { entity, currentData, data: { ...(data || {}), id: data?.id || recordId } });
   const [revisionResult] = await connection.query(
     `INSERT INTO sync_revisions (business_id, device_id, entity, operation, record_id, payload)
      VALUES (?, ?, ?, ?, ?, ?)`,
@@ -1151,15 +1329,37 @@ async function ensureDefaultAccessRoles(connection, device, req) {
   const existing = byId(await loadBusinessRecords(connection, device.business_id, "access_roles"));
   for (const role of DEFAULT_ACCESS_ROLES) {
     const current = existing.get(role.id);
-    if (current && role.id !== OWNER_ACCESS_ROLE_ID) continue;
+    if (current && role.id !== OWNER_ACCESS_ROLE_ID) {
+      if (!DEFAULT_ROLE_PERMISSION_REFRESH_IDS.has(role.id)) continue;
+      const currentPermissions = rolePermissionsFromData(current);
+      const nextPermissions = normalizePermissions([...currentPermissions, ...role.permissions]);
+      if (JSON.stringify(currentPermissions) === JSON.stringify(nextPermissions)) continue;
+      await persistBusinessRecord(
+        connection,
+        device,
+        req,
+        "access_roles",
+        role.id,
+        {
+          ...current,
+          permissions: nextPermissions,
+          active: recordFlag(current.active, true),
+          locked: recordFlag(current.locked, false),
+          updatedAt: nowIso()
+        },
+        "UPSERT",
+        "ACCESS_ROLE_PERMISSIONS_REFRESHED"
+      );
+      continue;
+    }
     const nextPermissions = role.id === OWNER_ACCESS_ROLE_ID ? ALL_PERMISSIONS : normalizePermissions(role.permissions);
     if (
       current &&
       current.name === role.name &&
       current.description === role.description &&
-      current.locked === role.locked &&
-      current.active !== false &&
-      JSON.stringify(normalizePermissions(current.permissions)) === JSON.stringify(nextPermissions)
+      recordFlag(current.locked, false) === role.locked &&
+      recordFlag(current.active, true) &&
+      JSON.stringify(rolePermissionsFromData(current)) === JSON.stringify(nextPermissions)
     ) {
       continue;
     }
@@ -1182,9 +1382,9 @@ const mapCloudAccessRole = (role = {}) => ({
   id: String(role.id || ""),
   name: String(role.name || ""),
   description: String(role.description || ""),
-  permissions: normalizePermissions(role.permissions),
-  locked: role.locked === true,
-  active: role.active !== false,
+  permissions: rolePermissionsFromData(role),
+  locked: recordFlag(role.locked, false),
+  active: recordFlag(role.active, true),
   createdAt: String(role.createdAt || ""),
   updatedAt: String(role.updatedAt || "")
 });
@@ -1523,17 +1723,90 @@ async function buildInventorySnapshot(connection, businessId) {
   };
 }
 
+const objectData = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+
+const normalizeInvoiceCustomer = (invoice = {}, customer = {}) => {
+  const embedded = objectData(invoice.customer);
+  return {
+    id: String(customer.id || embedded.id || invoice.customerId || ""),
+    customerCode: String(embedded.customerCode || invoice.customerCode || customer.customerCode || ""),
+    name: String(embedded.name || invoice.customerName || customer.name || ""),
+    phone: String(embedded.phone || invoice.customerPhone || customer.phone || ""),
+    email: String(embedded.email || invoice.customerEmail || customer.email || ""),
+    gstin: String(embedded.gstin || invoice.customerGstin || customer.gstin || ""),
+    address: String(embedded.address || invoice.customerAddress || customer.address || ""),
+    createdAt: String(embedded.createdAt || customer.createdAt || invoice.createdAt || "")
+  };
+};
+
+const normalizeInvoiceVehicle = (invoice = {}, vehicle = {}) => {
+  const embedded = objectData(invoice.vehicle);
+  return {
+    id: String(embedded.id || invoice.vehicleId || vehicle.id || ""),
+    customerId: String(embedded.customerId || invoice.customerId || vehicle.customerId || ""),
+    registrationNumber: String(embedded.registrationNumber || invoice.vehicleNumber || vehicle.registrationNumber || "").toUpperCase(),
+    vehicleType: normalizeVehicleType(embedded.vehicleType || invoice.vehicleType || vehicle.vehicleType),
+    make: String(embedded.make || invoice.vehicleMake || vehicle.make || ""),
+    model: String(embedded.model || invoice.vehicleModel || vehicle.model || ""),
+    color: String(embedded.color || invoice.vehicleColor || vehicle.color || ""),
+    createdAt: String(embedded.createdAt || vehicle.createdAt || invoice.createdAt || "")
+  };
+};
+
+const customerCodeKey = (value) => String(value || "").trim().toUpperCase();
+
+async function loadCustomerByIdOrCode(connection, businessId, customerIdOrCode, customerCode = "") {
+  const idOrCode = String(customerIdOrCode || "").trim();
+  if (idOrCode) {
+    const direct = await loadBusinessRecord(connection, businessId, "customers", idOrCode);
+    if (direct) return direct;
+  }
+  const code = customerCodeKey(customerCode || idOrCode);
+  if (!code) return null;
+  const rows = await loadBusinessRecords(connection, businessId, "customers");
+  return rows.find((row) => customerCodeKey(row.data.customerCode) === code) || null;
+}
+
+async function resolveCustomerIdentity(connection, businessId, payload) {
+  const requestedId = String(payload.customerId || payload.customer?.id || "").trim().slice(0, 36);
+  const requestedCode = String(payload.customer?.customerCode || payload.customerCode || "").trim();
+  const existing = await loadCustomerByIdOrCode(connection, businessId, requestedId, requestedCode);
+  if (existing) return { customerId: existing.recordId, existingCustomer: existing.data };
+  return { customerId: requestedId || uuid(), existingCustomer: null };
+}
+
 async function buildInvoiceDetail(connection, businessId, invoiceId) {
   const invoice = await loadBusinessRecord(connection, businessId, "invoices", invoiceId);
   if (!invoice) throw Object.assign(new Error("Invoice not found."), { status: 404 });
-  const customer = invoice.data.customer || (await loadBusinessRecord(connection, businessId, "customers", invoice.data.customerId))?.data || {};
-  const vehicle = invoice.data.vehicle || (await loadBusinessRecord(connection, businessId, "vehicles", invoice.data.vehicleId))?.data || {};
+  const customerRecord = await loadCustomerByIdOrCode(
+    connection,
+    businessId,
+    invoice.data.customerId || invoice.data.customer?.id,
+    invoice.data.customerCode || invoice.data.customer?.customerCode
+  );
+  const vehicleRecord = await loadBusinessRecord(connection, businessId, "vehicles", invoice.data.vehicleId || invoice.data.vehicle?.id);
+  const customer = normalizeInvoiceCustomer(invoice.data, customerRecord?.data || {});
+  const vehicle = normalizeInvoiceVehicle(invoice.data, vehicleRecord?.data || {});
   const items = rowList(await loadBusinessRecords(connection, businessId, "invoice_items"))
     .filter((item) => String(item.invoiceId || "") === invoiceId);
   const payments = rowList(await loadBusinessRecords(connection, businessId, "payments"))
     .filter((payment) => String(payment.invoiceId || "") === invoiceId)
     .sort((a, b) => String(a.paymentDate || "").localeCompare(String(b.paymentDate || "")));
-  return { ...invoice.data, customer, vehicle, items, payments };
+  return {
+    ...invoice.data,
+    id: invoice.data.id || invoice.recordId,
+    customerId: customer.id || invoice.data.customerId,
+    vehicleId: invoice.data.vehicleId || vehicle.id,
+    customerCode: invoice.data.customerCode || customer.customerCode || "",
+    customerName: invoice.data.customerName || customer.name || "",
+    customerPhone: invoice.data.customerPhone || customer.phone || "",
+    vehicleType: normalizeVehicleType(invoice.data.vehicleType || vehicle.vehicleType),
+    vehicleNumber: invoice.data.vehicleNumber || vehicle.registrationNumber || "",
+    customer,
+    vehicle,
+    items,
+    payments
+  };
 }
 
 async function buildQuotationDetail(connection, businessId, quotationId) {
@@ -1541,6 +1814,7 @@ async function buildQuotationDetail(connection, businessId, quotationId) {
   if (!quotation) throw Object.assign(new Error("Quotation not found."), { status: 404 });
   const customer = (await loadBusinessRecord(connection, businessId, "customers", quotation.data.customerId))?.data || {
     id: quotation.data.customerId,
+    customerCode: quotation.data.customerCode || "",
     name: quotation.data.customerName || "",
     phone: quotation.data.customerPhone || "",
     email: quotation.data.customerEmail || "",
@@ -1560,7 +1834,7 @@ async function buildQuotationDetail(connection, businessId, quotationId) {
   };
   const items = rowList(await loadBusinessRecords(connection, businessId, "quotation_items"))
     .filter((item) => String(item.quotationId || "") === quotationId);
-  return { ...quotation.data, customer, vehicle, items };
+  return { ...quotation.data, customerCode: quotation.data.customerCode || customer.customerCode || "", customer, vehicle, items };
 }
 
 async function buildJobCardDetail(connection, businessId, jobCardId) {
@@ -1568,6 +1842,7 @@ async function buildJobCardDetail(connection, businessId, jobCardId) {
   if (!job) throw Object.assign(new Error("Job card not found."), { status: 404 });
   const customer = (await loadBusinessRecord(connection, businessId, "customers", job.data.customerId))?.data || {
     id: job.data.customerId,
+    customerCode: job.data.customerCode || "",
     name: job.data.customerName || ""
   };
   const vehicle = (await loadBusinessRecord(connection, businessId, "vehicles", job.data.vehicleId))?.data || {
@@ -1584,22 +1859,48 @@ async function buildJobCardDetail(connection, businessId, jobCardId) {
     .filter((photo) => String(photo.jobCardId || "") === jobCardId);
   const history = rowList(await loadBusinessRecords(connection, businessId, "job_card_status_history"))
     .filter((item) => String(item.jobCardId || "") === jobCardId);
-  return { ...job.data, customer, vehicle, items, checklist, photos, history };
+  return { ...job.data, customerCode: job.data.customerCode || customer.customerCode || "", customer, vehicle, items, checklist, photos, history };
 }
 
 async function listInvoiceSummaries(connection, businessId, query = "", limit = 300) {
   const q = String(query || "").trim().toLowerCase();
-  const invoices = rowList(await loadBusinessRecords(connection, businessId, "invoices"))
-    .map((invoice) => ({
-      ...invoice,
-      customerName: invoice.customerName || invoice.customer?.name || "",
-      customerPhone: invoice.customerPhone || invoice.customer?.phone || "",
-      vehicleNumber: invoice.vehicleNumber || invoice.vehicle?.registrationNumber || "",
-      vehicleType: normalizeVehicleType(invoice.vehicleType || invoice.vehicle?.vehicleType)
-    }))
+  const [invoiceRows, customerRows, vehicleRows] = await Promise.all([
+    loadBusinessRecords(connection, businessId, "invoices"),
+    loadBusinessRecords(connection, businessId, "customers"),
+    loadBusinessRecords(connection, businessId, "vehicles")
+  ]);
+  const customersById = new Map(customerRows.map((row) => [row.recordId, row.data]));
+  const customersByCode = new Map(
+    customerRows
+      .map((row) => [customerCodeKey(row.data.customerCode), row.data])
+      .filter(([code]) => Boolean(code))
+  );
+  const vehiclesById = new Map(vehicleRows.map((row) => [row.recordId, row.data]));
+  const invoices = invoiceRows
+    .map((row) => {
+      const invoice = row.data || {};
+      const customer = normalizeInvoiceCustomer(
+        invoice,
+        customersById.get(String(invoice.customerId || invoice.customer?.id || "")) ||
+          customersByCode.get(customerCodeKey(invoice.customerCode || invoice.customer?.customerCode || invoice.customerId)) ||
+          {}
+      );
+      const vehicle = normalizeInvoiceVehicle(invoice, vehiclesById.get(String(invoice.vehicleId || invoice.vehicle?.id || "")) || {});
+      return {
+        ...invoice,
+        id: invoice.id || row.recordId,
+        customerId: customer.id || invoice.customerId,
+        vehicleId: invoice.vehicleId || vehicle.id,
+        customerCode: invoice.customerCode || customer.customerCode || "",
+        customerName: invoice.customerName || customer.name || "",
+        customerPhone: invoice.customerPhone || customer.phone || "",
+        vehicleNumber: invoice.vehicleNumber || vehicle.registrationNumber || "",
+        vehicleType: normalizeVehicleType(invoice.vehicleType || vehicle.vehicleType)
+      };
+    })
     .filter((invoice) => {
       if (!q) return true;
-      return [invoice.invoiceNumber, invoice.customerName, invoice.customerPhone, invoice.vehicleNumber, invoice.vehicleType]
+      return [invoice.invoiceNumber, invoice.customerCode, invoice.customerName, invoice.customerPhone, invoice.vehicleNumber, invoice.vehicleType]
         .some((value) => String(value || "").toLowerCase().includes(q));
     })
     .sort((a, b) => String(b.invoiceDate || "").localeCompare(String(a.invoiceDate || "")) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
@@ -1647,6 +1948,7 @@ const mapCloudJobCardSummary = (job = {}) => ({
   customerId: String(job.customerId || ""),
   vehicleId: String(job.vehicleId || ""),
   invoiceId: String(job.invoiceId || ""),
+  customerCode: String(job.customerCode || job.customer?.customerCode || ""),
   customerName: String(job.customerName || job.customer?.name || ""),
   customerPhone: String(job.customerPhone || job.customer?.phone || ""),
   vehicleType: normalizeVehicleType(job.vehicleType || job.vehicle?.vehicleType),
@@ -1677,8 +1979,12 @@ async function listCloudEnquiries(connection, businessId) {
 }
 
 async function listCloudJobCards(connection, businessId) {
+  const customersById = new Map(rowList(await loadBusinessRecords(connection, businessId, "customers")).map((customer) => [String(customer.id || ""), customer]));
   return rowList(await loadBusinessRecords(connection, businessId, "job_cards"))
-    .map(mapCloudJobCardSummary)
+    .map((job) => {
+      const customer = customersById.get(String(job.customerId || ""));
+      return mapCloudJobCardSummary({ ...job, customerCode: job.customerCode || customer?.customerCode || "" });
+    })
     .sort((a, b) => String(b.jobDate || "").localeCompare(String(a.jobDate || "")) || String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
 }
 
@@ -1799,6 +2105,115 @@ function buildSalesTrend(invoices, payments, stockSales = []) {
     .sort((a, b) => a.date.localeCompare(b.date));
 }
 
+async function buildDailyReportRows(connection, businessId, invoices, allInvoices, payments, stockSales = []) {
+  const rows = new Map();
+  const ensure = (date) => {
+    const key = dateOnly(date);
+    if (!key) return null;
+    if (!rows.has(key)) {
+      rows.set(key, {
+        date: key,
+        label: key.slice(5),
+        invoiceCount: 0,
+        cancelledCount: 0,
+        serviceAmount: 0,
+        productAmount: 0,
+        quickStockSales: 0,
+        invoiceBilled: 0,
+        totalSales: 0,
+        collected: 0,
+        pendingReceived: 0,
+        balanceCreated: 0,
+        tax: 0,
+        grandSales: 0
+      });
+    }
+    return rows.get(key);
+  };
+
+  const activeInvoices = invoices.filter((invoice) => invoice.invoiceStatus !== "cancelled");
+  const activeInvoiceIds = new Set(activeInvoices.map((invoice) => String(invoice.id || "")));
+  const invoicesById = new Map(invoices.map((invoice) => [String(invoice.id || ""), invoice]));
+  const allInvoicesById = new Map(allInvoices.map((invoice) => [String(invoice.id || ""), invoice]));
+
+  activeInvoices.forEach((invoice) => {
+    const row = ensure(invoice.invoiceDate);
+    if (!row) return;
+    row.invoiceCount += 1;
+    row.invoiceBilled = money(row.invoiceBilled + money(invoice.grandTotal));
+    row.balanceCreated = money(row.balanceCreated + money(invoice.balanceDue));
+    row.tax = money(row.tax + money(invoice.totalTax));
+  });
+
+  invoices
+    .filter((invoice) => invoice.invoiceStatus === "cancelled")
+    .forEach((invoice) => {
+      const row = ensure(invoice.invoiceDate);
+      if (row) row.cancelledCount += 1;
+    });
+
+  rowList(await loadBusinessRecords(connection, businessId, "invoice_items")).forEach((item) => {
+    const invoiceId = String(item.invoiceId || "");
+    if (!activeInvoiceIds.has(invoiceId)) return;
+    const invoice = invoicesById.get(invoiceId);
+    const row = ensure(invoice?.invoiceDate);
+    if (!row) return;
+    const lineTotal = money(item.lineTotal === undefined || item.lineTotal === null ? finiteNumber(item.quantity) * finiteNumber(item.unitPrice) : item.lineTotal);
+    if (String(item.inventoryItemId || "").trim()) {
+      row.productAmount = money(row.productAmount + lineTotal);
+      return;
+    }
+    row.serviceAmount = money(row.serviceAmount + lineTotal);
+  });
+
+  payments.forEach((payment) => {
+    const row = ensure(payment.paymentDate);
+    if (!row) return;
+    const invoice = allInvoicesById.get(String(payment.invoiceId || ""));
+    const amount = money(payment.amount);
+    row.collected = money(row.collected + amount);
+    if (invoice?.invoiceDate && invoice.invoiceDate < payment.paymentDate) {
+      row.pendingReceived = money(row.pendingReceived + amount);
+    }
+  });
+
+  stockSales.forEach((movement) => {
+    const row = ensure(movement.movementDate);
+    if (!row) return;
+    const amount = money(movement.saleAmount);
+    row.quickStockSales = money(row.quickStockSales + amount);
+    row.collected = money(row.collected + amount);
+  });
+
+  return [...rows.values()]
+    .map((row) => {
+      const totalSales = money(row.invoiceBilled + row.quickStockSales);
+      return { ...row, totalSales, grandSales: totalSales };
+    })
+    .sort((a, b) => b.date.localeCompare(a.date));
+}
+
+function buildPendingPaymentRows(invoices, payments) {
+  const invoicesById = new Map(invoices.map((invoice) => [String(invoice.id || ""), invoice]));
+  return payments
+    .map((payment) => ({ payment, invoice: invoicesById.get(String(payment.invoiceId || "")) }))
+    .filter(({ payment, invoice }) => invoice?.invoiceDate && invoice.invoiceDate < payment.paymentDate)
+    .map(({ payment, invoice }) => ({
+      id: String(payment.id || ""),
+      paymentDate: String(payment.paymentDate || ""),
+      invoiceDate: String(invoice.invoiceDate || ""),
+      invoiceNumber: String(invoice.invoiceNumber || ""),
+      customerName: String(invoice.customerName || ""),
+      customerPhone: String(invoice.customerPhone || ""),
+      vehicleNumber: String(invoice.vehicleNumber || ""),
+      amount: money(payment.amount),
+      mode: normalizePaymentMode(payment.mode || "Cash"),
+      reference: String(payment.reference || ""),
+      invoiceBalanceDue: money(invoice.balanceDue)
+    }))
+    .sort((a, b) => b.paymentDate.localeCompare(a.paymentDate) || b.invoiceDate.localeCompare(a.invoiceDate));
+}
+
 function buildProfitTrend(payments, invoiceStockMovements, expenses, stockSales) {
   const rows = new Map();
   const ensure = (date) => {
@@ -1909,9 +2324,12 @@ async function createFinalInvoiceGraph(connection, device, req, input) {
     );
   }
 
-  const customerId = String(payload.customerId || payload.customer?.id || uuid()).slice(0, 36);
+  const customerIdentity = await resolveCustomerIdentity(connection, device.business_id, payload);
+  const customerId = customerIdentity.customerId;
+  const existingCustomer = customerIdentity.existingCustomer;
   const customer = {
     id: customerId,
+    customerCode: String(payload.customer?.customerCode || existingCustomer?.customerCode || await nextNumber(connection, device.business_id, "customer", CUSTOMER_CODE_PREFIX)),
     name: requiredText(payload.customer?.name || payload.customerName, "Customer name"),
     phone: String(payload.customer?.phone || payload.customerPhone || ""),
     email: String(payload.customer?.email || ""),
@@ -1950,6 +2368,7 @@ async function createFinalInvoiceGraph(connection, device, req, input) {
     vehicleId,
     jobCardId: String(payload.jobCardId || ""),
     vehicleType: vehicle.vehicleType,
+    customerCode: customer.customerCode,
     customerName: customer.name,
     customerPhone: customer.phone,
     vehicleNumber: vehicle.registrationNumber,
@@ -2635,6 +3054,8 @@ async function handleReports(req, res, device) {
     const invoiceRevenue = money(active.reduce((sum, invoice) => sum + money(invoice.grandTotal), 0));
     const paymentModes = buildPaymentModeTotals(payments, stockSales);
     const inventory = await buildInventorySnapshot(connection, device.business_id);
+    const pendingPayments = buildPendingPaymentRows(allInvoices, payments);
+    const dailyRows = await buildDailyReportRows(connection, device.business_id, invoices, allInvoices, payments, stockSales);
     ok(res, {
       report: {
         rangeLabel: range.label,
@@ -2652,6 +3073,8 @@ async function handleReports(req, res, device) {
         totalTax: money(active.reduce((sum, invoice) => sum + money(invoice.totalTax), 0)),
         cancelledCount: invoices.length - active.length,
         dues: active.filter((invoice) => money(invoice.balanceDue) > 0),
+        pendingPayments,
+        dailyRows,
         topServices: await buildTopServices(connection, device.business_id, active),
         paymentModes,
         salesTrend: buildSalesTrend(active, payments, stockSales),
@@ -2709,6 +3132,9 @@ async function handleProfit(req, res, device) {
 
 async function canonicalizeOperation(connection, businessId, op) {
   const data = { ...(op.data || {}) };
+  if (op.entity === "customers" && !String(data.customerCode || "").trim()) {
+    data.customerCode = String(op.currentData?.customerCode || "").trim() || await nextNumber(connection, businessId, "customer", CUSTOMER_CODE_PREFIX);
+  }
   if (op.entity === "invoices" && (!data.invoiceNumber || String(data.invoiceNumber).startsWith("LOCAL-"))) {
     data.invoiceNumber = await nextNumber(connection, businessId, "invoice", "INV");
     data.cloudSyncStatus = "synced";
@@ -2718,6 +3144,31 @@ async function canonicalizeOperation(connection, businessId, op) {
   }
   if (op.entity === "job_cards" && (!data.jobNumber || String(data.jobNumber).startsWith("LOCAL-"))) {
     data.jobNumber = await nextNumber(connection, businessId, "job_card", "JC");
+  }
+  if (op.entity === "access_roles") {
+    const defaultRole = DEFAULT_ACCESS_ROLES.find((role) => role.id === String(data.id || op.recordId || ""));
+    data.name = requiredText(data.name || defaultRole?.name, "Role name").slice(0, 100);
+    data.description = String(data.description || defaultRole?.description || "");
+    data.permissions = rolePermissionsFromData(data, defaultRole?.permissions || []);
+    if (!data.permissions.length) throw Object.assign(new Error("Role permissions are required."), { status: 422 });
+    data.locked = recordFlag(data.locked, defaultRole?.locked === true);
+    data.active = recordFlag(data.active, defaultRole?.active !== false);
+    data.createdAt = String(data.createdAt || nowIso());
+    data.updatedAt = String(data.updatedAt || nowIso());
+  }
+  if (op.entity === "inventory_items") {
+    data.name = requiredText(data.name, "Inventory item name");
+    data.type = data.type === "retail" ? "retail" : "consumable";
+    data.unit = String(data.unit || "piece").trim() || "piece";
+    data.sku = String(data.sku || "").trim();
+    data.category = String(data.category || "Studio stock").trim() || "Studio stock";
+    data.retailPrice = money(nonNegativeNumber(data.retailPrice ?? 0, "Selling price"));
+    data.gstRate = money(nonNegativeNumber(data.gstRate ?? 0, "GST rate"));
+    data.lowStockLevel = money(nonNegativeNumber(data.lowStockLevel ?? 0, "Low stock level"));
+    data.currentQuantity = money(nonNegativeNumber(data.currentQuantity ?? 0, "Current quantity"));
+    data.stockValue = money(nonNegativeNumber(data.stockValue ?? 0, "Stock value"));
+    data.active = data.active !== false;
+    data.createdAt = String(data.createdAt || nowIso());
   }
   return data;
 }
@@ -3311,7 +3762,8 @@ async function handlePush(req, res, device) {
         });
       }
 
-      const canonicalData = await canonicalizeOperation(connection, device.business_id, { ...op, entity, data: op.data || {} });
+      const currentData = current ? parseJsonColumn(current.data, {}) : {};
+      const canonicalData = await canonicalizeOperation(connection, device.business_id, { ...op, entity, currentData, data: op.data || {} });
       const revisionOperation = operationKind(type, Boolean(current));
       const deletedAt = type === "DELETE" ? new Date() : null;
       const [revisionResult] = await connection.query(
@@ -3465,6 +3917,15 @@ async function handleFileDownload(res, device, fileId) {
     "cache-control": "private, no-store"
   });
   fs.createReadStream(file.storage_path).pipe(res);
+}
+
+async function handleHealth(res) {
+  try {
+    await pool.query({ sql: "SELECT 1 AS ok", timeout: HEALTHCHECK_DB_TIMEOUT_MS });
+    return ok(res, { ok: true, version: API_VERSION, serverTime: new Date().toISOString(), database: "ok" });
+  } catch {
+    return error(res, 503, "database_unavailable", "Cloud database is not reachable.");
+  }
 }
 
 const textResponse = (res, status, body, headers = {}) => {
@@ -4401,7 +4862,7 @@ async function route(req, res) {
       return handleUpdateAsset(req, res, url);
     }
     if (req.method === "GET" && url.pathname === "/api/v1/health") {
-      return ok(res, { ok: true, version: API_VERSION, serverTime: new Date().toISOString() });
+      return handleHealth(res);
     }
     if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/webhook") return handleMetaWebhookVerify(req, res, url);
     if (req.method === "POST" && url.pathname === "/api/v1/whatsapp/webhook") return handleMetaWebhookPost(req, res);

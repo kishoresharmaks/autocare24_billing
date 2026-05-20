@@ -14,10 +14,10 @@ export const APP_ORGANIZATION = {
 } as const;
 
 export const APP_DEVELOPER = {
-  name: "KS TECH SOLUTIONS",
+  name: "Kishore",
   role: "Software design, development, and production support",
   profileUrl: "https://www.linkedin.com/in/kishore-sharma-t/",
-  credit: "Developed by KS TECH SOLUTIONS"
+  credit: "Developed by Kishore"
 } as const;
 
 export const APP_MODULES = [
