@@ -3,10 +3,10 @@ import { PropsWithChildren, createContext, useCallback, useContext, useEffect, u
 import {
   checkDeviceApproval,
   checkHealth,
-  loginOwner as loginOwnerRequest,
+  loginUser as loginUserRequest,
   registerDevice as registerDeviceRequest
 } from "../services/cloudApi";
-import { clearConnection, clearOwnerSession, loadStoredSession, saveApprovalStatus, saveConnection, saveOwnerSession } from "../services/sessionStorage";
+import { clearConnection, clearUserSession, loadStoredSession, saveApprovalStatus, saveConnection, saveUserSession } from "../services/sessionStorage";
 import type { CloudDeviceApprovalStatus, CloudDeviceSummary, CloudUser } from "../types/cloud";
 import { cleanBaseUrl } from "../utils/format";
 
@@ -25,18 +25,26 @@ interface SessionState {
   approvalStatus: CloudDeviceApprovalStatus | "";
   device: CloudDeviceSummary | null;
   user: CloudUser | null;
-  ownerCredentials: OwnerCredentials | null;
+  userToken: string;
+  userTokenExpiresAt: string;
   isOnline: boolean;
   lastError: string;
   registerDevice: (input: { cloudUrl: string; deviceName: string; registrationKey: string }) => Promise<void>;
   refreshApproval: () => Promise<void>;
-  loginOwner: (input: OwnerCredentials) => Promise<void>;
+  loginUser: (input: OwnerCredentials) => Promise<CloudUser>;
+  logoutUser: () => Promise<void>;
+  loginOwner: (input: OwnerCredentials) => Promise<CloudUser>;
   logoutOwner: () => Promise<void>;
   clearLocalConnection: () => Promise<void>;
 }
 
 const SessionContext = createContext<SessionState | null>(null);
 const STARTUP_SPLASH_MIN_MS = 5000;
+const isUserTokenFresh = (expiresAt: string) => {
+  if (!expiresAt) return true;
+  const time = Date.parse(expiresAt);
+  return Number.isFinite(time) && time > Date.now() + 60_000;
+};
 
 export function SessionProvider({ children }: PropsWithChildren) {
   const [booting, setBooting] = useState(true);
@@ -48,7 +56,8 @@ export function SessionProvider({ children }: PropsWithChildren) {
   const [approvalStatus, setApprovalStatus] = useState<CloudDeviceApprovalStatus | "">("");
   const [device, setDevice] = useState<CloudDeviceSummary | null>(null);
   const [user, setUser] = useState<CloudUser | null>(null);
-  const [ownerCredentials, setOwnerCredentials] = useState<OwnerCredentials | null>(null);
+  const [userToken, setUserToken] = useState("");
+  const [userTokenExpiresAt, setUserTokenExpiresAt] = useState("");
   const [isOnline, setIsOnline] = useState(true);
   const [lastError, setLastError] = useState("");
 
@@ -66,7 +75,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
       splashTimer = setTimeout(resolve, STARTUP_SPLASH_MIN_MS);
     });
     const storedSession = loadStoredSession()
-      .then((stored) => {
+      .then(async (stored) => {
         if (!active) return;
         setCloudUrl(stored.cloudUrl);
         setDeviceId(stored.deviceId);
@@ -74,9 +83,22 @@ export function SessionProvider({ children }: PropsWithChildren) {
         setDeviceName(stored.deviceName);
         setToken(stored.token);
         setApprovalStatus(stored.approvalStatus as CloudDeviceApprovalStatus | "");
-        if (stored.token && stored.approvalStatus === "APPROVED" && stored.ownerUser && stored.ownerCredentials) {
-          setUser(stored.ownerUser);
-          setOwnerCredentials(stored.ownerCredentials);
+        if (stored.token && stored.approvalStatus === "APPROVED" && stored.authUser && stored.userToken && isUserTokenFresh(stored.userTokenExpiresAt)) {
+          setUser(stored.authUser);
+          setUserToken(stored.userToken);
+          setUserTokenExpiresAt(stored.userTokenExpiresAt);
+          return;
+        }
+        if (stored.userToken && !isUserTokenFresh(stored.userTokenExpiresAt)) {
+          await clearUserSession();
+        }
+        if (stored.token && stored.approvalStatus === "APPROVED" && stored.authUser && stored.legacyOwnerCredentials) {
+          const result = await loginUserRequest(stored.cloudUrl, stored.token, stored.legacyOwnerCredentials.username, stored.legacyOwnerCredentials.password);
+          await saveUserSession({ user: result.user, userToken: result.userToken, expiresAt: result.expiresAt });
+          if (!active) return;
+          setUser(result.user);
+          setUserToken(result.userToken);
+          setUserTokenExpiresAt(result.expiresAt || "");
         }
       })
       .catch((error: Error) => {
@@ -118,14 +140,15 @@ export function SessionProvider({ children }: PropsWithChildren) {
         token: result.token,
         approvalStatus: result.approvalStatus
       });
-      await clearOwnerSession();
+      await clearUserSession();
       setCloudUrl(normalizedUrl);
       setDeviceName(input.deviceName.trim() || deviceName);
       setToken(result.token);
       setApprovalStatus(result.approvalStatus);
       setDevice(result.device);
       setUser(null);
-      setOwnerCredentials(null);
+      setUserToken("");
+      setUserTokenExpiresAt("");
     },
     [deviceCode, deviceId, deviceName]
   );
@@ -140,34 +163,34 @@ export function SessionProvider({ children }: PropsWithChildren) {
     setApprovalStatus(result.approvalStatus);
     setDevice(result.device);
     if (result.revoked) {
-      await clearOwnerSession();
+      await clearUserSession();
       setUser(null);
-      setOwnerCredentials(null);
+      setUserToken("");
+      setUserTokenExpiresAt("");
     }
   }, [cloudUrl, token]);
 
-  const loginOwner = useCallback(
+  const loginUser = useCallback(
     async (input: OwnerCredentials) => {
       setLastError("");
       if (!token || approvalStatus !== "APPROVED") {
-        throw new Error("This phone must be approved before owner login.");
+        throw new Error("This phone must be approved before user login.");
       }
-      const result = await loginOwnerRequest(cloudUrl, token, input.username.trim(), input.password);
-      if (result.user.role !== "owner") {
-        throw new Error("Only owner accounts can use this mobile reports app.");
-      }
-      const credentials = { username: input.username.trim(), password: input.password };
-      await saveOwnerSession({ user: result.user, credentials });
+      const result = await loginUserRequest(cloudUrl, token, input.username.trim(), input.password);
+      await saveUserSession({ user: result.user, userToken: result.userToken, expiresAt: result.expiresAt });
       setUser(result.user);
-      setOwnerCredentials(credentials);
+      setUserToken(result.userToken);
+      setUserTokenExpiresAt(result.expiresAt || "");
+      return result.user;
     },
     [approvalStatus, cloudUrl, token]
   );
 
-  const logoutOwner = useCallback(async () => {
-    await clearOwnerSession();
+  const logoutUser = useCallback(async () => {
+    await clearUserSession();
     setUser(null);
-    setOwnerCredentials(null);
+    setUserToken("");
+    setUserTokenExpiresAt("");
   }, []);
 
   const clearLocalConnection = useCallback(async () => {
@@ -176,7 +199,8 @@ export function SessionProvider({ children }: PropsWithChildren) {
     setApprovalStatus("");
     setDevice(null);
     setUser(null);
-    setOwnerCredentials(null);
+    setUserToken("");
+    setUserTokenExpiresAt("");
     setLastError("");
   }, []);
 
@@ -191,13 +215,16 @@ export function SessionProvider({ children }: PropsWithChildren) {
       approvalStatus,
       device,
       user,
-      ownerCredentials,
+      userToken,
+      userTokenExpiresAt,
       isOnline,
       lastError,
       registerDevice,
       refreshApproval,
-      loginOwner,
-      logoutOwner,
+      loginUser,
+      logoutUser,
+      loginOwner: loginUser,
+      logoutOwner: logoutUser,
       clearLocalConnection
     }),
     [
@@ -211,13 +238,14 @@ export function SessionProvider({ children }: PropsWithChildren) {
       deviceName,
       isOnline,
       lastError,
-      loginOwner,
-      logoutOwner,
-      ownerCredentials,
+      loginUser,
+      logoutUser,
       refreshApproval,
       registerDevice,
       token,
-      user
+      user,
+      userToken,
+      userTokenExpiresAt
     ]
   );
 

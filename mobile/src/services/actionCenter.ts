@@ -62,7 +62,7 @@ export function buildActionItems(input: BuildActionItemsInput): ActionItem[] {
       type: "pendingDevices",
       severity: "warning",
       title: "Approve pending devices",
-      detail: `${formatCount(pendingDeviceCount)} phone(s) are waiting for owner approval.`,
+      detail: `${formatCount(pendingDeviceCount)} phone(s) are waiting for approval.`,
       route: "/devices",
       count: pendingDeviceCount,
       createdFrom: "devices",

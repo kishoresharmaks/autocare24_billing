@@ -815,6 +815,7 @@ export default function App() {
                   setSettings={setSettings}
                   notify={notify}
                   currentUser={currentUser}
+                  onLogout={logout}
                   onChanged={() => {
                     refresh();
                     window.autocare.getSettings().then(setSettings).catch((error) => notify(error.message));
@@ -1240,6 +1241,11 @@ function AuthGate({
 
   const openOwnerSetup = () => {
     setAuthMessage("");
+    if (!staffStatus?.connected) {
+      setSetupFlow("staff");
+      setAuthMessage("Connect this PC to Cloud API first. If this is the first PC, it will be approved automatically, then you can create the owner account.");
+      return;
+    }
     setSetupFlow("owner");
     setPassword("");
     setConfirmPassword("");
@@ -1256,7 +1262,10 @@ function AuthGate({
     if (!status.connected) return;
     const auth = await window.autocare.authStatus();
     if (!auth.hasUsers) {
-      notify("Device approved, but owner account is not ready in cloud yet.");
+      setSetupFlow("owner");
+      setPassword("");
+      setConfirmPassword("");
+      notify("Device approved. Create the owner account now.");
       return;
     }
     setSetupFlow("login");
@@ -1363,13 +1372,13 @@ function AuthGate({
           <div className="auth-choice-grid">
             <button className="auth-choice-button" type="button" onClick={openOwnerSetup}>
               <UserCircle size={22} />
-              <strong>New Owner / Main PC</strong>
-              <span>Create the first owner account.</span>
+              <strong>Create Owner Account</strong>
+              <span>Use after this PC is connected to Cloud API.</span>
             </button>
             <button className="auth-choice-button" type="button" onClick={openStaffSetup}>
               <UploadCloud size={22} />
-              <strong>Staff / Existing Business PC</strong>
-              <span>Connect and wait for owner approval.</span>
+              <strong>Connect Cloud API</strong>
+              <span>Connect this PC or request approval for an existing business.</span>
             </button>
           </div>
         )}

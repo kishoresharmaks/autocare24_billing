@@ -32,11 +32,11 @@ export function SetupScreen() {
     <AuthLayout>
       <Image source={require("../../assets/autocare24-logo.png")} style={[styles.logo, layout.isNarrow ? styles.logoNarrow : null]} resizeMode="contain" />
       <View style={styles.headingBlock}>
-        <Text style={styles.eyebrow}>Owner reports mobile</Text>
+        <Text style={styles.eyebrow}>Role-based mobile access</Text>
         <Text style={styles.title} numberOfLines={2}>
           Connect this phone
         </Text>
-        <Text style={styles.copy}>Use the registration key once, then approve this phone from the owner PC.</Text>
+        <Text style={styles.copy}>Use the registration key once, then approve this phone from the desktop app.</Text>
       </View>
       <FormField label="Cloud API URL" value={cloudUrl} onChangeText={setCloudUrl} keyboardType="url" />
       <FormField label="Phone name" value={deviceName} onChangeText={setDeviceName} autoCapitalize="words" />
@@ -48,7 +48,7 @@ export function SetupScreen() {
         </Text>
       </View>
       {error ? <Text style={styles.error}>{error}</Text> : null}
-      <AppButton label="Request owner approval" onPress={handleConnect} loading={loading} />
+      <AppButton label="Request phone approval" onPress={handleConnect} loading={loading} />
     </AuthLayout>
   );
 }

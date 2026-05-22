@@ -11,15 +11,17 @@ import { Screen } from "../../src/components/Screen";
 import { colors } from "../../src/theme";
 import { exportInvoicesDocument, type ExportFormat } from "../../src/services/reportExport";
 import { formatCount, formatDate, formatMoney, titleCase } from "../../src/utils/format";
-import { useRequireOwner } from "../../src/hooks/useRequireOwner";
+import { useRequirePermission } from "../../src/hooks/useRequireOwner";
 import { useSession } from "../../src/providers/SessionProvider";
+import { hasPermission } from "../../src/services/permissions";
 import type { InvoiceSummary } from "../../src/types/cloud";
 
 const SEARCH_DEBOUNCE_MS = 300;
 
 export default function InvoicesTab() {
-  const guard = useRequireOwner();
+  const guard = useRequirePermission("billing.view");
   const session = useSession();
+  const canExport = hasPermission(session.user, "reports.export");
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
 
@@ -29,9 +31,9 @@ export default function InvoicesTab() {
   }, [query]);
 
   const invoicesQuery = useQuery({
-    queryKey: ["invoices", session.cloudUrl, session.token, debouncedQuery],
-    queryFn: () => fetchInvoices(session.cloudUrl, session.token, debouncedQuery),
-    enabled: Boolean(session.user && session.token && session.approvalStatus === "APPROVED")
+    queryKey: ["invoices", session.cloudUrl, session.token, session.userToken, debouncedQuery],
+    queryFn: () => fetchInvoices(session.cloudUrl, session.token, session.userToken, debouncedQuery),
+    enabled: Boolean(session.user && session.token && session.userToken && session.approvalStatus === "APPROVED" && hasPermission(session.user, "billing.view"))
   });
 
   const invoices = invoicesQuery.data || [];
@@ -78,7 +80,7 @@ export default function InvoicesTab() {
       {invoicesQuery.error ? (
         <Text style={styles.error}>{invoicesQuery.error instanceof Error ? invoicesQuery.error.message : "Unable to load invoices."}</Text>
       ) : null}
-      <ExportActions disabled={Boolean(approvalError || invoicesQuery.error) || invoicesQuery.isFetching} onExport={exportInvoices} />
+      <ExportActions disabled={!canExport || Boolean(approvalError || invoicesQuery.error) || invoicesQuery.isFetching} onExport={exportInvoices} />
       <FormField
         label="Search invoices"
         onChangeText={setQuery}

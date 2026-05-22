@@ -67,6 +67,7 @@ const getPrimarySystemIp = () => {
 export class CloudSyncEngine {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
+  private userSessionToken = "";
 
   constructor(
     private readonly database: AppDatabase,
@@ -86,6 +87,14 @@ export class CloudSyncEngine {
 
   status() {
     return this.database.getSyncStatus(this.running ? "syncing" : undefined);
+  }
+
+  setUserSessionToken(token: string) {
+    this.userSessionToken = String(token || "").trim();
+  }
+
+  clearUserSessionToken() {
+    this.userSessionToken = "";
   }
 
   async checkStatus(): Promise<SyncDeviceStatus> {
@@ -315,9 +324,7 @@ export class CloudSyncEngine {
     }
     const body = await this.readJson(response);
     if (response.status === 401) {
-      const message = this.apiErrorMessage(body, "Cloud device was revoked. Reconnect this PC.");
-      this.database.markSyncDeviceDisconnected(message, "REVOKED");
-      throw new Error(message);
+      this.handleCloudUnauthorized(body, "Cloud device was revoked. Reconnect this PC.");
     }
     if (!response.ok) throw new Error(this.apiErrorMessage(body, "Internet required to create final invoice number. Saved as draft."));
     const invoiceNumber = String(body.data?.invoiceNumber || body.invoiceNumber || "");
@@ -353,10 +360,7 @@ export class CloudSyncEngine {
     }
     const body = await this.readJson(response);
     if (response.status === 401) {
-      const message = this.apiErrorMessage(body, "Cloud device was revoked. Reconnect this PC.");
-      this.database.markSyncDeviceDisconnected(message, "REVOKED");
-      this.emit(this.database.getSyncStatus());
-      throw new Error(message);
+      this.handleCloudUnauthorized(body, "Cloud device was revoked. Reconnect this PC.");
     }
     if (!response.ok) throw new Error(this.apiErrorMessage(body, "Cloud server is not reachable."));
     this.database.updateSyncRuntime({
@@ -381,17 +385,14 @@ export class CloudSyncEngine {
     let response: Response;
     try {
       response = await this.fetchWithTimeout(`${status.cloudUrl}${normalizedPath}`, {
-        headers: { authorization: `Bearer ${token}` }
+        headers: this.authHeaders(token)
       });
     } catch (error) {
       throw new Error(this.markCloudUnavailable(error));
     }
     if (response.status === 401) {
       const body = await this.readJson(response);
-      const message = this.apiErrorMessage(body, "Cloud device was revoked. Reconnect this PC.");
-      this.database.markSyncDeviceDisconnected(message, "REVOKED");
-      this.emit(this.database.getSyncStatus());
-      throw new Error(message);
+      this.handleCloudUnauthorized(body, "Cloud device was revoked. Reconnect this PC.");
     }
     if (!response.ok) throw new Error("Cloud file is not reachable.");
     const contentType = response.headers.get("content-type") || "application/octet-stream";
@@ -561,7 +562,8 @@ export class CloudSyncEngine {
   private authHeaders(token: string) {
     return {
       "authorization": `Bearer ${token}`,
-      "content-type": "application/json"
+      "content-type": "application/json",
+      ...(this.userSessionToken ? { "x-autocare-user-token": this.userSessionToken } : {})
     };
   }
 
@@ -605,6 +607,27 @@ export class CloudSyncEngine {
   private apiErrorMessage(body: Record<string, unknown>, fallback: string) {
     const parsed = body as ApiErrorBody;
     return parsed.error?.message || parsed.message || parsed.error?.code || parsed.code || fallback;
+  }
+
+  private apiErrorCode(body: Record<string, unknown>) {
+    const parsed = body as ApiErrorBody;
+    return String(parsed.error?.code || parsed.code || "").trim().toLowerCase();
+  }
+
+  private isUserAuthError(body: Record<string, unknown>) {
+    const code = this.apiErrorCode(body);
+    return code === "invalid_login" || code === "user_session_invalid" || code === "user_session_required";
+  }
+
+  private handleCloudUnauthorized(body: Record<string, unknown>, fallback: string): never {
+    const message = this.apiErrorMessage(body, fallback);
+    if (this.isUserAuthError(body)) {
+      this.clearUserSessionToken();
+      throw new Error(message);
+    }
+    this.database.markSyncDeviceDisconnected(message, "REVOKED");
+    this.emit(this.database.getSyncStatus());
+    throw new Error(message);
   }
 
   private normalizeApprovalStatus(value: unknown): "APPROVED" | "PENDING" | "REVOKED" {

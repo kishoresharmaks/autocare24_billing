@@ -103,17 +103,26 @@ const run = async () => {
       { description: "Simple Labour", quantity: 2, unitPrice: 150, gstRate: 18, sacCode: "9987" }
     ],
     discount: 25,
-    paidAmount: 999
+    paidAmount: 275
   }));
   closeToMoney(simpleInvoice.subTotal, 300, "Simple subtotal");
   closeToMoney(simpleInvoice.discount, 25, "Simple discount");
   closeToMoney(simpleInvoice.taxableValue, 0, "Simple taxable value");
   closeToMoney(simpleInvoice.totalTax, 0, "Simple total tax");
   closeToMoney(simpleInvoice.grandTotal, 275, "Simple grand total");
-  closeToMoney(simpleInvoice.paidAmount, 275, "Simple overpaid amount clamps to total");
-  closeToMoney(simpleInvoice.balanceDue, 0, "Simple overpaid balance");
+  closeToMoney(simpleInvoice.paidAmount, 275, "Simple exact paid amount");
+  closeToMoney(simpleInvoice.balanceDue, 0, "Simple exact paid balance");
   assert.equal(simpleInvoice.paymentStatus, "paid");
   closeToMoney(sum(simpleInvoice.items, (item) => item.lineTotal), simpleInvoice.grandTotal, "Simple line total sum");
+  assert.throws(
+    () => db.createInvoice(invoiceInput({
+      suffix: "OVERPAID",
+      invoiceMode: "simple",
+      items: [{ description: "Initial Overpayment Guard", quantity: 1, unitPrice: 100, gstRate: 18, sacCode: "9987" }],
+      paidAmount: 999
+    })),
+    /Entered paid amount is greater than billed amount/
+  );
   assert.throws(
     () => db.createInvoice(invoiceInput({
       suffix: "DISC",
@@ -122,7 +131,7 @@ const run = async () => {
     })),
     /Discount cannot be greater than subtotal/
   );
-  passed.push("Simple invoices ignore GST, clamp initial overpayment, and reject excess discount");
+  passed.push("Simple invoices ignore GST, accept exact payment, and reject initial overpayment/excess discount");
 
   const dueInvoice = db.createInvoice(invoiceInput({
     suffix: "PAY",

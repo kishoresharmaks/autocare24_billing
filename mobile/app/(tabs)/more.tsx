@@ -7,6 +7,7 @@ import { Screen } from "../../src/components/Screen";
 import { StatusPill } from "../../src/components/StatusPill";
 import { useRequireOwner } from "../../src/hooks/useRequireOwner";
 import { useSession } from "../../src/providers/SessionProvider";
+import { hasPermission, readablePermissions } from "../../src/services/permissions";
 import { colors, radius } from "../../src/theme";
 
 type MoreRoute = "/profit" | "/devices" | "/settings";
@@ -14,34 +15,42 @@ type MoreRoute = "/profit" | "/devices" | "/settings";
 export default function MoreTab() {
   const guard = useRequireOwner();
   const session = useSession();
+  const permissionLabels = readablePermissions(session.user).slice(0, 10);
 
   if (guard) return guard;
 
   async function handleLogout() {
-    await session.logoutOwner();
+    await session.logoutUser();
     router.replace("/login");
   }
 
   return (
-    <Screen title="More" subtitle="Owner tools and phone session">
+    <Screen title="More" subtitle="Role, permissions, and phone session">
       <View style={styles.profileCard}>
         <View style={styles.avatar}>
           <ShieldCheck color={colors.primary} size={25} />
         </View>
         <View style={styles.profileText}>
           <Text style={styles.profileName} numberOfLines={1}>
-            {session.user?.displayName || session.user?.username || "Owner"}
+            {session.user?.displayName || session.user?.username || "User"}
           </Text>
           <Text style={styles.profileSub} numberOfLines={1}>
-            {session.device?.deviceCode || session.deviceCode || "Approved phone"}
+            {session.user?.accessRoleName || session.user?.role || "Cloud user"} | {session.device?.deviceCode || session.deviceCode || "Approved phone"}
           </Text>
         </View>
         <StatusPill status={session.approvalStatus} />
       </View>
 
+      <View style={styles.permissionCard}>
+        <Text style={styles.permissionTitle}>Granted permissions</Text>
+        <View style={styles.permissionWrap}>
+          {permissionLabels.length ? permissionLabels.map((label) => <Text key={label} style={styles.permissionChip}>{label}</Text>) : <Text style={styles.profileSub}>No permissions assigned.</Text>}
+        </View>
+      </View>
+
       <View style={styles.list}>
-        <MoreRow icon={CircleDollarSign} title="Profit & Expense" subtitle="Cash profit, margin, and expenses" route="/profit" />
-        <MoreRow icon={MonitorSmartphone} title="Cloud Devices" subtitle="Approve or revoke owner phones" route="/devices" />
+        {hasPermission(session.user, "reports.view") ? <MoreRow icon={CircleDollarSign} title="Profit & Expense" subtitle="Cash profit, margin, and expenses" route="/profit" /> : null}
+        {hasPermission(session.user, "users.manage") ? <MoreRow icon={MonitorSmartphone} title="Cloud Devices" subtitle="Approve or revoke phones" route="/devices" /> : null}
         <MoreRow icon={Settings} title="Settings" subtitle="Cloud URL, phone code, and reset tools" route="/settings" />
       </View>
 
@@ -50,7 +59,7 @@ export default function MoreTab() {
         <View style={styles.networkText}>
           <Text style={styles.networkTitle}>{session.isOnline ? "Cloud reachable" : "Phone offline"}</Text>
           <Text style={styles.networkSub} numberOfLines={2}>
-            {session.isOnline ? "Reports refresh from the approved cloud API." : "Saved login stays on this phone; cloud data refreshes when internet returns."}
+            {session.isOnline ? "Allowed data refreshes from the approved cloud API." : "Saved login stays on this phone; cloud data refreshes when internet returns."}
           </Text>
         </View>
       </View>
@@ -59,7 +68,7 @@ export default function MoreTab() {
 
       <Pressable accessibilityRole="button" onPress={() => void handleLogout()} style={({ pressed }) => [styles.logout, pressed ? styles.pressed : null]}>
         <LogOut color={colors.danger} size={18} />
-        <Text style={styles.logoutText}>Logout owner</Text>
+        <Text style={styles.logoutText}>Logout user</Text>
       </Pressable>
     </Screen>
   );
@@ -118,6 +127,33 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontSize: 12,
     fontWeight: "700"
+  },
+  permissionCard: {
+    gap: 10,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceStrong,
+    padding: 12
+  },
+  permissionTitle: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: "900"
+  },
+  permissionWrap: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8
+  },
+  permissionChip: {
+    borderRadius: radius.pill,
+    backgroundColor: colors.chip,
+    color: colors.primaryDark,
+    fontSize: 12,
+    fontWeight: "800",
+    paddingHorizontal: 10,
+    paddingVertical: 6
   },
   list: {
     gap: 10

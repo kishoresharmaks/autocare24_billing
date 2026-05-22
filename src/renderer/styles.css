@@ -2451,6 +2451,12 @@ label {
   font-weight: 700;
 }
 
+.field-error {
+  color: #9b3e2f;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .customer-search-field {
   display: grid;
   gap: 6px;

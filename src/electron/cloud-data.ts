@@ -301,14 +301,16 @@ export class CloudDataClient {
   }
 
   async setupOwner(input: { displayName: string; username: string; password: string }): Promise<AppUser> {
-    const response = await this.cloud.cloudRequest<{ user: AppUser }>("/api/v1/auth/setup-owner", { method: "POST", body: input });
+    const response = await this.cloud.cloudRequest<{ user: AppUser; userToken?: string }>("/api/v1/auth/setup-owner", { method: "POST", body: input });
+    this.cloud.setUserSessionToken(response.userToken || "");
     this.invalidate("users");
     this.invalidate("access_roles");
     return response.user;
   }
 
   async login(input: { username: string; password: string }): Promise<AppUser> {
-    const response = await this.cloud.cloudRequest<{ user: AppUser }>("/api/v1/auth/login", { method: "POST", body: input });
+    const response = await this.cloud.cloudRequest<{ user: AppUser; userToken?: string }>("/api/v1/auth/login", { method: "POST", body: input });
+    this.cloud.setUserSessionToken(response.userToken || "");
     return response.user;
   }
 

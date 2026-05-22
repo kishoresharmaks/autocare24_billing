@@ -7,6 +7,7 @@ import { FormField } from "../components/FormField";
 import { StatusPill } from "../components/StatusPill";
 import { colors } from "../theme";
 import { useSession } from "../providers/SessionProvider";
+import { firstAllowedMobileRoute } from "../services/permissions";
 
 export function OwnerLoginScreen() {
   const session = useSession();
@@ -19,8 +20,8 @@ export function OwnerLoginScreen() {
     setError("");
     setLoading(true);
     try {
-      await session.loginOwner({ username, password });
-      router.replace("/dashboard");
+      const user = await session.loginUser({ username, password });
+      router.replace(firstAllowedMobileRoute(user));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to login.");
     } finally {
@@ -31,10 +32,10 @@ export function OwnerLoginScreen() {
   return (
     <AuthLayout>
       <StatusPill status={session.approvalStatus} />
-      <Text style={styles.title}>Owner login</Text>
-      <Text style={styles.copy}>Owner credentials unlock dashboard, reports, and device activity. Login is saved securely on this phone until you logout.</Text>
-      <FormField label="Owner username" value={username} onChangeText={setUsername} />
-      <FormField label="Owner password / PIN" value={password} onChangeText={setPassword} secureTextEntry />
+      <Text style={styles.title}>User login</Text>
+      <Text style={styles.copy}>Login with any approved cloud user. This phone will show only the data allowed for that role.</Text>
+      <FormField label="Username" value={username} onChangeText={setUsername} />
+      <FormField label="Password / PIN" value={password} onChangeText={setPassword} secureTextEntry />
       {error ? <Text style={styles.error}>{error}</Text> : null}
       <AppButton label="Open dashboard" onPress={handleLogin} loading={loading} disabled={!username.trim() || !password} />
     </AuthLayout>

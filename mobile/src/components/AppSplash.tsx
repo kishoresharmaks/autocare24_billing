@@ -75,7 +75,7 @@ export function AppSplash() {
         <View style={styles.textBlock}>
           <Text style={styles.eyebrow}>{MOBILE_APP_SUBTITLE}</Text>
           <Text style={styles.title}>{MOBILE_APP_NAME}</Text>
-          <Text style={styles.subtitle}>Loading your secure owner workspace</Text>
+          <Text style={styles.subtitle}>Loading your secure workspace</Text>
         </View>
         <View style={styles.progressTrack}>
           <Animated.View style={[styles.progressFill, { opacity: ringOpacity }]} />

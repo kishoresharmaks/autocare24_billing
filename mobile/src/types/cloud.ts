@@ -58,6 +58,8 @@ export interface CloudUser {
 
 export interface LoginResult {
   user: CloudUser;
+  userToken: string;
+  expiresAt?: string;
 }
 
 export interface BusinessSettings {
@@ -341,6 +343,33 @@ export interface ReportData {
   inventory: InventoryDashboardData;
   enquiries: EnquiryReportData;
   jobCards: JobCardReportData;
+}
+
+export interface DashboardData {
+  todayRevenue: number;
+  monthRevenue: number;
+  pendingDues: number;
+  todayInvoices: number;
+  recentInvoices: InvoiceSummary[];
+  topServices: Array<{ name: string; quantity: number; revenue: number }>;
+  enquiries: {
+    todayFollowups: number;
+    overdueFollowups: number;
+    newEnquiries: number;
+    convertedEnquiries: number;
+    dueToday?: unknown[];
+    overdue?: unknown[];
+    recentOpen?: unknown[];
+  };
+  jobCards: {
+    todayJobs: number;
+    openJobs: number;
+    approvalPending: number;
+    inProgress: number;
+    readyDelivery: number;
+    completedToday: number;
+    recentOpen?: unknown[];
+  };
 }
 
 export interface Expense {

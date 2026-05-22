@@ -16,7 +16,7 @@ export default function SettingsTab() {
   if (guard) return guard;
 
   async function handleLogout() {
-    await session.logoutOwner();
+    await session.logoutUser();
     router.replace("/login");
   }
 
@@ -26,20 +26,21 @@ export default function SettingsTab() {
   }
 
   return (
-    <Screen title="Settings" subtitle="Owner session and approved phone connection." showHome>
+    <Screen title="Settings" subtitle="User session and approved phone connection." showHome>
       <View style={styles.panel}>
         <StatusPill status={session.approvalStatus} />
         <Info label="Cloud API" value={session.cloudUrl} />
         <Info label="Phone name" value={session.deviceName} />
         <Info label="Phone code" value={session.device?.deviceCode || session.deviceCode} />
-        <Info label="Owner user" value={session.user?.displayName || session.user?.username || "Not logged in"} />
+        <Info label="Cloud user" value={session.user?.displayName || session.user?.username || "Not logged in"} />
+        <Info label="Role" value={session.user?.accessRoleName || session.user?.role || "Not assigned"} />
         <Info label="Network" value={session.isOnline ? "Online" : "Offline"} />
       </View>
       <View style={[styles.actions, layout.isTablet ? styles.actionsWide : null]}>
-        <AppButton label="Logout owner" onPress={handleLogout} variant="secondary" style={layout.isTablet ? styles.actionWide : undefined} />
+        <AppButton label="Logout user" onPress={handleLogout} variant="secondary" style={layout.isTablet ? styles.actionWide : undefined} />
         <AppButton label="Reset phone connection" onPress={handleClear} variant="danger" style={layout.isTablet ? styles.actionWide : undefined} />
       </View>
-      <Text style={styles.note}>Logout clears the saved owner login on this phone. Reset phone connection removes the cloud token, approval status, and saved owner session.</Text>
+      <Text style={styles.note}>Logout clears the saved user login on this phone. Reset phone connection removes the cloud token, approval status, and saved user session.</Text>
     </Screen>
   );
 }

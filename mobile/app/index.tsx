@@ -4,6 +4,7 @@ import { ApprovalScreen } from "../src/screens/ApprovalScreen";
 import { OwnerLoginScreen } from "../src/screens/OwnerLoginScreen";
 import { SetupScreen } from "../src/screens/SetupScreen";
 import { useSession } from "../src/providers/SessionProvider";
+import { firstAllowedMobileRoute } from "../src/services/permissions";
 
 export default function EntryScreen() {
   const session = useSession();
@@ -24,5 +25,5 @@ export default function EntryScreen() {
     return <Redirect href="/login" />;
   }
 
-  return <Redirect href="/dashboard" />;
+  return <Redirect href={firstAllowedMobileRoute(session.user)} />;
 }

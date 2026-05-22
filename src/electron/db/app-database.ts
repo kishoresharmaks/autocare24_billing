@@ -142,6 +142,7 @@ type BackupCreateOptions = {
 };
 
 const money = (value: number) => Math.round((Number.isFinite(value) ? value : 0) * 100) / 100;
+const PAID_AMOUNT_EXCEEDS_TOTAL_MESSAGE = "Entered paid amount is greater than billed amount.";
 const nowIso = () => new Date().toISOString();
 const EMPTY_JSON_OBJECT = "{}";
 const EMPTY_JSON_ARRAY = "[]";
@@ -2517,7 +2518,8 @@ export class AppDatabase {
     let savedVehicleId = input.vehicleId || "";
 
     const totals = this.calculateInvoice(input.invoiceMode, taxScope, input.items, finiteNumber(input.discount ?? 0, "Discount"));
-    const paidAmount = money(Math.min(Math.max(finiteNumber(input.paidAmount ?? 0, "Paid amount"), 0), totals.grandTotal));
+    const paidAmount = money(nonNegativeNumber(input.paidAmount ?? 0, "Paid amount"));
+    if (paidAmount > totals.grandTotal) throw new Error(PAID_AMOUNT_EXCEEDS_TOTAL_MESSAGE);
     const balanceDue = money(totals.grandTotal - paidAmount);
     const paymentStatus = this.paymentStatus(totals.grandTotal, paidAmount);
 
@@ -4597,7 +4599,10 @@ export class AppDatabase {
     });
     const discount = nonNegativeNumber(input.discount ?? 0, "Discount");
     if (discount > subTotal) throw new Error("Discount cannot be greater than subtotal.");
-    nonNegativeNumber(input.paidAmount ?? 0, "Paid amount");
+    const taxScope: TaxScope = input.taxScope === "inter" ? "inter" : "intra";
+    const paidAmount = money(nonNegativeNumber(input.paidAmount ?? 0, "Paid amount"));
+    const totals = this.calculateInvoice(normalizedMode, taxScope, input.items, discount);
+    if (paidAmount > totals.grandTotal) throw new Error(PAID_AMOUNT_EXCEEDS_TOTAL_MESSAGE);
   }
 
   private normalizeQuotationDraftItems(items: QuotationItemInput[]) {

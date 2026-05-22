@@ -7,6 +7,7 @@ import { CustomerSearchSelect } from "./CustomerSearchSelect";
 type DraftItem = InvoiceItemInput & { key: string };
 const paymentModes: PaymentMode[] = ["Cash", "UPI", "Card", "Bank Transfer", "Other"];
 const vehicleTypes: VehicleType[] = ["car", "bike", "other"];
+const PAID_AMOUNT_EXCEEDS_TOTAL_MESSAGE = "Entered paid amount is greater than billed amount.";
 
 const todayLocal = () => {
   const date = new Date();
@@ -154,6 +155,7 @@ export function NewBillPage({
   const selectedCustomer = customers.find((item) => item.id === selectedCustomerId);
   const vehicleOptions = selectedCustomer?.vehicles ?? [];
   const totals = useMemo(() => calculateDraft(mode, taxScope, items, discount), [mode, taxScope, items, discount]);
+  const paidAmountError = money(paidAmount) > money(totals.grandTotal) ? PAID_AMOUNT_EXCEEDS_TOTAL_MESSAGE : "";
   const balanceDue = money(totals.grandTotal - Math.min(Math.max(paidAmount, 0), totals.grandTotal));
 
   const buildPayload = (): InvoiceDraftPayload => ({
@@ -416,6 +418,10 @@ export function NewBillPage({
   };
 
   const finalizeInvoice = async () => {
+    if (paidAmountError) {
+      notify(paidAmountError);
+      return;
+    }
     clearAutosaveTimer();
     setSaving(true);
     try {
@@ -643,7 +649,8 @@ export function NewBillPage({
           </label>
           <label>
             Paid amount
-            <input type="number" min="0" value={paidAmount} onChange={(event) => setPaidAmount(Number(event.currentTarget.value))} />
+            <input type="number" min="0" max={totals.grandTotal} step="0.01" value={paidAmount} onChange={(event) => setPaidAmount(Number(event.currentTarget.value))} />
+            {paidAmountError && <span className="field-error">{paidAmountError}</span>}
           </label>
           <label>
             Payment mode
@@ -670,7 +677,7 @@ export function NewBillPage({
             <span>Balance due</span>
             <strong>{formatMoney(balanceDue)}</strong>
           </div>
-          <button className="primary-action" disabled={saving} onClick={finalizeInvoice}>
+          <button className="primary-action" disabled={saving || Boolean(paidAmountError)} onClick={finalizeInvoice}>
             <Save size={18} />
             {saving ? "Finalizing..." : "Finalize invoice"}
           </button>

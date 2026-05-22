@@ -20,6 +20,7 @@ import {
 } from "lucide-react-native";
 import type { LucideIcon } from "lucide-react-native";
 import {
+  fetchDashboard,
   fetchDevices,
   fetchInventoryDashboard,
   fetchInvoices,
@@ -34,8 +35,9 @@ import { buildActionItems, filterVisibleActionItems, loadDismissedActionIds, typ
 import { colors, radius } from "../../src/theme";
 import type { DateRangePreset, InvoiceSummary } from "../../src/types/cloud";
 import { formatCount, formatDate, formatMoney } from "../../src/utils/format";
-import { useRequireOwner } from "../../src/hooks/useRequireOwner";
+import { useRequirePermission } from "../../src/hooks/useRequireOwner";
 import { useSession } from "../../src/providers/SessionProvider";
+import { hasAnyPermission, hasPermission } from "../../src/services/permissions";
 
 const dashboardPreset: DateRangePreset = "30d";
 const weekPreset: DateRangePreset = "7d";
@@ -44,8 +46,13 @@ type DashboardRoute = "/action-center" | "/reports" | "/profit" | "/stock" | "/i
 type TileTone = "green" | "red" | "blue" | "purple" | "gold" | "plain";
 
 export default function DashboardTab() {
-  const guard = useRequireOwner();
+  const guard = useRequirePermission("dashboard.view");
   const session = useSession();
+  const canReports = hasPermission(session.user, "reports.view");
+  const canStock = hasPermission(session.user, "stock.view");
+  const canBilling = hasPermission(session.user, "billing.view");
+  const canUsers = hasPermission(session.user, "users.manage");
+  const canOpenActions = hasAnyPermission(session.user, ["reports.view", "stock.view", "billing.view", "users.manage"]);
   const [quickOpen, setQuickOpen] = useState(false);
   const [dismissedActionIds, setDismissedActionIds] = useState<string[]>([]);
 
@@ -61,50 +68,50 @@ export default function DashboardTab() {
     };
   }, []);
 
+  const dashboardQuery = useQuery({
+    queryKey: ["dashboard", session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchDashboard(session.cloudUrl, session.token, session.userToken),
+    enabled: Boolean(session.user && session.token && session.userToken && hasPermission(session.user, "dashboard.view"))
+  });
   const reportQuery = useQuery({
-    queryKey: ["report", dashboardPreset, session.cloudUrl, session.token],
-    queryFn: () => fetchReport(session.cloudUrl, session.token, dashboardPreset),
-    enabled: Boolean(session.user && session.token)
+    queryKey: ["report", dashboardPreset, session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchReport(session.cloudUrl, session.token, session.userToken, dashboardPreset),
+    enabled: Boolean(session.user && session.token && session.userToken && canReports)
   });
   const weekReportQuery = useQuery({
-    queryKey: ["report", weekPreset, session.cloudUrl, session.token],
-    queryFn: () => fetchReport(session.cloudUrl, session.token, weekPreset),
-    enabled: Boolean(session.user && session.token)
+    queryKey: ["report", weekPreset, session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchReport(session.cloudUrl, session.token, session.userToken, weekPreset),
+    enabled: Boolean(session.user && session.token && session.userToken && canReports)
   });
   const profitQuery = useQuery({
-    queryKey: ["profit", dashboardPreset, session.cloudUrl, session.token],
-    queryFn: () => fetchProfit(session.cloudUrl, session.token, dashboardPreset),
-    enabled: Boolean(session.user && session.token)
+    queryKey: ["profit", dashboardPreset, session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchProfit(session.cloudUrl, session.token, session.userToken, dashboardPreset),
+    enabled: Boolean(session.user && session.token && session.userToken && canReports)
   });
   const inventoryQuery = useQuery({
-    queryKey: ["inventory-dashboard", session.cloudUrl, session.token],
-    queryFn: () => fetchInventoryDashboard(session.cloudUrl, session.token),
-    enabled: Boolean(session.user && session.token)
+    queryKey: ["inventory-dashboard", session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchInventoryDashboard(session.cloudUrl, session.token, session.userToken),
+    enabled: Boolean(session.user && session.token && session.userToken && canStock)
   });
   const invoicesQuery = useQuery({
-    queryKey: ["invoices", session.cloudUrl, session.token, ""],
-    queryFn: () => fetchInvoices(session.cloudUrl, session.token, ""),
-    enabled: Boolean(session.user && session.token && session.approvalStatus === "APPROVED")
+    queryKey: ["invoices", session.cloudUrl, session.token, session.userToken, ""],
+    queryFn: () => fetchInvoices(session.cloudUrl, session.token, session.userToken, ""),
+    enabled: Boolean(session.user && session.token && session.userToken && canBilling && session.approvalStatus === "APPROVED")
   });
   const devicesQuery = useQuery({
-    queryKey: ["devices-summary", session.cloudUrl, session.token, session.ownerCredentials?.username],
-    queryFn: () =>
-      fetchDevices(
-        session.cloudUrl,
-        session.token,
-        session.ownerCredentials?.username || "",
-        session.ownerCredentials?.password || ""
-      ),
-    enabled: Boolean(session.user && session.token && session.ownerCredentials)
+    queryKey: ["devices-summary", session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchDevices(session.cloudUrl, session.token, session.userToken),
+    enabled: Boolean(session.user && session.token && session.userToken && canUsers)
   });
 
+  const dashboard = dashboardQuery.data;
   const report = reportQuery.data;
   const weekReport = weekReportQuery.data;
   const profit = profitQuery.data;
   const inventory = inventoryQuery.data;
   const invoices = invoicesQuery.data || [];
   const isRefreshing =
-    reportQuery.isFetching || weekReportQuery.isFetching || profitQuery.isFetching || inventoryQuery.isFetching || invoicesQuery.isFetching || devicesQuery.isFetching;
+    dashboardQuery.isFetching || reportQuery.isFetching || weekReportQuery.isFetching || profitQuery.isFetching || inventoryQuery.isFetching || invoicesQuery.isFetching || devicesQuery.isFetching;
 
   const transactions = useMemo(() => {
     return [...invoices]
@@ -125,7 +132,7 @@ export default function DashboardTab() {
         approved: session.approvalStatus === "APPROVED" ? 1 : 0,
         pending: session.approvalStatus === "PENDING" ? 1 : 0
       };
-  const firstError = [reportQuery.error, weekReportQuery.error, profitQuery.error, inventoryQuery.error, invoicesQuery.error, devicesQuery.error].find(Boolean);
+  const firstError = [dashboardQuery.error, reportQuery.error, weekReportQuery.error, profitQuery.error, inventoryQuery.error, invoicesQuery.error, devicesQuery.error].find(Boolean);
   const allActionItems = useMemo(
     () =>
       buildActionItems({
@@ -143,14 +150,14 @@ export default function DashboardTab() {
   if (guard) return guard;
 
   async function refreshAll() {
-    const refreshes: Array<Promise<unknown>> = [
-      reportQuery.refetch(),
-      weekReportQuery.refetch(),
-      profitQuery.refetch(),
-      inventoryQuery.refetch(),
-      invoicesQuery.refetch()
-    ];
-    if (session.ownerCredentials) refreshes.push(devicesQuery.refetch());
+    const refreshes: Array<Promise<unknown>> = [];
+    refreshes.push(dashboardQuery.refetch());
+    if (canReports) {
+      refreshes.push(reportQuery.refetch(), weekReportQuery.refetch(), profitQuery.refetch());
+    }
+    if (canStock) refreshes.push(inventoryQuery.refetch());
+    if (canBilling) refreshes.push(invoicesQuery.refetch());
+    if (canUsers) refreshes.push(devicesQuery.refetch());
     await Promise.all(refreshes);
   }
 
@@ -158,26 +165,26 @@ export default function DashboardTab() {
     <View style={styles.quickFooter}>
       {quickOpen ? (
         <View style={styles.quickSheet}>
-          <QuickSheetItem icon={ClipboardList} label="Action Center" route="/action-center" />
+          {canOpenActions ? <QuickSheetItem icon={ClipboardList} label="Action Center" route="/action-center" /> : null}
           <QuickSheetItem icon={RefreshCw} label="Refresh all" onPress={() => void refreshAll()} />
-          <QuickSheetItem icon={Wallet} label="Pending dues" route="/reports" />
-          <QuickSheetItem icon={LogOut} label="Logout owner" onPress={() => void logoutOwner()} tone="danger" />
+          {canReports ? <QuickSheetItem icon={Wallet} label="Pending dues" route="/reports" /> : null}
+          <QuickSheetItem icon={LogOut} label="Logout user" onPress={() => void logoutOwner()} tone="danger" />
         </View>
       ) : null}
       <View style={styles.quickBar}>
-        <Pressable accessibilityRole="button" onPress={() => router.push("/reports")} style={({ pressed }) => [styles.quickButton, styles.quickButtonDark, pressed ? styles.pressed : null]}>
+        {canReports ? <Pressable accessibilityRole="button" onPress={() => router.push("/reports")} style={({ pressed }) => [styles.quickButton, styles.quickButtonDark, pressed ? styles.pressed : null]}>
           <Text style={styles.quickButtonDarkText} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.78}>
             View Dues
           </Text>
-        </Pressable>
+        </Pressable> : <View style={styles.quickButton} />}
         <Pressable accessibilityRole="button" onPress={() => setQuickOpen((value) => !value)} style={({ pressed }) => [styles.plusButton, pressed ? styles.pressed : null]}>
           <Plus color="#ffffff" size={28} />
         </Pressable>
-        <Pressable accessibilityRole="button" onPress={() => router.push("/invoices")} style={({ pressed }) => [styles.quickButton, styles.quickButtonPrimary, pressed ? styles.pressed : null]}>
+        {canBilling ? <Pressable accessibilityRole="button" onPress={() => router.push("/invoices")} style={({ pressed }) => [styles.quickButton, styles.quickButtonPrimary, pressed ? styles.pressed : null]}>
           <Text style={styles.quickButtonPrimaryText} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
             Search Invoices
           </Text>
-        </Pressable>
+        </Pressable> : <View style={styles.quickButton} />}
       </View>
     </View>
   );
@@ -191,7 +198,7 @@ export default function DashboardTab() {
               Autocare24
             </Text>
             <Text style={styles.brandSub} numberOfLines={1}>
-              {session.user?.displayName || session.user?.username || "Owner dashboard"}
+              {session.user?.displayName || session.user?.username || "Dashboard"}
             </Text>
           </View>
         </View>
@@ -203,24 +210,27 @@ export default function DashboardTab() {
       ) : null}
 
       <View style={styles.kpiGrid}>
-        <KpiTile title="To Collect" value={formatMoney(report?.balanceDue)} subtitle="Pending dues" icon={Wallet} route="/reports" tone="green" />
-        <KpiTile title="Expenses" value={formatMoney(profit?.expenseTotal)} subtitle="This period" icon={FileText} route="/profit" tone="red" />
-        <KpiTile title="Stock Value" value={formatMoney(inventory?.totalStockValue)} subtitle="Value of items" icon={Package} tone="blue" />
-        <KpiTile title="This Week Sale" value={formatMoney(weekReport?.revenue)} subtitle="Last 7 days" icon={ReceiptText} tone="blue" />
-        <KpiTile
+        <KpiTile title="Today Revenue" value={formatMoney(dashboard?.todayRevenue)} subtitle="Collected today" icon={Wallet} tone="green" />
+        <KpiTile title="Month Revenue" value={formatMoney(dashboard?.monthRevenue)} subtitle="This month" icon={BarChart3} tone="purple" />
+        <KpiTile title="To Collect" value={formatMoney(canReports ? report?.balanceDue : dashboard?.pendingDues)} subtitle="Pending dues" icon={Wallet} route={canReports ? "/reports" : undefined} tone="green" />
+        {canReports ? <KpiTile title="Expenses" value={formatMoney(profit?.expenseTotal)} subtitle="This period" icon={FileText} route="/profit" tone="red" /> : null}
+        {canStock ? <KpiTile title="Stock Value" value={formatMoney(inventory?.totalStockValue)} subtitle="Value of items" icon={Package} route="/stock" tone="blue" /> : null}
+        {canReports ? <KpiTile title="This Week Sale" value={formatMoney(weekReport?.revenue)} subtitle="Last 7 days" icon={ReceiptText} route="/reports" tone="blue" /> : null}
+        {canReports ? <KpiTile
           title="Cash Profit"
           value={formatMoney(profit?.cashProfit)}
           subtitle="Paid revenue less costs"
           icon={CircleDollarSign}
           route="/profit"
           tone={(profit?.cashProfit || 0) >= 0 ? "plain" : "red"}
-        />
-        <KpiTile title="Invoices" value={formatCount(report?.invoiceCount)} subtitle="Final bills" icon={BarChart3} tone="purple" />
+        /> : null}
+        <KpiTile title="Today Bills" value={formatCount(dashboard?.todayInvoices)} subtitle="Invoices today" icon={ReceiptText} route={canBilling ? "/invoices" : undefined} tone="plain" />
+        {canBilling ? <KpiTile title="Invoices" value={formatCount(report?.invoiceCount || invoices.length)} subtitle="Final bills" icon={BarChart3} route="/invoices" tone="purple" /> : null}
       </View>
 
-      <ActionSummary actions={visibleActionItems.slice(0, 3)} totalCount={visibleActionItems.length} />
+      {canOpenActions ? <ActionSummary actions={visibleActionItems.slice(0, 3)} totalCount={visibleActionItems.length} /> : null}
 
-      <Pressable accessibilityRole="button" onPress={() => router.push("/devices")} style={({ pressed }) => [styles.deviceRow, pressed ? styles.pressed : null]}>
+      {canUsers ? <Pressable accessibilityRole="button" onPress={() => router.push("/devices")} style={({ pressed }) => [styles.deviceRow, pressed ? styles.pressed : null]}>
         <View style={styles.deviceIcon}>
           <MonitorSmartphone color={colors.primary} size={22} />
         </View>
@@ -234,20 +244,20 @@ export default function DashboardTab() {
         </View>
         <StatusPill status={session.approvalStatus} />
         <ChevronRight color={colors.primary} size={20} />
-      </Pressable>
+      </Pressable> : null}
 
-      <View style={styles.transactionsHeader}>
+      {canBilling ? <View style={styles.transactionsHeader}>
         <View>
           <Text style={styles.sectionTitle}>Transactions</Text>
           <Text style={styles.sectionSub}>Recent synced invoices</Text>
         </View>
-        <Pressable accessibilityRole="button" onPress={() => router.push("/reports")} style={({ pressed }) => [styles.rangeButton, pressed ? styles.pressed : null]}>
+        <Pressable accessibilityRole="button" onPress={() => router.push(canReports ? "/reports" : "/invoices")} style={({ pressed }) => [styles.rangeButton, pressed ? styles.pressed : null]}>
           <CalendarDays color={colors.primary} size={18} />
           <Text style={styles.rangeText}>LAST 30 DAYS</Text>
         </Pressable>
-      </View>
+      </View> : null}
 
-      <View style={styles.transactionPanel}>
+      {canBilling ? <View style={styles.transactionPanel}>
         {transactions.map((invoice) => (
           <TransactionRow key={invoice.id} invoice={invoice} />
         ))}
@@ -258,14 +268,14 @@ export default function DashboardTab() {
             <Text style={styles.emptySub}>Synced cloud invoices will appear here after billing starts.</Text>
           </View>
         ) : null}
-      </View>
+      </View> : null}
 
     </Screen>
   );
 
   async function logoutOwner() {
     setQuickOpen(false);
-    await session.logoutOwner();
+    await session.logoutUser();
     router.replace("/login");
   }
 }

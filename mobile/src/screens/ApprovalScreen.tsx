@@ -39,12 +39,12 @@ export function ApprovalScreen() {
     <AuthLayout>
       <StatusPill status={session.approvalStatus || "PENDING"} />
       <Text style={styles.title} numberOfLines={2}>
-        {revoked ? "Phone access revoked" : "Waiting for owner approval"}
+        {revoked ? "Phone access revoked" : "Waiting for approval"}
       </Text>
       <Text style={styles.copy}>
         {revoked
-          ? "This phone cannot view reports. Clear this connection and request access again if the owner allows it."
-          : "Approve this phone from the owner PC under Settings > Cloud Status > Cloud Devices."}
+          ? "This phone cannot view cloud data. Clear this connection and request access again if an authorized user allows it."
+          : "Approve this phone from the desktop app under Settings > Cloud Status > Cloud Devices."}
       </Text>
       <View style={styles.codeBox}>
         <Text style={styles.codeLabel}>Phone code</Text>

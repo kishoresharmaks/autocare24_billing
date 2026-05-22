@@ -15,16 +15,22 @@ import {
   type ActionItemType
 } from "../../src/services/actionCenter";
 import { fetchDevices, fetchInventoryDashboard, fetchInvoices, fetchProfit, fetchReport } from "../../src/services/cloudApi";
-import { useRequireOwner } from "../../src/hooks/useRequireOwner";
+import { useRequirePermission } from "../../src/hooks/useRequireOwner";
 import { useSession } from "../../src/providers/SessionProvider";
+import { hasAnyPermission, hasPermission } from "../../src/services/permissions";
 import { colors, radius } from "../../src/theme";
 import type { DateRangePreset } from "../../src/types/cloud";
 
 const actionPreset: DateRangePreset = "30d";
 
 export default function ActionCenterTab() {
-  const guard = useRequireOwner();
+  const guard = useRequirePermission(["reports.view", "stock.view", "billing.view", "users.manage"]);
   const session = useSession();
+  const canReports = hasPermission(session.user, "reports.view");
+  const canStock = hasPermission(session.user, "stock.view");
+  const canBilling = hasPermission(session.user, "billing.view");
+  const canUsers = hasPermission(session.user, "users.manage");
+  const canViewActions = hasAnyPermission(session.user, ["reports.view", "stock.view", "billing.view", "users.manage"]);
   const [dismissedIds, setDismissedIds] = useState<string[]>([]);
 
   useEffect(() => {
@@ -40,35 +46,29 @@ export default function ActionCenterTab() {
   }, []);
 
   const reportQuery = useQuery({
-    queryKey: ["report", actionPreset, session.cloudUrl, session.token],
-    queryFn: () => fetchReport(session.cloudUrl, session.token, actionPreset),
-    enabled: Boolean(session.user && session.token)
+    queryKey: ["report", actionPreset, session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchReport(session.cloudUrl, session.token, session.userToken, actionPreset),
+    enabled: Boolean(session.user && session.token && session.userToken && canReports)
   });
   const profitQuery = useQuery({
-    queryKey: ["profit", actionPreset, session.cloudUrl, session.token],
-    queryFn: () => fetchProfit(session.cloudUrl, session.token, actionPreset),
-    enabled: Boolean(session.user && session.token)
+    queryKey: ["profit", actionPreset, session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchProfit(session.cloudUrl, session.token, session.userToken, actionPreset),
+    enabled: Boolean(session.user && session.token && session.userToken && canReports)
   });
   const inventoryQuery = useQuery({
-    queryKey: ["inventory-dashboard", session.cloudUrl, session.token],
-    queryFn: () => fetchInventoryDashboard(session.cloudUrl, session.token),
-    enabled: Boolean(session.user && session.token)
+    queryKey: ["inventory-dashboard", session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchInventoryDashboard(session.cloudUrl, session.token, session.userToken),
+    enabled: Boolean(session.user && session.token && session.userToken && canStock)
   });
   const invoicesQuery = useQuery({
-    queryKey: ["invoices", session.cloudUrl, session.token, ""],
-    queryFn: () => fetchInvoices(session.cloudUrl, session.token, ""),
-    enabled: Boolean(session.user && session.token && session.approvalStatus === "APPROVED")
+    queryKey: ["invoices", session.cloudUrl, session.token, session.userToken, ""],
+    queryFn: () => fetchInvoices(session.cloudUrl, session.token, session.userToken, ""),
+    enabled: Boolean(session.user && session.token && session.userToken && canBilling && session.approvalStatus === "APPROVED")
   });
   const devicesQuery = useQuery({
-    queryKey: ["devices-summary", session.cloudUrl, session.token, session.ownerCredentials?.username],
-    queryFn: () =>
-      fetchDevices(
-        session.cloudUrl,
-        session.token,
-        session.ownerCredentials?.username || "",
-        session.ownerCredentials?.password || ""
-      ),
-    enabled: Boolean(session.user && session.token && session.ownerCredentials)
+    queryKey: ["devices-summary", session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchDevices(session.cloudUrl, session.token, session.userToken),
+    enabled: Boolean(session.user && session.token && session.userToken && canUsers)
   });
 
   const firstError = [reportQuery.error, profitQuery.error, inventoryQuery.error, invoicesQuery.error, devicesQuery.error].find(Boolean);
@@ -81,9 +81,9 @@ export default function ActionCenterTab() {
         profit: profitQuery.data,
         devices: devicesQuery.data,
         isOnline: session.isOnline,
-        hasCloudError: Boolean(firstError)
+        hasCloudError: Boolean(firstError && canViewActions)
       }),
-    [devicesQuery.data, firstError, inventoryQuery.data, profitQuery.data, reportQuery.data, session.isOnline]
+    [canViewActions, devicesQuery.data, firstError, inventoryQuery.data, profitQuery.data, reportQuery.data, session.isOnline]
   );
   const visibleActions = useMemo(() => filterVisibleActionItems(allActions, dismissedIds), [allActions, dismissedIds]);
   const hiddenCount = Math.max(0, allActions.length - visibleActions.length);
@@ -91,8 +91,11 @@ export default function ActionCenterTab() {
   if (guard) return guard;
 
   async function refreshAll() {
-    const refreshes: Array<Promise<unknown>> = [reportQuery.refetch(), profitQuery.refetch(), inventoryQuery.refetch(), invoicesQuery.refetch()];
-    if (session.ownerCredentials) refreshes.push(devicesQuery.refetch());
+    const refreshes: Array<Promise<unknown>> = [];
+    if (canReports) refreshes.push(reportQuery.refetch(), profitQuery.refetch());
+    if (canStock) refreshes.push(inventoryQuery.refetch());
+    if (canBilling) refreshes.push(invoicesQuery.refetch());
+    if (canUsers) refreshes.push(devicesQuery.refetch());
     await Promise.all(refreshes);
   }
 

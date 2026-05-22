@@ -17,25 +17,26 @@ import {
 } from "../../src/services/invoicePdfShare";
 import { colors } from "../../src/theme";
 import { formatDate, formatMoney, titleCase } from "../../src/utils/format";
-import { useRequireOwner } from "../../src/hooks/useRequireOwner";
+import { useRequirePermission } from "../../src/hooks/useRequireOwner";
 import { useSession } from "../../src/providers/SessionProvider";
+import { hasPermission } from "../../src/services/permissions";
 import type { BusinessSettings, InvoiceDetail, InvoiceItem, Payment } from "../../src/types/cloud";
 
 export default function InvoiceDetailScreen() {
-  const guard = useRequireOwner();
+  const guard = useRequirePermission("billing.view");
   const session = useSession();
   const params = useLocalSearchParams<{ id?: string | string[] }>();
   const invoiceId = Array.isArray(params.id) ? params.id[0] || "" : params.id || "";
 
   const invoiceQuery = useQuery({
-    queryKey: ["invoice", session.cloudUrl, session.token, invoiceId],
-    queryFn: () => fetchInvoice(session.cloudUrl, session.token, invoiceId),
-    enabled: Boolean(session.user && session.token && invoiceId && session.approvalStatus === "APPROVED")
+    queryKey: ["invoice", session.cloudUrl, session.token, session.userToken, invoiceId],
+    queryFn: () => fetchInvoice(session.cloudUrl, session.token, session.userToken, invoiceId),
+    enabled: Boolean(session.user && session.token && session.userToken && invoiceId && session.approvalStatus === "APPROVED")
   });
   const settingsQuery = useQuery({
-    queryKey: ["business-settings", session.cloudUrl, session.token],
-    queryFn: () => fetchBusinessSettings(session.cloudUrl, session.token),
-    enabled: Boolean(session.user && session.token && session.approvalStatus === "APPROVED")
+    queryKey: ["business-settings", session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchBusinessSettings(session.cloudUrl, session.token, session.userToken),
+    enabled: Boolean(session.user && session.token && session.userToken && session.approvalStatus === "APPROVED")
   });
 
   if (guard) return guard;
@@ -198,8 +199,15 @@ function InvoiceSharePanel({
   const [sharingAgain, setSharingAgain] = useState(false);
   const [lastPdf, setLastPdf] = useState<PreparedInvoicePdf | null>(null);
   const phone = normalizeWhatsAppPhone(invoice.customer?.phone || invoice.customerPhone);
+  const canPrintPdf = hasPermission(session.user, "documents.printPdf");
+  const canShareWhatsapp = hasPermission(session.user, "sharing.whatsapp");
   const blockReason = invoiceShareBlockReason(invoice, phone);
-  const disabled = Boolean(blockReason || preparingPdf || openingWhatsapp || sharingAgain);
+  const accessBlockReason = !canPrintPdf
+    ? "This role cannot print invoice PDF files."
+    : !canShareWhatsapp
+      ? "This role cannot share invoices on WhatsApp."
+      : "";
+  const disabled = Boolean(accessBlockReason || blockReason || preparingPdf || openingWhatsapp || sharingAgain);
 
   const openChat = async () => {
     setOpeningWhatsapp(true);
@@ -219,7 +227,11 @@ function InvoiceSharePanel({
     }
     setPreparingPdf(true);
     try {
-      const pdf = await prepareInvoicePdf({ invoice, settings, cloudUrl: session.cloudUrl, token: session.token });
+      if (accessBlockReason) {
+        Alert.alert("No access for this role", accessBlockReason);
+        return;
+      }
+      const pdf = await prepareInvoicePdf({ invoice, settings, cloudUrl: session.cloudUrl, token: session.token, userToken: session.userToken });
       await sharePreparedInvoicePdf(pdf);
       setLastPdf(pdf);
       Alert.alert(
@@ -264,7 +276,7 @@ function InvoiceSharePanel({
       <Text style={styles.shareHelp}>
         Generate the invoice PDF, choose WhatsApp in the share sheet, then send it to the loaded customer number.
       </Text>
-      {blockReason ? <Text style={styles.error}>{blockReason}</Text> : null}
+      {accessBlockReason || blockReason ? <Text style={styles.error}>{accessBlockReason || blockReason}</Text> : null}
       <View style={styles.shareActions}>
         <AppButton
           label={preparingPdf ? "Preparing PDF..." : "Send PDF on WhatsApp"}

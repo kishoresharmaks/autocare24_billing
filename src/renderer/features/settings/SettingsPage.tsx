@@ -467,12 +467,14 @@ export function SettingsPage({
   setSettings,
   notify,
   currentUser,
+  onLogout,
   onChanged
 }: {
   settings: BusinessSettings;
   setSettings: (settings: BusinessSettings) => void;
   notify: (message: string) => void;
   currentUser: AppUser;
+  onLogout: () => void;
   onChanged: () => void;
 }) {
   const [form, setForm] = useState(settings);
@@ -913,7 +915,8 @@ export function SettingsPage({
       setCurrentPassword("");
       setNewPassword("");
       setConfirmNewPassword("");
-      notify("Password changed.");
+      notify("Password changed. Login again with the new password.");
+      onLogout();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to change password.");
     }

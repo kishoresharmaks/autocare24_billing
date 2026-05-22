@@ -27,6 +27,8 @@ mobile/expo-env.d.ts
 *.keystore
 
 # Environment and local runtime data
+tokens.txt
+docs/tokens.txt
 .env
 .env.*
 !.env.example

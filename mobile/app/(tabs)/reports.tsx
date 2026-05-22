@@ -44,8 +44,9 @@ import type {
   ReportDateFilter
 } from "../../src/types/cloud";
 import { formatCount, formatDate, formatDateTime, formatMoney, titleCase } from "../../src/utils/format";
-import { useRequireOwner } from "../../src/hooks/useRequireOwner";
+import { useRequirePermission } from "../../src/hooks/useRequireOwner";
 import { useSession } from "../../src/providers/SessionProvider";
+import { hasPermission } from "../../src/services/permissions";
 
 type ReportRangeMode = DateRangePreset | "custom";
 type CustomReportDateFilter = { fromDate: string; toDate: string; preset?: "" };
@@ -68,8 +69,10 @@ const REPORT_CATEGORIES: CategoryConfig[] = [
 ];
 
 export default function ReportsTab() {
-  const guard = useRequireOwner();
+  const guard = useRequirePermission("reports.view");
   const session = useSession();
+  const canExport = hasPermission(session.user, "reports.export");
+  const canBilling = hasPermission(session.user, "billing.view");
   const [rangeMode, setRangeMode] = useState<ReportRangeMode>("30d");
   const [selectedCategory, setSelectedCategory] = useState<ReportCategoryId | null>(null);
   const [draftFromDate, setDraftFromDate] = useState(defaultFromDate());
@@ -83,31 +86,31 @@ export default function ReportsTab() {
   const reportFilter = useMemo<ReportDateFilter>(() => (rangeMode === "custom" ? appliedCustomRange : rangeMode), [appliedCustomRange, rangeMode]);
   const reportFilterKey = typeof reportFilter === "string" ? reportFilter : `custom:${reportFilter.fromDate || ""}:${reportFilter.toDate || ""}`;
   const reportQuery = useQuery({
-    queryKey: ["report", reportFilterKey, session.cloudUrl, session.token],
-    queryFn: () => fetchReport(session.cloudUrl, session.token, reportFilter),
-    enabled: Boolean(session.user && session.token)
+    queryKey: ["report", reportFilterKey, session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchReport(session.cloudUrl, session.token, session.userToken, reportFilter),
+    enabled: Boolean(session.user && session.token && session.userToken && hasPermission(session.user, "reports.view"))
   });
   const profitQuery = useQuery({
-    queryKey: ["profit", reportFilterKey, session.cloudUrl, session.token],
-    queryFn: () => fetchProfit(session.cloudUrl, session.token, reportFilter),
-    enabled: Boolean(session.user && session.token)
+    queryKey: ["profit", reportFilterKey, session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchProfit(session.cloudUrl, session.token, session.userToken, reportFilter),
+    enabled: Boolean(session.user && session.token && session.userToken && hasPermission(session.user, "reports.view"))
   });
   const invoicesQuery = useQuery({
-    queryKey: ["report-export-invoices", session.cloudUrl, session.token],
-    queryFn: () => fetchInvoices(session.cloudUrl, session.token, ""),
-    enabled: Boolean(session.user && session.token && session.approvalStatus === "APPROVED")
+    queryKey: ["report-export-invoices", session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchInvoices(session.cloudUrl, session.token, session.userToken, ""),
+    enabled: Boolean(session.user && session.token && session.userToken && canBilling && session.approvalStatus === "APPROVED")
   });
   const report = reportQuery.data;
   const profit = profitQuery.data;
   const selectedConfig = REPORT_CATEGORIES.find((category) => category.id === selectedCategory) || null;
   const isRefreshing = reportQuery.isFetching || profitQuery.isFetching || invoicesQuery.isFetching;
-  const globalExportDisabled = !report || isRefreshing || Boolean(reportQuery.error || profitQuery.error || invoicesQuery.error);
+  const globalExportDisabled = !canExport || !report || isRefreshing || Boolean(reportQuery.error || profitQuery.error || invoicesQuery.error);
   const categoryExportDisabled = selectedCategory
     ? selectedCategory === "profit"
-      ? !profit || profitQuery.isFetching || Boolean(profitQuery.error)
+      ? !canExport || !profit || profitQuery.isFetching || Boolean(profitQuery.error)
       : selectedCategory === "sales"
-        ? !report || reportQuery.isFetching || invoicesQuery.isFetching || Boolean(reportQuery.error || invoicesQuery.error)
-        : !report || reportQuery.isFetching || Boolean(reportQuery.error)
+        ? !canExport || !report || reportQuery.isFetching || invoicesQuery.isFetching || Boolean(reportQuery.error || invoicesQuery.error)
+        : !canExport || !report || reportQuery.isFetching || Boolean(reportQuery.error)
     : true;
 
   if (guard) return guard;
@@ -158,7 +161,7 @@ export default function ReportsTab() {
   return (
     <Screen
       title={selectedConfig?.title || "Reports"}
-      subtitle={selectedConfig?.subtitle || "Focused owner review across sales, dues, stock, jobs, and profit"}
+      subtitle={selectedConfig?.subtitle || "Focused role-based review across sales, dues, stock, jobs, and profit"}
       right={<RangeSelector<ReportRangeMode> value={rangeMode} onChange={setRangeMode} includeCustom />}
       refreshing={isRefreshing}
       onRefresh={refreshAll}

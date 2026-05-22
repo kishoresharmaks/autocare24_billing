@@ -1625,66 +1625,56 @@ const registerIpcHandlers = () => {
   ipcMain.handle("updates:download", authenticated(() => appUpdates().downloadUpdate()));
   ipcMain.handle("updates:install", authenticated(() => appUpdates().installUpdate()));
   ipcMain.handle("auth:status", async () => {
-    if (currentSession) {
-      const sessionId = currentSession.id;
-      try {
-        const freshUser = await cloudData().getUserById(sessionId);
-        currentSession = freshUser?.active ? freshUser : null;
-      } catch {
-        const freshUser = database.getUserById(sessionId);
-        currentSession = freshUser?.active ? freshUser : null;
-      }
+    const syncStatus = await cloudSync().checkStatus();
+    if (!syncStatus.connected || syncStatus.state === "error" || syncStatus.state === "pending_approval") {
+      currentSession = null;
+      return { hasUsers: false, currentUser: null };
     }
-    try {
-      return { ...(await cloudData().authStatus()), currentUser: currentSession };
-    } catch {
-      return { ...database.getAuthStatus(), currentUser: currentSession };
-    }
+    if (currentSession && !currentSession.active) currentSession = null;
+    return { ...(await cloudData().authStatus()), currentUser: currentSession };
   });
   ipcMain.handle("auth:existingBusinessStatus", () => cloudSync().checkStatus());
   ipcMain.handle("auth:connectExistingBusiness", async (_event, input: SyncConnectInput) => {
     currentSession = null;
+    cloudSync().clearUserSessionToken();
     return cloudSync().connect(input);
   });
   ipcMain.handle("auth:checkExistingBusinessApproval", async () => {
     currentSession = null;
+    cloudSync().clearUserSessionToken();
     return cloudSync().checkDeviceApproval();
   });
   ipcMain.handle("auth:setupOwner", async (_event, input: SetupOwnerInput) => {
-    let user: AppUser;
+    cloudSync().clearUserSessionToken();
     const syncStatus = cloudSync().status();
+    if (!syncStatus.connected) {
+      throw new Error("Connect this PC to Cloud API before creating the owner account.");
+    }
     if (syncStatus.approvalStatus === "PENDING" || syncStatus.state === "pending_approval") {
       throw new Error("This PC is waiting for existing business approval. Use staff login after owner approval instead of creating a new owner.");
     }
-    try {
-      user = await cloudData().setupOwner(input);
-      if (!database.getAuthStatus().hasUsers) {
-        try {
-          database.setupOwner(input, user.id);
-          logAppEvent("info", "Owner account mirrored to local database", { username: user.username });
-        } catch (mirrorError) {
-          logAppEvent("warn", "Cloud owner account was created but local mirror failed", {
-            username: user.username,
-            message: mirrorError instanceof Error ? mirrorError.message : String(mirrorError)
-          });
-        }
+    const user = await cloudData().setupOwner(input);
+    if (!database.getAuthStatus().hasUsers) {
+      try {
+        database.setupOwner(input, user.id);
+        logAppEvent("info", "Owner account mirrored to local database", { username: user.username });
+      } catch (mirrorError) {
+        logAppEvent("warn", "Cloud owner account was created but local mirror failed", {
+          username: user.username,
+          message: mirrorError instanceof Error ? mirrorError.message : String(mirrorError)
+        });
       }
-    } catch (error) {
-      if (cloudSync().status().connected) throw error;
-      user = database.setupOwner(input);
     }
     currentSession = user;
     logAppEvent("info", "Owner account configured", { username: user.username });
     return user;
   });
   ipcMain.handle("auth:login", async (_event, input: LoginInput) => {
-    let user: AppUser;
-    try {
-      user = await cloudData().login(input);
-    } catch (error) {
-      if (cloudSync().status().connected) throw error;
-      user = database.login(input);
+    cloudSync().clearUserSessionToken();
+    if (!cloudSync().status().connected) {
+      throw new Error("Cloud connection required. Connect this PC before login.");
     }
+    const user = await cloudData().login(input);
     currentSession = user;
     logAppEvent("info", "User login", { username: user.username, role: user.role });
     return user;
@@ -1692,6 +1682,7 @@ const registerIpcHandlers = () => {
   ipcMain.handle("auth:logout", () => {
     logAppEvent("info", "User logout", { username: currentSession?.username || "" });
     currentSession = null;
+    cloudSync().clearUserSessionToken();
     return true;
   });
   ipcMain.handle("users:list", permitted("users.manage", () => cloudData().listUsers()));

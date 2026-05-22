@@ -23,6 +23,23 @@ CREATE TABLE IF NOT EXISTS devices (
   CONSTRAINT fk_devices_business FOREIGN KEY (business_id) REFERENCES businesses(id)
 );
 
+CREATE TABLE IF NOT EXISTS user_sessions (
+  id VARCHAR(36) PRIMARY KEY,
+  business_id INT NOT NULL,
+  device_id VARCHAR(36) NOT NULL,
+  user_id VARCHAR(36) NOT NULL,
+  token_hash VARCHAR(128) NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NOT NULL,
+  last_seen_at DATETIME DEFAULT NULL,
+  revoked_at DATETIME DEFAULT NULL,
+  UNIQUE KEY uq_user_sessions_token_hash (token_hash),
+  KEY idx_user_sessions_user (business_id, user_id, revoked_at, expires_at),
+  KEY idx_user_sessions_device (business_id, device_id, revoked_at, expires_at),
+  CONSTRAINT fk_user_sessions_business FOREIGN KEY (business_id) REFERENCES businesses(id),
+  CONSTRAINT fk_user_sessions_device FOREIGN KEY (device_id) REFERENCES devices(id)
+);
+
 CREATE TABLE IF NOT EXISTS business_records (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   business_id INT NOT NULL,

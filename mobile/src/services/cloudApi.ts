@@ -4,6 +4,7 @@ import type {
   ApiEnvelope,
   BusinessSettings,
   CloudDeviceSummary,
+  DashboardData,
   DeviceApprovalStatusResult,
   DeviceRegistrationResult,
   DevicesListResult,
@@ -34,6 +35,7 @@ export class CloudApiError extends Error {
 type RequestOptions = {
   method?: "GET" | "POST" | "DELETE";
   token?: string;
+  userToken?: string;
   body?: Record<string, unknown>;
 };
 
@@ -63,7 +65,8 @@ async function request<T>(cloudUrl: string, path: string, options: RequestOption
       method: options.method || "GET",
       headers: {
         "content-type": "application/json",
-        ...(options.token ? { authorization: `Bearer ${options.token}` } : {})
+        ...(options.token ? { authorization: `Bearer ${options.token}` } : {}),
+        ...(options.userToken ? { "x-autocare-user-token": options.userToken } : {})
       },
       body: options.body ? JSON.stringify(options.body) : undefined
     });
@@ -117,13 +120,15 @@ export async function checkDeviceApproval(cloudUrl: string, token: string): Prom
   return request<DeviceApprovalStatusResult>(cloudUrl, "/api/v1/auth/devices/current/status", { token });
 }
 
-export async function loginOwner(cloudUrl: string, token: string, username: string, password: string): Promise<LoginResult> {
+export async function loginUser(cloudUrl: string, token: string, username: string, password: string): Promise<LoginResult> {
   return request<LoginResult>(cloudUrl, "/api/v1/auth/login", {
     method: "POST",
     token,
     body: { username, password }
   });
 }
+
+export const loginOwner = loginUser;
 
 function reportFilterPath(endpoint: "reports" | "profit", filter: ReportDateFilter): string {
   if (typeof filter === "string") {
@@ -137,34 +142,39 @@ function reportFilterPath(endpoint: "reports" | "profit", filter: ReportDateFilt
   return `/api/v1/${endpoint}?filterJson=${encodeURIComponent(JSON.stringify(payload))}`;
 }
 
-export async function fetchReport(cloudUrl: string, token: string, filter: ReportDateFilter): Promise<ReportData> {
-  const data = await request<{ report: ReportData }>(cloudUrl, reportFilterPath("reports", filter), { token });
+export async function fetchReport(cloudUrl: string, token: string, userToken: string, filter: ReportDateFilter): Promise<ReportData> {
+  const data = await request<{ report: ReportData }>(cloudUrl, reportFilterPath("reports", filter), { token, userToken });
   return data.report;
 }
 
-export async function fetchProfit(cloudUrl: string, token: string, filter: ReportDateFilter): Promise<ProfitReportData> {
-  const data = await request<{ profit: ProfitReportData }>(cloudUrl, reportFilterPath("profit", filter), { token });
+export async function fetchProfit(cloudUrl: string, token: string, userToken: string, filter: ReportDateFilter): Promise<ProfitReportData> {
+  const data = await request<{ profit: ProfitReportData }>(cloudUrl, reportFilterPath("profit", filter), { token, userToken });
   return data.profit;
 }
 
-export async function fetchInventoryDashboard(cloudUrl: string, token: string): Promise<InventoryDashboardData> {
-  const data = await request<{ dashboard: InventoryDashboardData }>(cloudUrl, "/api/v1/inventory/dashboard", { token });
+export async function fetchInventoryDashboard(cloudUrl: string, token: string, userToken: string): Promise<InventoryDashboardData> {
+  const data = await request<{ dashboard: InventoryDashboardData }>(cloudUrl, "/api/v1/inventory/dashboard", { token, userToken });
   return data.dashboard;
 }
 
-async function fetchCloudRecords<T>(cloudUrl: string, token: string, entity: string, includeInactive = false): Promise<T[]> {
+export async function fetchDashboard(cloudUrl: string, token: string, userToken: string): Promise<DashboardData> {
+  const data = await request<{ dashboard: DashboardData }>(cloudUrl, "/api/v1/dashboard", { token, userToken });
+  return data.dashboard;
+}
+
+async function fetchCloudRecords<T>(cloudUrl: string, token: string, userToken: string, entity: string, includeInactive = false): Promise<T[]> {
   const params = includeInactive ? "?includeInactive=true" : "";
-  const data = await request<CloudRecordsResponse<T>>(cloudUrl, `/api/v1/records/${encodeURIComponent(entity)}${params}`, { token });
+  const data = await request<CloudRecordsResponse<T>>(cloudUrl, `/api/v1/records/${encodeURIComponent(entity)}${params}`, { token, userToken });
   return data.items || [];
 }
 
-export async function fetchSuppliers(cloudUrl: string, token: string): Promise<Supplier[]> {
-  const suppliers = await fetchCloudRecords<Supplier>(cloudUrl, token, "suppliers");
+export async function fetchSuppliers(cloudUrl: string, token: string, userToken: string): Promise<Supplier[]> {
+  const suppliers = await fetchCloudRecords<Supplier>(cloudUrl, token, userToken, "suppliers");
   return suppliers.sort((left, right) => String(left.name || "").localeCompare(String(right.name || "")));
 }
 
-export async function fetchPurchaseRecords(cloudUrl: string, token: string): Promise<PurchaseRecord[]> {
-  const records = await fetchCloudRecords<PurchaseRecord>(cloudUrl, token, "purchase_records", true);
+export async function fetchPurchaseRecords(cloudUrl: string, token: string, userToken: string): Promise<PurchaseRecord[]> {
+  const records = await fetchCloudRecords<PurchaseRecord>(cloudUrl, token, userToken, "purchase_records", true);
   return records.sort(
     (left, right) =>
       String(right.purchaseDate || right.createdAt || "").localeCompare(String(left.purchaseDate || left.createdAt || "")) ||
@@ -172,32 +182,31 @@ export async function fetchPurchaseRecords(cloudUrl: string, token: string): Pro
   );
 }
 
-export async function fetchBusinessSettings(cloudUrl: string, token: string): Promise<BusinessSettings> {
-  const settings = await fetchCloudRecords<BusinessSettings>(cloudUrl, token, "settings", true);
+export async function fetchBusinessSettings(cloudUrl: string, token: string, userToken: string): Promise<BusinessSettings> {
+  const settings = await fetchCloudRecords<BusinessSettings>(cloudUrl, token, userToken, "settings", true);
   return settings.find((row) => row.id === BUSINESS_SETTINGS_RECORD_ID) || settings[0] || {};
 }
 
-export async function fetchInvoices(cloudUrl: string, token: string, query: string): Promise<InvoiceSummary[]> {
+export async function fetchInvoices(cloudUrl: string, token: string, userToken: string, query: string): Promise<InvoiceSummary[]> {
   const params = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : "";
-  const data = await request<{ invoices: InvoiceSummary[] }>(cloudUrl, `/api/v1/invoices${params}`, { token });
+  const data = await request<{ invoices: InvoiceSummary[] }>(cloudUrl, `/api/v1/invoices${params}`, { token, userToken });
   return data.invoices;
 }
 
-export async function fetchInvoice(cloudUrl: string, token: string, invoiceId: string): Promise<InvoiceDetail> {
-  const data = await request<{ invoice: InvoiceDetail }>(cloudUrl, `/api/v1/invoices/${encodeURIComponent(invoiceId)}`, { token });
+export async function fetchInvoice(cloudUrl: string, token: string, userToken: string, invoiceId: string): Promise<InvoiceDetail> {
+  const data = await request<{ invoice: InvoiceDetail }>(cloudUrl, `/api/v1/invoices/${encodeURIComponent(invoiceId)}`, { token, userToken });
   return data.invoice;
 }
 
 export async function fetchDevices(
   cloudUrl: string,
   token: string,
-  ownerUsername: string,
-  ownerPassword: string
+  userToken: string
 ): Promise<DevicesListResult> {
   return request<DevicesListResult>(cloudUrl, "/api/v1/admin/devices/list", {
     method: "POST",
     token,
-    body: { ownerUsername, ownerPassword }
+    userToken
   });
 }
 
@@ -205,8 +214,7 @@ export async function approveDevice(
   cloudUrl: string,
   token: string,
   deviceId: string,
-  ownerUsername: string,
-  ownerPassword: string
+  userToken: string
 ): Promise<CloudDeviceSummary> {
   const data = await request<{ device: CloudDeviceSummary }>(
     cloudUrl,
@@ -214,7 +222,7 @@ export async function approveDevice(
     {
       method: "POST",
       token,
-      body: { ownerUsername, ownerPassword }
+      userToken
     }
   );
   return data.device;
@@ -224,8 +232,7 @@ export async function revokeDevice(
   cloudUrl: string,
   token: string,
   deviceId: string,
-  ownerUsername: string,
-  ownerPassword: string
+  userToken: string
 ): Promise<CloudDeviceSummary> {
   const data = await request<{ device: CloudDeviceSummary }>(
     cloudUrl,
@@ -233,7 +240,7 @@ export async function revokeDevice(
     {
       method: "POST",
       token,
-      body: { ownerUsername, ownerPassword }
+      userToken
     }
   );
   return data.device;

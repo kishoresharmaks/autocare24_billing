@@ -323,6 +323,12 @@ If the registration key is suspected stolen:
 
 If an active device token is suspected stolen, revoke that device from **Cloud Devices**.
 
+Business-data endpoints are role-aware after login:
+
+- `POST /api/v1/auth/login` returns the public `user`, `userToken`, and `expiresAt`.
+- Mobile and other interactive clients keep using `Authorization: Bearer <deviceToken>` and also send `x-autocare-user-token: <userToken>`.
+- The Cloud API checks the logged-in user's permissions for dashboards, invoices, stock, reports, users, devices, and management routes. A valid approved device token alone is still enough for device registration/status and sync transport endpoints.
+
 Emergency phpMyAdmin fallback:
 
 ```sql

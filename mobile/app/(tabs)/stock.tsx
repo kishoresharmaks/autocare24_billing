@@ -25,8 +25,9 @@ import { colors, radius } from "../../src/theme";
 import { exportStockDocument, type ExportFormat } from "../../src/services/reportExport";
 import type { InventoryBatch, InventoryItem, InventoryMovement, PurchaseRecord, Supplier } from "../../src/types/cloud";
 import { formatCount, formatDate, formatMoney, titleCase } from "../../src/utils/format";
-import { useRequireOwner } from "../../src/hooks/useRequireOwner";
+import { useRequirePermission } from "../../src/hooks/useRequireOwner";
 import { useSession } from "../../src/providers/SessionProvider";
+import { hasPermission } from "../../src/services/permissions";
 
 type StockSection = "overview" | "items" | "batches" | "vendors" | "purchases";
 type EnrichedBatch = InventoryBatch & { itemName: string; unit: string };
@@ -67,25 +68,26 @@ const stockValue = (items: InventoryItem[]) => items.reduce((sum, item) => sum +
 const batchValue = (batch: InventoryBatch) => Number(batch.quantityRemaining || 0) * Number(batch.unitCost || 0);
 
 export default function StockTab() {
-  const guard = useRequireOwner();
+  const guard = useRequirePermission("stock.view");
   const session = useSession();
   const [activeSection, setActiveSection] = useState<StockSection>("overview");
   const [query, setQuery] = useState("");
-  const enabled = Boolean(session.user && session.token);
+  const canExport = hasPermission(session.user, "reports.export");
+  const enabled = Boolean(session.user && session.token && session.userToken && hasPermission(session.user, "stock.view"));
 
   const inventoryQuery = useQuery({
-    queryKey: ["inventory-dashboard", session.cloudUrl, session.token],
-    queryFn: () => fetchInventoryDashboard(session.cloudUrl, session.token),
+    queryKey: ["inventory-dashboard", session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchInventoryDashboard(session.cloudUrl, session.token, session.userToken),
     enabled
   });
   const suppliersQuery = useQuery({
-    queryKey: ["stock-suppliers", session.cloudUrl, session.token],
-    queryFn: () => fetchSuppliers(session.cloudUrl, session.token),
+    queryKey: ["stock-suppliers", session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchSuppliers(session.cloudUrl, session.token, session.userToken),
     enabled
   });
   const purchaseRecordsQuery = useQuery({
-    queryKey: ["stock-purchase-records", session.cloudUrl, session.token],
-    queryFn: () => fetchPurchaseRecords(session.cloudUrl, session.token),
+    queryKey: ["stock-purchase-records", session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchPurchaseRecords(session.cloudUrl, session.token, session.userToken),
     enabled
   });
 
@@ -182,7 +184,7 @@ export default function StockTab() {
       showHome
     >
       {firstError ? <Text style={styles.error}>{firstError instanceof Error ? firstError.message : "Unable to load stock details."}</Text> : null}
-      <ExportActions disabled={!dashboard || isRefreshing || Boolean(firstError)} onExport={exportStock} />
+      <ExportActions disabled={!canExport || !dashboard || isRefreshing || Boolean(firstError)} onExport={exportStock} />
 
       <MetricGrid>
         <MetricCard label="Stock Value" value={formatMoney(dashboard?.totalStockValue)} tone="success" />

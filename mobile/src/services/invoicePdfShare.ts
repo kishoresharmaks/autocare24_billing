@@ -83,11 +83,12 @@ export async function prepareInvoicePdf(input: {
   settings?: BusinessSettings;
   cloudUrl?: string;
   token?: string;
+  userToken?: string;
 }): Promise<PreparedInvoicePdf> {
   const settings = normalizeSettings(input.settings);
   const phone = normalizeWhatsAppPhone(customerPhone(input.invoice));
   const fileName = invoicePdfFileName(input.invoice);
-  const assets = await loadInvoiceAssets(settings, input.cloudUrl, input.token, input.invoice);
+  const assets = await loadInvoiceAssets(settings, input.cloudUrl, input.token, input.userToken, input.invoice);
   const paper = paperPixels[settings.invoicePaperSize] || paperPixels.A4;
   const result = await Print.printToFileAsync({
     html: buildInvoiceHtml(input.invoice, settings, assets),
@@ -236,12 +237,13 @@ async function loadInvoiceAssets(
   settings: NormalizedBusinessSettings,
   cloudUrl: string | undefined,
   token: string | undefined,
+  userToken: string | undefined,
   invoice: InvoiceDetail
 ): Promise<InvoiceAssets> {
   const [logoSrc, signatureSrc, watermarkSrc, qrSrc] = await Promise.all([
-    enabled(settings.showLogo) ? cloudAssetDataUrl(settings.invoiceLogoPath, cloudUrl, token) : Promise.resolve(""),
-    enabled(settings.showSignature) ? cloudAssetDataUrl(settings.invoiceSignaturePath, cloudUrl, token) : Promise.resolve(""),
-    settings.invoiceWatermarkPath ? cloudAssetDataUrl(settings.invoiceWatermarkPath, cloudUrl, token) : Promise.resolve(""),
+    enabled(settings.showLogo) ? cloudAssetDataUrl(settings.invoiceLogoPath, cloudUrl, token, userToken) : Promise.resolve(""),
+    enabled(settings.showSignature) ? cloudAssetDataUrl(settings.invoiceSignaturePath, cloudUrl, token, userToken) : Promise.resolve(""),
+    settings.invoiceWatermarkPath ? cloudAssetDataUrl(settings.invoiceWatermarkPath, cloudUrl, token, userToken) : Promise.resolve(""),
     buildUpiQrDataUrl(settings, invoice)
   ]);
   return {
@@ -252,7 +254,7 @@ async function loadInvoiceAssets(
   };
 }
 
-async function cloudAssetDataUrl(filePath: string | undefined, cloudUrl: string | undefined, token: string | undefined) {
+async function cloudAssetDataUrl(filePath: string | undefined, cloudUrl: string | undefined, token: string | undefined, userToken: string | undefined) {
   const fileId = cloudFileId(filePath);
   if (!fileId || !cloudUrl || !token) return "";
   const baseDirectory = FileSystem.cacheDirectory || FileSystem.documentDirectory;
@@ -261,7 +263,10 @@ async function cloudAssetDataUrl(filePath: string | undefined, cloudUrl: string 
     const targetUri = `${baseDirectory}invoice-asset-${fileNamePart(fileId, "asset")}`;
     await FileSystem.deleteAsync(targetUri, { idempotent: true });
     const response = await FileSystem.downloadAsync(`${cleanBaseUrl(cloudUrl)}/api/v1/files/${encodeURIComponent(fileId)}`, targetUri, {
-      headers: { authorization: `Bearer ${token}` }
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(userToken ? { "x-autocare-user-token": userToken } : {})
+      }
     });
     if (response.status >= 400) return "";
     const base64 = await FileSystem.readAsStringAsync(response.uri, { encoding: FileSystem.EncodingType.Base64 });

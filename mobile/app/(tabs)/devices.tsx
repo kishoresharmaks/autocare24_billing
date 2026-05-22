@@ -10,52 +10,32 @@ import { StatusPill } from "../../src/components/StatusPill";
 import { useResponsiveLayout } from "../../src/hooks/useResponsiveLayout";
 import { colors } from "../../src/theme";
 import { formatCount, formatDateTime } from "../../src/utils/format";
-import { useRequireOwner } from "../../src/hooks/useRequireOwner";
+import { useRequirePermission } from "../../src/hooks/useRequireOwner";
 import { useSession } from "../../src/providers/SessionProvider";
 import type { CloudDeviceSummary } from "../../src/types/cloud";
 
 export default function DevicesTab() {
-  const guard = useRequireOwner();
+  const guard = useRequirePermission("users.manage");
   const session = useSession();
   const queryClient = useQueryClient();
-  const devicesQueryKey = ["devices", session.cloudUrl, session.token, session.ownerCredentials?.username];
+  const devicesQueryKey = ["devices", session.cloudUrl, session.token, session.userToken];
   const devicesQuery = useQuery({
     queryKey: devicesQueryKey,
-    queryFn: () =>
-      fetchDevices(
-        session.cloudUrl,
-        session.token,
-        session.ownerCredentials?.username || "",
-        session.ownerCredentials?.password || ""
-      ),
-    enabled: Boolean(session.user && session.token && session.ownerCredentials)
+    queryFn: () => fetchDevices(session.cloudUrl, session.token, session.userToken),
+    enabled: Boolean(session.user && session.token && session.userToken)
   });
   const approveMutation = useMutation({
-    mutationFn: (deviceId: string) =>
-      approveDevice(
-        session.cloudUrl,
-        session.token,
-        deviceId,
-        session.ownerCredentials?.username || "",
-        session.ownerCredentials?.password || ""
-      ),
+    mutationFn: (deviceId: string) => approveDevice(session.cloudUrl, session.token, deviceId, session.userToken),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: devicesQueryKey })
   });
   const revokeMutation = useMutation({
-    mutationFn: (deviceId: string) =>
-      revokeDevice(
-        session.cloudUrl,
-        session.token,
-        deviceId,
-        session.ownerCredentials?.username || "",
-        session.ownerCredentials?.password || ""
-      ),
+    mutationFn: (deviceId: string) => revokeDevice(session.cloudUrl, session.token, deviceId, session.userToken),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: devicesQueryKey })
   });
 
   useEffect(() => {
-    if (devicesQuery.error instanceof CloudApiError && devicesQuery.error.code === "owner_verification_failed") {
-      void session.logoutOwner().then(() => router.replace("/login"));
+    if (devicesQuery.error instanceof CloudApiError && devicesQuery.error.code === "user_session_invalid") {
+      void session.logoutUser().then(() => router.replace("/login"));
     }
   }, [devicesQuery.error, session]);
 
@@ -65,7 +45,7 @@ export default function DevicesTab() {
   const summary = summarizeDeviceStatus(visibleDevices);
 
   return (
-    <Screen title="Cloud Devices" subtitle="Owner-only device approval and access control." refreshing={devicesQuery.isFetching} onRefresh={devicesQuery.refetch} showHome>
+    <Screen title="Cloud Devices" subtitle="Approve or revoke phones with Users and devices permission." refreshing={devicesQuery.isFetching} onRefresh={devicesQuery.refetch} showHome>
       {devicesQuery.error ? <Text style={styles.error}>{devicesQuery.error instanceof Error ? devicesQuery.error.message : "Unable to load devices."}</Text> : null}
       {approveMutation.error ? <Text style={styles.error}>{approveMutation.error instanceof Error ? approveMutation.error.message : "Unable to approve device."}</Text> : null}
       {revokeMutation.error ? <Text style={styles.error}>{revokeMutation.error instanceof Error ? revokeMutation.error.message : "Unable to revoke device."}</Text> : null}

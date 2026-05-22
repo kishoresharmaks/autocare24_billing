@@ -11,17 +11,19 @@ import { colors } from "../../src/theme";
 import { exportProfitDocument, type ExportFormat } from "../../src/services/reportExport";
 import type { DateRangePreset, Expense } from "../../src/types/cloud";
 import { formatDateTime, formatMoney } from "../../src/utils/format";
-import { useRequireOwner } from "../../src/hooks/useRequireOwner";
+import { useRequirePermission } from "../../src/hooks/useRequireOwner";
 import { useSession } from "../../src/providers/SessionProvider";
+import { hasPermission } from "../../src/services/permissions";
 
 export default function ProfitTab() {
-  const guard = useRequireOwner();
+  const guard = useRequirePermission("reports.view");
   const session = useSession();
+  const canExport = hasPermission(session.user, "reports.export");
   const [preset, setPreset] = useState<DateRangePreset>("30d");
   const profitQuery = useQuery({
-    queryKey: ["profit", preset, session.cloudUrl, session.token],
-    queryFn: () => fetchProfit(session.cloudUrl, session.token, preset),
-    enabled: Boolean(session.user && session.token)
+    queryKey: ["profit", preset, session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchProfit(session.cloudUrl, session.token, session.userToken, preset),
+    enabled: Boolean(session.user && session.token && session.userToken && hasPermission(session.user, "reports.view"))
   });
 
   if (guard) return guard;
@@ -42,7 +44,7 @@ export default function ProfitTab() {
       showHome
     >
       {profitQuery.error ? <Text style={styles.error}>{profitQuery.error instanceof Error ? profitQuery.error.message : "Unable to load profit."}</Text> : null}
-      <ExportActions disabled={!profitQuery.data || profitQuery.isFetching || Boolean(profitQuery.error)} onExport={exportProfit} />
+      <ExportActions disabled={!canExport || !profitQuery.data || profitQuery.isFetching || Boolean(profitQuery.error)} onExport={exportProfit} />
       <MetricGrid>
         <MetricCard label="Cash Profit" value={formatMoney(profitQuery.data?.cashProfit)} tone={(profitQuery.data?.cashProfit || 0) >= 0 ? "success" : "danger"} />
         <MetricCard label="Margin" value={`${Number(profitQuery.data?.profitMargin || 0).toFixed(2)}%`} tone="info" />

@@ -2,6 +2,7 @@ import { Redirect } from "expo-router";
 import { AppSplash } from "../src/components/AppSplash";
 import { OwnerLoginScreen } from "../src/screens/OwnerLoginScreen";
 import { useSession } from "../src/providers/SessionProvider";
+import { firstAllowedMobileRoute } from "../src/services/permissions";
 
 export default function LoginRoute() {
   const session = useSession();
@@ -15,7 +16,7 @@ export default function LoginRoute() {
   }
 
   if (session.user) {
-    return <Redirect href="/dashboard" />;
+    return <Redirect href={firstAllowedMobileRoute(session.user)} />;
   }
 
   return <OwnerLoginScreen />;

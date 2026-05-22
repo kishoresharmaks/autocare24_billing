@@ -62,6 +62,8 @@ const RATE_LIMIT_MAX_BUCKETS = envPositiveInt("RATE_LIMIT_MAX_BUCKETS", 50_000);
 const DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS = envPositiveInt("DEVICE_REGISTRATION_RATE_LIMIT_WINDOW_MS", 15 * 60 * 1000);
 const DEVICE_REGISTRATION_RATE_LIMIT_MAX = envPositiveInt("DEVICE_REGISTRATION_RATE_LIMIT_MAX", 10);
 const HEALTHCHECK_DB_TIMEOUT_MS = envPositiveInt("HEALTHCHECK_DB_TIMEOUT_MS", 3000);
+const USER_SESSION_TTL_MS = envPositiveInt("USER_SESSION_TTL_MS", 7 * 24 * 60 * 60 * 1000);
+const USER_SESSION_HEADER = "x-autocare-user-token";
 const TOKEN_HASH_SECRET = String(process.env.TOKEN_HASH_SECRET || "").trim();
 const ALLOW_LEGACY_TOKEN_MIGRATION = envFlag("ALLOW_LEGACY_TOKEN_MIGRATION", !IS_PRODUCTION);
 const WHATSAPP_GRAPH_BASE_URL = String(process.env.WHATSAPP_API_BASE_URL || "https://graph.facebook.com").replace(/\/+$/, "");
@@ -559,6 +561,7 @@ const firstReportedDeviceIp = (body) => {
 const throwHttpError = (status, code, message) => {
   throw Object.assign(new Error(message), { status, code });
 };
+const PAID_AMOUNT_EXCEEDS_TOTAL_MESSAGE = "Entered paid amount is greater than billed amount.";
 const rateLimitKey = (scope, req) => `${scope}:${getRequestIp(req) || "unknown"}`;
 const enforceRateLimit = (req, scope, options = {}) => {
   const limit = options.limit || AUTH_RATE_LIMIT_MAX;
@@ -1064,6 +1067,8 @@ async function migrate() {
     await connection.query("ALTER TABLE file_metadata MODIFY file_type ENUM('LOGO','SIGNATURE','WATERMARK','PHOTO','DOCUMENT') NOT NULL");
     await ensureIndex(connection, "devices", "idx_devices_token_hash", "(token_hash)");
     await ensureIndex(connection, "devices", "idx_devices_business_created", "(business_id, created_at)");
+    await ensureIndex(connection, "user_sessions", "idx_user_sessions_user", "(business_id, user_id, revoked_at, expires_at)");
+    await ensureIndex(connection, "user_sessions", "idx_user_sessions_device", "(business_id, device_id, revoked_at, expires_at)");
     await ensureIndex(connection, "business_records", "idx_business_records_entity_active", "(business_id, entity, deleted_at, revision)");
     await ensureIndex(connection, "sync_revisions", "idx_sync_revisions_record", "(business_id, entity, record_id, id)");
     await ensureIndex(connection, "file_metadata", "idx_file_metadata_entity", "(business_id, entity, entity_id, created_at)");
@@ -1414,6 +1419,135 @@ const publicUserFromData = (user, roleMap) => {
     updatedAt: String(user.updatedAt || "")
   };
 };
+
+const userSessionTokenFromRequest = (req) => String(req.headers[USER_SESSION_HEADER] || "").trim();
+const userSessionExpiresAt = () => new Date(Date.now() + USER_SESSION_TTL_MS);
+const cloudUserHasPermission = (user, permission) =>
+  Boolean(user && (user.role === "owner" || (Array.isArray(user.permissions) && user.permissions.includes(permission))));
+const cloudUserHasAnyPermission = (user, permissions) => {
+  const required = Array.isArray(permissions) ? permissions : [permissions];
+  return required.filter(Boolean).some((permission) => cloudUserHasPermission(user, permission));
+};
+
+async function issueCloudUserSession(connection, device, user) {
+  const userToken = token();
+  const expiresAt = userSessionExpiresAt();
+  await connection.query(
+    `INSERT INTO user_sessions (id, business_id, device_id, user_id, token_hash, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+    [uuid(), device.business_id, device.id, String(user.id || ""), hashToken(userToken), expiresAt]
+  );
+  return { userToken, expiresAt: expiresAt.toISOString() };
+}
+
+async function publicCloudUserById(connection, businessId, userId) {
+  const record = await loadBusinessRecord(connection, businessId, "users", userId);
+  if (!record || record.data.active === false) {
+    throwHttpError(401, "user_session_invalid", "Cloud user session is no longer valid. Please log in again.");
+  }
+  const roleMap = new Map((await listCloudAccessRoles(connection, businessId)).map((role) => [role.id, role]));
+  return publicUserFromData(record.data, roleMap);
+}
+
+async function authenticateCloudUser(req, device) {
+  const userToken = userSessionTokenFromRequest(req);
+  if (!userToken) return null;
+  const [rows] = await pool.query(
+    `SELECT *
+     FROM user_sessions
+     WHERE business_id = ?
+       AND device_id = ?
+       AND token_hash = ?
+       AND revoked_at IS NULL
+       AND expires_at > CURRENT_TIMESTAMP
+     LIMIT 1`,
+    [device.business_id, device.id, hashToken(userToken)]
+  );
+  const session = rows[0] || null;
+  if (!session) {
+    throwHttpError(401, "user_session_invalid", "Cloud user session is expired or invalid. Please log in again.");
+  }
+  const connection = await pool.getConnection();
+  try {
+    const user = await publicCloudUserById(connection, device.business_id, session.user_id);
+    await connection.query("UPDATE user_sessions SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?", [session.id]);
+    return user;
+  } finally {
+    connection.release();
+  }
+}
+
+async function requireCloudUser(req, device, permissions = []) {
+  const user = await authenticateCloudUser(req, device);
+  if (!user) {
+    throwHttpError(401, "user_session_required", "Login with a cloud user before accessing this data.");
+  }
+  const required = Array.isArray(permissions) ? permissions : [permissions];
+  if (required.length && !cloudUserHasAnyPermission(user, required)) {
+    throwHttpError(403, "permission_denied", "No access for this role.");
+  }
+  return user;
+}
+
+async function optionalCloudUserForPermission(req, device, permissions) {
+  if (!userSessionTokenFromRequest(req)) return null;
+  return requireCloudUser(req, device, permissions);
+}
+
+const RECORD_READ_PERMISSIONS = {
+  settings: ["settings.manage", "documents.printPdf", "sharing.whatsapp", "billing.view", "reports.view"],
+  customers: ["customers.view"],
+  vehicles: ["customers.view", "billing.view", "jobCards.view"],
+  services: ["services.view"],
+  inventory_items: ["stock.view"],
+  inventory_batches: ["stock.view"],
+  inventory_movements: ["stock.view"],
+  suppliers: ["stock.view"],
+  purchase_records: ["stock.view"],
+  enquiries: ["enquiries.view"],
+  enquiry_followups: ["enquiries.view"],
+  job_cards: ["jobCards.view"],
+  job_card_items: ["jobCards.view"],
+  job_card_photos: ["jobCards.view", "jobCards.photos"],
+  job_card_checklist_items: ["jobCards.view"],
+  job_card_status_history: ["jobCards.view"],
+  invoices: ["billing.view"],
+  invoice_items: ["billing.view"],
+  payments: ["billing.view", "reports.view"],
+  quotations: ["quotations.view"],
+  quotation_items: ["quotations.view"],
+  expenses: ["expenses.manage", "reports.view"]
+};
+
+const RECORD_WRITE_PERMISSIONS = {
+  settings: ["settings.manage"],
+  customers: ["customers.manage"],
+  vehicles: ["customers.manage", "billing.create", "jobCards.manage"],
+  services: ["services.manage"],
+  inventory_items: ["stock.manageItems"],
+  inventory_batches: ["stock.purchase", "stock.adjust"],
+  inventory_movements: ["stock.adjust"],
+  suppliers: ["stock.suppliers"],
+  purchase_records: ["stock.purchase"],
+  enquiries: ["enquiries.manage"],
+  enquiry_followups: ["enquiries.manage"],
+  job_cards: ["jobCards.manage"],
+  job_card_items: ["jobCards.manage"],
+  job_card_photos: ["jobCards.photos"],
+  job_card_checklist_items: ["jobCards.manage"],
+  job_card_status_history: ["jobCards.manage"],
+  invoices: ["billing.manageInvoices", "billing.create"],
+  invoice_items: ["billing.manageInvoices", "billing.create"],
+  payments: ["billing.recordPayments"],
+  quotations: ["quotations.manage"],
+  quotation_items: ["quotations.manage"],
+  expenses: ["expenses.manage"]
+};
+
+const recordPermissionsFor = (entity, method) =>
+  method === "GET"
+    ? RECORD_READ_PERMISSIONS[entity] || ["developer.access"]
+    : RECORD_WRITE_PERMISSIONS[entity] || ["developer.access"];
 
 async function listCloudUsers(connection, businessId) {
   const [users, roles] = await Promise.all([
@@ -2306,7 +2440,8 @@ async function createFinalInvoiceGraph(connection, device, req, input) {
   const invoiceMode = normalizeInvoiceMode(payload.invoiceMode);
   const totals = calculateInvoiceTotals(invoiceMode, taxScope, payload.items, payload.discount);
   const invoiceDate = String(payload.invoiceDate || localDate());
-  const paidAmount = money(Math.min(Math.max(finiteNumber(payload.paidAmount), 0), totals.grandTotal));
+  const paidAmount = money(nonNegativeNumber(payload.paidAmount || 0, "Paid amount"));
+  if (paidAmount > totals.grandTotal) throw Object.assign(new Error(PAID_AMOUNT_EXCEEDS_TOTAL_MESSAGE), { status: 422 });
   const balanceDue = money(totals.grandTotal - paidAmount);
 
   const stockMovements = await reserveStockForReference(connection, device, payload, req, "__PENDING_INVOICE__", invoiceDate);
@@ -3360,11 +3495,11 @@ async function verifyCloudOwner(connection, device, req, body) {
   return matched;
 }
 
-async function handleAdminDevicesList(req, res, device) {
-  const body = await readBody(req);
+async function handleAdminDevicesList(req, res, device, actor = null) {
+  const body = actor ? null : await readBody(req);
   const connection = await pool.getConnection();
   try {
-    await verifyCloudOwner(connection, device, req, body);
+    if (!actor) await verifyCloudOwner(connection, device, req, body);
     const [rows] = await connection.query("SELECT * FROM devices WHERE business_id = ? ORDER BY created_at DESC", [device.business_id]);
     const devices = rows
       .map(publicDeviceFromRow)
@@ -3381,11 +3516,11 @@ async function handleAdminDevicesList(req, res, device) {
   }
 }
 
-async function handleAdminDeviceApprove(req, res, device, deviceId) {
-  const body = await readBody(req);
+async function handleAdminDeviceApprove(req, res, device, deviceId, actor = null) {
+  const body = actor ? null : await readBody(req);
   const connection = await pool.getConnection();
   try {
-    const owner = await verifyCloudOwner(connection, device, req, body);
+    const owner = actor || await verifyCloudOwner(connection, device, req, body);
     await connection.beginTransaction();
     const [rows] = await connection.query("SELECT * FROM devices WHERE id = ? AND business_id = ? LIMIT 1 FOR UPDATE", [deviceId, device.business_id]);
     const current = rows[0] || null;
@@ -3423,11 +3558,11 @@ async function handleAdminDeviceApprove(req, res, device, deviceId) {
   }
 }
 
-async function handleAdminDeviceRevoke(req, res, device, deviceId) {
-  const body = await readBody(req);
+async function handleAdminDeviceRevoke(req, res, device, deviceId, actor = null) {
+  const body = actor ? null : await readBody(req);
   const connection = await pool.getConnection();
   try {
-    const owner = await verifyCloudOwner(connection, device, req, body);
+    const owner = actor || await verifyCloudOwner(connection, device, req, body);
     await connection.beginTransaction();
     const [rows] = await connection.query("SELECT * FROM devices WHERE id = ? AND business_id = ? LIMIT 1 FOR UPDATE", [deviceId, device.business_id]);
     const current = rows[0] || null;
@@ -3508,8 +3643,9 @@ async function handleCloudSetupOwner(req, res, device) {
     };
     await persistBusinessRecord(connection, device, req, "users", user.id, user, "UPSERT", "USER_OWNER_SETUP");
     const roleMap = new Map((await listCloudAccessRoles(connection, device.business_id)).map((role) => [role.id, role]));
+    const session = await issueCloudUserSession(connection, device, user);
     await connection.commit();
-    ok(res, { user: publicUserFromData(user, roleMap) }, 201);
+    ok(res, { user: publicUserFromData(user, roleMap), ...session }, 201);
   } catch (err) {
     await connection.rollback();
     error(res, err.status || 500, err.status === 422 ? "validation_error" : "internal_error", err.message || "Unable to create owner account.");
@@ -3525,13 +3661,17 @@ async function handleCloudLogin(req, res, device) {
   const password = String(body.password || "");
   const connection = await pool.getConnection();
   try {
+    await connection.beginTransaction();
     await ensureDefaultAccessRoles(connection, device, req);
     const rows = await loadBusinessRecords(connection, device.business_id, "users");
     const matched = rows.map((row) => row.data).find((user) => user.active !== false && normalizeUsername(user.username) === username);
     if (!matched || !verifyPassword(password, matched.salt, matched.passwordHash)) throw Object.assign(new Error("Invalid username or password."), { status: 401 });
     const roleMap = new Map((await listCloudAccessRoles(connection, device.business_id)).map((role) => [role.id, role]));
-    ok(res, { user: publicUserFromData(matched, roleMap) });
+    const session = await issueCloudUserSession(connection, device, matched);
+    await connection.commit();
+    ok(res, { user: publicUserFromData(matched, roleMap), ...session });
   } catch (err) {
+    await connection.rollback();
     error(res, err.status || 500, err.status === 401 ? "invalid_login" : "internal_error", err.message || "Unable to login.");
   } finally {
     connection.release();
@@ -3548,7 +3688,7 @@ async function handleCloudUsersList(req, res, device) {
   }
 }
 
-async function handleCloudUserSave(req, res, device) {
+async function handleCloudUserSave(req, res, device, actor) {
   const body = await readBody(req);
   const displayName = requiredText(body.displayName, "Display name").slice(0, 100);
   const username = normalizeUsername(body.username);
@@ -3561,6 +3701,10 @@ async function handleCloudUserSave(req, res, device) {
     const userId = String(body.id || uuid()).slice(0, 36);
     const current = await loadBusinessRecord(connection, device.business_id, "users", userId, true);
     if (!current && !body.password) throw Object.assign(new Error("Password is required for new users."), { status: 422 });
+    const actorIsOwner = actor?.role === "owner";
+    if ((role === "owner" || current?.data.role === "owner") && !actorIsOwner) {
+      throwHttpError(403, "permission_denied", "Only an owner can create or edit owner accounts.");
+    }
     const duplicate = (await loadBusinessRecords(connection, device.business_id, "users"))
       .find((row) => row.recordId !== userId && normalizeUsername(row.data.username) === username);
     if (duplicate) throw Object.assign(new Error("Username is already used by another account."), { status: 422 });
@@ -3584,55 +3728,87 @@ async function handleCloudUserSave(req, res, device) {
       updatedAt: now
     };
     await persistBusinessRecord(connection, device, req, "users", userId, user, "UPSERT", current ? "USER_UPDATED" : "USER_INSERTED");
+    if (current && (body.password || user.active === false)) {
+      await connection.query(
+        "UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE business_id = ? AND user_id = ? AND revoked_at IS NULL",
+        [device.business_id, userId]
+      );
+    }
     const roleMap = new Map((await listCloudAccessRoles(connection, device.business_id)).map((roleRow) => [roleRow.id, roleRow]));
     await connection.commit();
     ok(res, { user: publicUserFromData(user, roleMap) }, current ? 200 : 201);
   } catch (err) {
     await connection.rollback();
-    error(res, err.status || 500, err.status === 422 ? "validation_error" : "internal_error", err.message || "Unable to save user.");
+    error(res, err.status || 500, err.code || (err.status === 422 ? "validation_error" : err.status === 403 ? "permission_denied" : "internal_error"), err.message || "Unable to save user.");
   } finally {
     connection.release();
   }
 }
 
-async function handleCloudUserDeactivate(req, res, device, userId) {
+async function handleCloudUserDeactivate(req, res, device, userId, actor) {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
     const current = await loadBusinessRecord(connection, device.business_id, "users", userId, true);
     if (!current) throw Object.assign(new Error("User account not found."), { status: 404 });
     if (current.data.role === "owner") {
+      if (actor?.role !== "owner") {
+        throwHttpError(403, "permission_denied", "Only an owner can deactivate owner accounts.");
+      }
       const activeOwners = (await loadBusinessRecords(connection, device.business_id, "users")).filter((row) => row.recordId !== userId && row.data.role === "owner" && row.data.active !== false);
       if (!activeOwners.length) throw Object.assign(new Error("At least one active owner account is required."), { status: 422 });
     }
     await persistBusinessRecord(connection, device, req, "users", userId, { ...current.data, active: false, updatedAt: nowIso() }, "UPSERT", "USER_DEACTIVATED");
+    await connection.query(
+      "UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE business_id = ? AND user_id = ? AND revoked_at IS NULL",
+      [device.business_id, userId]
+    );
     await connection.commit();
     noContent(res);
   } catch (err) {
     await connection.rollback();
-    error(res, err.status || 500, err.status === 404 ? "not_found" : err.status === 422 ? "validation_error" : "internal_error", err.message || "Unable to deactivate user.");
+    error(res, err.status || 500, err.code || (err.status === 404 ? "not_found" : err.status === 422 ? "validation_error" : err.status === 403 ? "permission_denied" : "internal_error"), err.message || "Unable to deactivate user.");
   } finally {
     connection.release();
   }
 }
 
-async function handleCloudUserChangePassword(req, res, device, userId) {
+async function handleCloudUserChangePassword(req, res, device, userId, actor) {
   const body = await readBody(req);
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
     const current = await loadBusinessRecord(connection, device.business_id, "users", userId, true);
     if (!current) throw Object.assign(new Error("User account not found."), { status: 404 });
-    if (body.currentPassword && !verifyPassword(body.currentPassword, current.data.salt, current.data.passwordHash)) {
+    const isSelf = String(actor?.id || "") === String(userId || "");
+    if (!isSelf && current.data.role === "owner" && actor?.role !== "owner") {
+      throwHttpError(403, "permission_denied", "Only an owner can reset owner passwords.");
+    }
+    if (!isSelf && !cloudUserHasPermission(actor, "users.manage")) {
+      throwHttpError(403, "permission_denied", "No access for this role.");
+    }
+    if (isSelf && !body.currentPassword) {
+      throw Object.assign(new Error("Current password is required."), { status: 422 });
+    }
+    if (isSelf && !verifyPassword(body.currentPassword, current.data.salt, current.data.passwordHash)) {
       throw Object.assign(new Error("Current password is incorrect."), { status: 422 });
     }
     const secret = hashPassword(validatePassword(body.newPassword));
     await persistBusinessRecord(connection, device, req, "users", userId, { ...current.data, ...secret, updatedAt: nowIso() }, "UPSERT", "USER_PASSWORD_CHANGED");
+    await connection.query(
+      "UPDATE user_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE business_id = ? AND user_id = ? AND revoked_at IS NULL",
+      [device.business_id, userId]
+    );
     await connection.commit();
     ok(res, { ok: true });
   } catch (err) {
     await connection.rollback();
-    error(res, err.status || 500, err.status === 404 ? "not_found" : err.status === 422 ? "validation_error" : "internal_error", err.message || "Unable to change password.");
+    error(
+      res,
+      err.status || 500,
+      err.code || (err.status === 404 ? "not_found" : err.status === 422 ? "validation_error" : err.status === 403 ? "permission_denied" : "internal_error"),
+      err.message || "Unable to change password."
+    );
   } finally {
     connection.release();
   }
@@ -4871,60 +5047,165 @@ async function route(req, res) {
     if (req.method === "DELETE" && url.pathname === "/api/v1/auth/devices/current") return handleCurrentDeviceDisconnect(req, res);
     const device = await requireDevice(req, res);
     if (!device) return;
-    if (req.method === "POST" && url.pathname === "/api/v1/admin/devices/list") return handleAdminDevicesList(req, res, device);
+    if (req.method === "POST" && url.pathname === "/api/v1/admin/devices/list") {
+      const actor = await optionalCloudUserForPermission(req, device, ["users.manage"]);
+      return handleAdminDevicesList(req, res, device, actor);
+    }
     const adminDeviceApproveMatch = /^\/api\/v1\/admin\/devices\/([^/]+)\/approve$/.exec(url.pathname);
-    if (adminDeviceApproveMatch && req.method === "POST") return handleAdminDeviceApprove(req, res, device, adminDeviceApproveMatch[1]);
+    if (adminDeviceApproveMatch && req.method === "POST") {
+      const actor = await optionalCloudUserForPermission(req, device, ["users.manage"]);
+      return handleAdminDeviceApprove(req, res, device, adminDeviceApproveMatch[1], actor);
+    }
     const adminDeviceRevokeMatch = /^\/api\/v1\/admin\/devices\/([^/]+)\/revoke$/.exec(url.pathname);
-    if (adminDeviceRevokeMatch && req.method === "POST") return handleAdminDeviceRevoke(req, res, device, adminDeviceRevokeMatch[1]);
+    if (adminDeviceRevokeMatch && req.method === "POST") {
+      const actor = await optionalCloudUserForPermission(req, device, ["users.manage"]);
+      return handleAdminDeviceRevoke(req, res, device, adminDeviceRevokeMatch[1], actor);
+    }
     if (req.method === "GET" && url.pathname === "/api/v1/auth/status") return handleCloudAuthStatus(req, res, device);
     if (req.method === "POST" && url.pathname === "/api/v1/auth/setup-owner") return handleCloudSetupOwner(req, res, device);
     if (req.method === "POST" && url.pathname === "/api/v1/auth/login") return handleCloudLogin(req, res, device);
-    if (req.method === "GET" && url.pathname === "/api/v1/users") return handleCloudUsersList(req, res, device);
-    if (req.method === "POST" && url.pathname === "/api/v1/users") return handleCloudUserSave(req, res, device);
+    if (req.method === "GET" && url.pathname === "/api/v1/users") {
+      await requireCloudUser(req, device, ["users.manage"]);
+      return handleCloudUsersList(req, res, device);
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/users") {
+      const actor = await requireCloudUser(req, device, ["users.manage"]);
+      return handleCloudUserSave(req, res, device, actor);
+    }
     const userMatch = /^\/api\/v1\/users\/([^/]+)$/.exec(url.pathname);
-    if (userMatch && req.method === "DELETE") return handleCloudUserDeactivate(req, res, device, userMatch[1]);
+    if (userMatch && req.method === "DELETE") {
+      const actor = await requireCloudUser(req, device, ["users.manage"]);
+      return handleCloudUserDeactivate(req, res, device, userMatch[1], actor);
+    }
     const userPasswordMatch = /^\/api\/v1\/users\/([^/]+)\/change-password$/.exec(url.pathname);
-    if (userPasswordMatch && req.method === "POST") return handleCloudUserChangePassword(req, res, device, userPasswordMatch[1]);
-    if (req.method === "GET" && url.pathname === "/api/v1/access-roles") return handleCloudRolesList(req, res, device);
-    if (req.method === "POST" && url.pathname === "/api/v1/access-roles") return handleCloudRoleSave(req, res, device);
+    if (userPasswordMatch && req.method === "POST") {
+      const actor = await requireCloudUser(req, device);
+      return handleCloudUserChangePassword(req, res, device, userPasswordMatch[1], actor);
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/access-roles") {
+      await requireCloudUser(req, device, ["users.manage"]);
+      return handleCloudRolesList(req, res, device);
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/access-roles") {
+      await requireCloudUser(req, device, ["users.manage"]);
+      return handleCloudRoleSave(req, res, device);
+    }
     const roleMatch = /^\/api\/v1\/access-roles\/([^/]+)$/.exec(url.pathname);
-    if (roleMatch && req.method === "DELETE") return handleCloudRoleDeactivate(req, res, device, roleMatch[1]);
+    if (roleMatch && req.method === "DELETE") {
+      await requireCloudUser(req, device, ["users.manage"]);
+      return handleCloudRoleDeactivate(req, res, device, roleMatch[1]);
+    }
     if (req.method === "POST" && url.pathname === "/api/v1/sync/push") return handlePush(req, res, device);
     if (req.method === "GET" && url.pathname === "/api/v1/sync/pull") return handlePull(req, res, device, url);
     const recordCollectionMatch = /^\/api\/v1\/records\/([^/]+)$/.exec(url.pathname);
-    if (recordCollectionMatch && req.method === "GET") return handleRecordsList(req, res, device, url, recordCollectionMatch[1]);
-    if (recordCollectionMatch && req.method === "POST") return handleRecordCreate(req, res, device, recordCollectionMatch[1]);
+    if (recordCollectionMatch && req.method === "GET") {
+      await requireCloudUser(req, device, recordPermissionsFor(recordCollectionMatch[1], "GET"));
+      return handleRecordsList(req, res, device, url, recordCollectionMatch[1]);
+    }
+    if (recordCollectionMatch && req.method === "POST") {
+      await requireCloudUser(req, device, recordPermissionsFor(recordCollectionMatch[1], "POST"));
+      return handleRecordCreate(req, res, device, recordCollectionMatch[1]);
+    }
     const recordItemMatch = /^\/api\/v1\/records\/([^/]+)\/([^/]+)$/.exec(url.pathname);
-    if (recordItemMatch && req.method === "GET") return handleRecordGet(req, res, device, recordItemMatch[1], recordItemMatch[2]);
-    if (recordItemMatch && req.method === "PATCH") return handleRecordPatch(req, res, device, recordItemMatch[1], recordItemMatch[2]);
-    if (recordItemMatch && req.method === "DELETE") return handleRecordDelete(req, res, device, recordItemMatch[1], recordItemMatch[2]);
-    if (req.method === "GET" && url.pathname === "/api/v1/dashboard") return handleDashboard(res, device);
-    if (req.method === "GET" && url.pathname === "/api/v1/reports") return handleReports(req, res, device);
-    if (req.method === "GET" && url.pathname === "/api/v1/profit") return handleProfit(req, res, device);
-    if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/status") return handleWhatsAppStatus(res, device);
-    if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/conversations") return handleWhatsAppConversationsList(res, device, url);
+    if (recordItemMatch && req.method === "GET") {
+      await requireCloudUser(req, device, recordPermissionsFor(recordItemMatch[1], "GET"));
+      return handleRecordGet(req, res, device, recordItemMatch[1], recordItemMatch[2]);
+    }
+    if (recordItemMatch && req.method === "PATCH") {
+      await requireCloudUser(req, device, recordPermissionsFor(recordItemMatch[1], "PATCH"));
+      return handleRecordPatch(req, res, device, recordItemMatch[1], recordItemMatch[2]);
+    }
+    if (recordItemMatch && req.method === "DELETE") {
+      await requireCloudUser(req, device, recordPermissionsFor(recordItemMatch[1], "DELETE"));
+      return handleRecordDelete(req, res, device, recordItemMatch[1], recordItemMatch[2]);
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/dashboard") {
+      await requireCloudUser(req, device, ["dashboard.view"]);
+      return handleDashboard(res, device);
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/reports") {
+      await requireCloudUser(req, device, ["reports.view"]);
+      return handleReports(req, res, device);
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/profit") {
+      await requireCloudUser(req, device, ["reports.view"]);
+      return handleProfit(req, res, device);
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/status") {
+      await requireCloudUser(req, device, ["sharing.whatsapp"]);
+      return handleWhatsAppStatus(res, device);
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/conversations") {
+      await requireCloudUser(req, device, ["sharing.whatsapp"]);
+      return handleWhatsAppConversationsList(res, device, url);
+    }
     const whatsappMessagesMatch = /^\/api\/v1\/whatsapp\/conversations\/([^/]+)\/messages$/.exec(url.pathname);
-    if (whatsappMessagesMatch && req.method === "GET") return handleWhatsAppMessagesList(res, device, whatsappMessagesMatch[1], url);
-    if (req.method === "POST" && url.pathname === "/api/v1/whatsapp/messages") return handleWhatsAppMessageSend(req, res, device);
-    if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/templates") return handleWhatsAppTemplatesList(res, device);
-    if (req.method === "POST" && url.pathname === "/api/v1/whatsapp/templates/sync") return handleWhatsAppTemplatesSync(res, device);
-    if (req.method === "GET" && url.pathname === "/api/v1/invoices") return handleInvoicesList(req, res, device, url);
-    if (req.method === "POST" && url.pathname === "/api/v1/invoices/finalize") return handleInvoiceFinalize(req, res, device);
+    if (whatsappMessagesMatch && req.method === "GET") {
+      await requireCloudUser(req, device, ["sharing.whatsapp"]);
+      return handleWhatsAppMessagesList(res, device, whatsappMessagesMatch[1], url);
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/whatsapp/messages") {
+      await requireCloudUser(req, device, ["sharing.whatsapp"]);
+      return handleWhatsAppMessageSend(req, res, device);
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/templates") {
+      await requireCloudUser(req, device, ["sharing.whatsapp"]);
+      return handleWhatsAppTemplatesList(res, device);
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/whatsapp/templates/sync") {
+      await requireCloudUser(req, device, ["sharing.whatsapp"]);
+      return handleWhatsAppTemplatesSync(res, device);
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/invoices") {
+      await requireCloudUser(req, device, ["billing.view"]);
+      return handleInvoicesList(req, res, device, url);
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/invoices/finalize") {
+      await requireCloudUser(req, device, ["billing.create"]);
+      return handleInvoiceFinalize(req, res, device);
+    }
     const invoiceMatch = /^\/api\/v1\/invoices\/([^/]+)$/.exec(url.pathname);
-    if (invoiceMatch && req.method === "GET") return handleInvoiceGet(res, device, invoiceMatch[1]);
+    if (invoiceMatch && req.method === "GET") {
+      await requireCloudUser(req, device, ["billing.view"]);
+      return handleInvoiceGet(res, device, invoiceMatch[1]);
+    }
     const invoicePaymentMatch = /^\/api\/v1\/invoices\/([^/]+)\/payments$/.exec(url.pathname);
-    if (invoicePaymentMatch && req.method === "POST") return handleInvoicePayment(req, res, device, invoicePaymentMatch[1]);
+    if (invoicePaymentMatch && req.method === "POST") {
+      await requireCloudUser(req, device, ["billing.recordPayments"]);
+      return handleInvoicePayment(req, res, device, invoicePaymentMatch[1]);
+    }
     const invoiceCancelMatch = /^\/api\/v1\/invoices\/([^/]+)\/cancel$/.exec(url.pathname);
-    if (invoiceCancelMatch && req.method === "POST") return handleInvoiceCancel(req, res, device, invoiceCancelMatch[1]);
+    if (invoiceCancelMatch && req.method === "POST") {
+      await requireCloudUser(req, device, ["billing.cancelInvoices"]);
+      return handleInvoiceCancel(req, res, device, invoiceCancelMatch[1]);
+    }
     const invoiceItemMatch = /^\/api\/v1\/invoices\/([^/]+)\/items$/.exec(url.pathname);
-    if (invoiceItemMatch && req.method === "POST") return handleInvoiceAppendItem(req, res, device, invoiceItemMatch[1]);
+    if (invoiceItemMatch && req.method === "POST") {
+      await requireCloudUser(req, device, ["billing.manageInvoices"]);
+      return handleInvoiceAppendItem(req, res, device, invoiceItemMatch[1]);
+    }
     const quotationConvertMatch = /^\/api\/v1\/quotations\/([^/]+)\/convert-to-invoice$/.exec(url.pathname);
-    if (quotationConvertMatch && req.method === "POST") return handleQuotationConvertToInvoice(req, res, device, quotationConvertMatch[1]);
+    if (quotationConvertMatch && req.method === "POST") {
+      await requireCloudUser(req, device, ["quotations.convert"]);
+      return handleQuotationConvertToInvoice(req, res, device, quotationConvertMatch[1]);
+    }
     const jobCardConvertMatch = /^\/api\/v1\/job-cards\/([^/]+)\/convert-to-invoice$/.exec(url.pathname);
-    if (jobCardConvertMatch && req.method === "POST") return handleJobCardConvertToInvoice(req, res, device, jobCardConvertMatch[1]);
-    if (req.method === "GET" && url.pathname === "/api/v1/inventory/dashboard") return handleInventoryDashboard(res, device);
-    if (req.method === "POST" && url.pathname === "/api/v1/inventory/purchases") return handleInventoryPurchase(req, res, device);
-    if (req.method === "POST" && url.pathname === "/api/v1/inventory/movements") return handleInventoryMovement(req, res, device);
+    if (jobCardConvertMatch && req.method === "POST") {
+      await requireCloudUser(req, device, ["jobCards.manage"]);
+      return handleJobCardConvertToInvoice(req, res, device, jobCardConvertMatch[1]);
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/inventory/dashboard") {
+      await requireCloudUser(req, device, ["stock.view"]);
+      return handleInventoryDashboard(res, device);
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/inventory/purchases") {
+      await requireCloudUser(req, device, ["stock.purchase"]);
+      return handleInventoryPurchase(req, res, device);
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/inventory/movements") {
+      await requireCloudUser(req, device, ["stock.adjust"]);
+      return handleInventoryMovement(req, res, device);
+    }
     if (req.method === "GET" && url.pathname === "/api/v1/sync/conflicts") {
       const [rows] = await pool.query("SELECT * FROM sync_conflicts WHERE business_id = ? AND device_id = ? AND status = 'OPEN' ORDER BY created_at DESC", [device.business_id, device.id]);
       return ok(res, { conflicts: rows });
