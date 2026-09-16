@@ -137,10 +137,18 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE TABLE IF NOT EXISTS whatsapp_settings (
   business_id INT PRIMARY KEY,
   enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  provider VARCHAR(20) NOT NULL DEFAULT 'meta',
   phone_number_id VARCHAR(80) NOT NULL DEFAULT '',
   business_account_id VARCHAR(80) NOT NULL DEFAULT '',
   display_phone_number VARCHAR(40) NOT NULL DEFAULT '',
   graph_version VARCHAR(20) NOT NULL DEFAULT '',
+  graph_base_url VARCHAR(200) NOT NULL DEFAULT 'https://graph.facebook.com',
+  access_token TEXT,
+  webhook_verify_token VARCHAR(160) NOT NULL DEFAULT '',
+  app_secret VARCHAR(255) NOT NULL DEFAULT '',
+  ycloud_api_base_url VARCHAR(200) NOT NULL DEFAULT 'https://api.ycloud.com',
+  ycloud_api_key VARCHAR(255) NOT NULL DEFAULT '',
+  ycloud_webhook_secret VARCHAR(255) NOT NULL DEFAULT '',
   webhook_verified_at DATETIME DEFAULT NULL,
   last_template_sync_at DATETIME DEFAULT NULL,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -216,4 +224,112 @@ CREATE TABLE IF NOT EXISTS whatsapp_templates (
   PRIMARY KEY (business_id, name, language_code),
   KEY idx_whatsapp_templates_status (business_id, status),
   CONSTRAINT fk_whatsapp_templates_business FOREIGN KEY (business_id) REFERENCES businesses(id)
+);
+
+CREATE TABLE IF NOT EXISTS template_variable_registry (
+  business_id INT NOT NULL,
+  token VARCHAR(80) NOT NULL,
+  label VARCHAR(120) NOT NULL DEFAULT '',
+  sample_value VARCHAR(255) NOT NULL DEFAULT '',
+  sort_order INT NOT NULL DEFAULT 0,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (business_id, token),
+  KEY idx_template_variable_registry_active (business_id, active, sort_order),
+  CONSTRAINT fk_template_variable_registry_business FOREIGN KEY (business_id) REFERENCES businesses(id)
+);
+
+CREATE TABLE IF NOT EXISTS whatsapp_template_drafts (
+  id VARCHAR(36) PRIMARY KEY,
+  business_id INT NOT NULL,
+  use_case VARCHAR(40) NOT NULL DEFAULT 'customer_chat',
+  template_name VARCHAR(120) NOT NULL,
+  language_code VARCHAR(20) NOT NULL DEFAULT 'en',
+  category VARCHAR(40) NOT NULL DEFAULT 'UTILITY',
+  header_type VARCHAR(20) NOT NULL DEFAULT 'none',
+  header_text VARCHAR(60) NOT NULL DEFAULT '',
+  body_text TEXT NOT NULL,
+  footer_text VARCHAR(60) NOT NULL DEFAULT '',
+  buttons JSON,
+  variable_tokens JSON,
+  status VARCHAR(40) NOT NULL DEFAULT 'DRAFT',
+  provider_template_name VARCHAR(120) NOT NULL DEFAULT '',
+  provider_status VARCHAR(40) NOT NULL DEFAULT '',
+  provider_response JSON,
+  rejection_reason VARCHAR(1000) NOT NULL DEFAULT '',
+  replacement_of_name VARCHAR(120) NOT NULL DEFAULT '',
+  submitted_by_user_id VARCHAR(36) NOT NULL DEFAULT '',
+  submitted_at DATETIME DEFAULT NULL,
+  approved_at DATETIME DEFAULT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_whatsapp_template_draft_name (business_id, template_name, language_code),
+  KEY idx_whatsapp_template_drafts_use_case (business_id, use_case, status),
+  KEY idx_whatsapp_template_drafts_provider (business_id, provider_template_name, language_code, provider_status),
+  CONSTRAINT fk_whatsapp_template_drafts_business FOREIGN KEY (business_id) REFERENCES businesses(id)
+);
+
+CREATE TABLE IF NOT EXISTS whatsapp_template_mappings (
+  business_id INT NOT NULL,
+  use_case VARCHAR(40) NOT NULL,
+  template_name VARCHAR(120) NOT NULL,
+  language_code VARCHAR(20) NOT NULL DEFAULT 'en',
+  variable_tokens JSON,
+  requires_document_header BOOLEAN NOT NULL DEFAULT FALSE,
+  pending_template_name VARCHAR(120) NOT NULL DEFAULT '',
+  pending_language_code VARCHAR(20) NOT NULL DEFAULT '',
+  updated_by_user_id VARCHAR(36) NOT NULL DEFAULT '',
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (business_id, use_case),
+  KEY idx_whatsapp_template_mappings_template (business_id, template_name, language_code),
+  CONSTRAINT fk_whatsapp_template_mappings_business FOREIGN KEY (business_id) REFERENCES businesses(id)
+);
+
+CREATE TABLE IF NOT EXISTS whatsapp_template_submission_history (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  business_id INT NOT NULL,
+  draft_id VARCHAR(36) NOT NULL,
+  template_name VARCHAR(120) NOT NULL,
+  language_code VARCHAR(20) NOT NULL DEFAULT 'en',
+  submitted_by_user_id VARCHAR(36) NOT NULL DEFAULT '',
+  body_text TEXT NOT NULL,
+  payload JSON,
+  provider_response JSON,
+  provider_status VARCHAR(40) NOT NULL DEFAULT '',
+  error_message VARCHAR(1000) NOT NULL DEFAULT '',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_whatsapp_submission_history_draft (business_id, draft_id, created_at),
+  KEY idx_whatsapp_submission_history_template (business_id, template_name, language_code),
+  CONSTRAINT fk_whatsapp_template_submission_history_business FOREIGN KEY (business_id) REFERENCES businesses(id)
+);
+
+CREATE TABLE IF NOT EXISTS whatsapp_template_mapping_history (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  business_id INT NOT NULL,
+  use_case VARCHAR(40) NOT NULL,
+  previous_template_name VARCHAR(120) NOT NULL DEFAULT '',
+  previous_language_code VARCHAR(20) NOT NULL DEFAULT '',
+  next_template_name VARCHAR(120) NOT NULL DEFAULT '',
+  next_language_code VARCHAR(20) NOT NULL DEFAULT '',
+  changed_by_user_id VARCHAR(36) NOT NULL DEFAULT '',
+  reason VARCHAR(500) NOT NULL DEFAULT '',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_whatsapp_mapping_history_use_case (business_id, use_case, created_at),
+  CONSTRAINT fk_whatsapp_template_mapping_history_business FOREIGN KEY (business_id) REFERENCES businesses(id)
+);
+
+CREATE TABLE IF NOT EXISTS whatsapp_template_sync_events (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  business_id INT NOT NULL,
+  event_type VARCHAR(40) NOT NULL,
+  template_name VARCHAR(120) NOT NULL DEFAULT '',
+  language_code VARCHAR(20) NOT NULL DEFAULT '',
+  status VARCHAR(40) NOT NULL DEFAULT '',
+  message VARCHAR(1000) NOT NULL DEFAULT '',
+  payload JSON,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  KEY idx_whatsapp_template_sync_events_recent (business_id, created_at),
+  KEY idx_whatsapp_template_sync_events_template (business_id, template_name, language_code),
+  CONSTRAINT fk_whatsapp_template_sync_events_business FOREIGN KEY (business_id) REFERENCES businesses(id)
 );

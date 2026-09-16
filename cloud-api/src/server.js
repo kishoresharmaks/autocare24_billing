@@ -46,7 +46,7 @@ const resolveUploadDir = () => {
   return resolved;
 };
 
-const PORT = Number(process.env.PORT || 8080);
+const PORT = Number(process.env.PORT || 8081);
 const REGISTRATION_KEY = process.env.SYNC_REGISTRATION_KEY || "";
 const UPLOAD_DIR = resolveUploadDir();
 const API_VERSION = "v1";
@@ -66,10 +66,230 @@ const USER_SESSION_TTL_MS = envPositiveInt("USER_SESSION_TTL_MS", 7 * 24 * 60 * 
 const USER_SESSION_HEADER = "x-autocare-user-token";
 const TOKEN_HASH_SECRET = String(process.env.TOKEN_HASH_SECRET || "").trim();
 const ALLOW_LEGACY_TOKEN_MIGRATION = envFlag("ALLOW_LEGACY_TOKEN_MIGRATION", !IS_PRODUCTION);
-const WHATSAPP_GRAPH_BASE_URL = String(process.env.WHATSAPP_API_BASE_URL || "https://graph.facebook.com").replace(/\/+$/, "");
-const WHATSAPP_GRAPH_VERSION = String(process.env.WHATSAPP_GRAPH_VERSION || "v20.0").replace(/^\/+/, "");
+const DEFAULT_WHATSAPP_GRAPH_BASE_URL = "https://graph.facebook.com";
+const DEFAULT_WHATSAPP_GRAPH_VERSION = "v20.0";
+const DEFAULT_YCLOUD_API_BASE_URL = "https://api.ycloud.com";
 const WHATSAPP_CUSTOMER_WINDOW_MS = 24 * 60 * 60 * 1000;
-const WHATSAPP_DOCUMENT_MAX_BYTES = envPositiveInt("WHATSAPP_DOCUMENT_MAX_BYTES", 18 * 1024 * 1024);
+const WHATSAPP_DOCUMENT_MAX_BYTES = 18 * 1024 * 1024;
+const WHATSAPP_TEMPLATE_BODY_MAX = 1024;
+const WHATSAPP_TEMPLATE_FOOTER_MAX = 60;
+const WHATSAPP_TEMPLATE_HEADER_TEXT_MAX = 60;
+const WHATSAPP_TEMPLATE_BUTTON_MAX = 10;
+const WHATSAPP_TEMPLATE_MIN_STATIC_WORDS_PER_VARIABLE = 5;
+const WHATSAPP_TEMPLATE_MANAGER_ERRORS = {
+  missingWabaId: "WhatsApp Business Account ID is not configured. Go to Settings > WhatsApp.",
+  pending: "This template is pending Meta review. Sends will resume once approved.",
+  rejected: "This template was rejected by Meta/YCloud. Review the rejection reason, edit it, and resubmit.",
+  missingDocumentHeader: "PDF templates require a Document header. Edit the template to add one.",
+  missingApprovedMapping: "No approved template is mapped for this WhatsApp action. Sync or submit a template in Settings > WhatsApp.",
+  cloudUnreachable: "WhatsApp cloud connection is unavailable. The message was saved as an unsent draft.",
+  ycloud429: "Too many YCloud requests. Wait before syncing again.",
+  invalidVariables: "Template variables must be continuous and use approved app tokens.",
+  variableDensity: "This template has too many variables for its length. Reduce the number of variables or add more fixed message text."
+};
+const WHATSAPP_TEMPLATE_USE_CASES = new Set([
+  "invoice",
+  "invoice_pdf",
+  "due_reminder",
+  "quotation",
+  "job_card_status",
+  "job_card_pdf",
+  "customer_chat",
+  "custom"
+]);
+const WHATSAPP_DOCUMENT_TEMPLATE_USE_CASES = new Set(["invoice_pdf", "job_card_pdf"]);
+const WHATSAPP_REQUIRED_TEMPLATE_DEFAULTS = [
+  {
+    useCase: "invoice",
+    templateName: "invoice_ready",
+    languageCode: "en",
+    requiresDocumentHeader: false,
+    variableTokens: ["customer_name", "invoice_number", "business_name", "amount", "due_amount", "vehicle_number"]
+  },
+  {
+    useCase: "invoice_pdf",
+    templateName: "invoice_pdf_ready",
+    languageCode: "en",
+    requiresDocumentHeader: true,
+    variableTokens: ["customer_name", "invoice_number", "business_name", "amount", "due_amount", "vehicle_number"]
+  },
+  {
+    useCase: "due_reminder",
+    templateName: "payment_reminder",
+    languageCode: "en",
+    requiresDocumentHeader: false,
+    variableTokens: ["customer_name", "business_name", "invoice_number", "due_amount", "amount"]
+  },
+  {
+    useCase: "quotation",
+    templateName: "quotation_ready",
+    languageCode: "en",
+    requiresDocumentHeader: false,
+    variableTokens: ["customer_name", "quotation_number", "business_name", "amount", "vehicle_number"]
+  },
+  {
+    useCase: "job_card_status",
+    templateName: "job_card_update",
+    languageCode: "en",
+    requiresDocumentHeader: false,
+    variableTokens: ["customer_name", "business_name", "job_number", "vehicle_number", "status", "delivery_time"]
+  },
+  {
+    useCase: "job_card_pdf",
+    templateName: "job_card_pdf_ready",
+    languageCode: "en",
+    requiresDocumentHeader: true,
+    variableTokens: ["customer_name", "business_name", "job_number", "vehicle_number", "amount", "delivery_time"]
+  },
+  {
+    useCase: "customer_chat",
+    templateName: "customer_chat",
+    languageCode: "en",
+    requiresDocumentHeader: false,
+    variableTokens: ["customer_name", "business_name", "message"]
+  }
+];
+const WHATSAPP_TEMPLATE_VARIABLES = [
+  { token: "customer_name", label: "Customer name", sampleValue: "Ravi Kumar" },
+  { token: "invoice_number", label: "Invoice number", sampleValue: "INV-1001" },
+  { token: "quotation_number", label: "Quotation number", sampleValue: "QT-1001" },
+  { token: "amount", label: "Amount", sampleValue: "Rs 4,500.00" },
+  { token: "due_amount", label: "Due amount", sampleValue: "Rs 1,200.00" },
+  { token: "vehicle_number", label: "Vehicle number", sampleValue: "TN 01 AB 1234" },
+  { token: "business_name", label: "Business name", sampleValue: "Autocare24" },
+  { token: "job_number", label: "Job card number", sampleValue: "JC-1001" },
+  { token: "delivery_time", label: "Delivery time", sampleValue: "Today 6:00 PM" },
+  { token: "status", label: "Status", sampleValue: "Ready for delivery" },
+  { token: "message", label: "Message", sampleValue: "Please check the attached details." }
+].map((entry, index) => ({ ...entry, sortOrder: (index + 1) * 10 }));
+function extractTemplateTokensFromText(text) {
+  const tokens = [];
+  const seen = new Set();
+  const pattern = /{{\s*([^{}\s]+)\s*}}/g;
+  let match;
+  while ((match = pattern.exec(String(text || "")))) {
+    const token = String(match[1] || "").trim();
+    if (!seen.has(token)) {
+      seen.add(token);
+      tokens.push(token);
+    }
+  }
+  return tokens;
+}
+const WHATSAPP_PRODUCTION_TEMPLATE_DRAFTS = [
+  {
+    useCase: "invoice",
+    templateName: "invoice_ready",
+    languageCode: "en",
+    category: "UTILITY",
+    headerType: "none",
+    headerText: "",
+    bodyText: [
+      "Hi {{customer_name}}, your invoice {{invoice_number}} from {{business_name}} is ready for review.",
+      "The total invoice amount is {{amount}} and the current balance due is {{due_amount}}.",
+      "Vehicle reference: {{vehicle_number}}.",
+      "Please check the invoice details and contact our team if any correction is needed before payment or delivery."
+    ].join("\n"),
+    footerText: "Autocare24",
+    buttons: []
+  },
+  {
+    useCase: "invoice_pdf",
+    templateName: "invoice_pdf_ready",
+    languageCode: "en",
+    category: "UTILITY",
+    headerType: "document",
+    headerText: "",
+    bodyText: [
+      "Hi {{customer_name}}, your invoice PDF for invoice {{invoice_number}} from {{business_name}} is attached.",
+      "The invoice total is {{amount}} and the current balance due is {{due_amount}} for vehicle {{vehicle_number}}.",
+      "Please review the document and keep it for your service and payment records."
+    ].join("\n"),
+    footerText: "Autocare24",
+    buttons: []
+  },
+  {
+    useCase: "due_reminder",
+    templateName: "payment_reminder",
+    languageCode: "en",
+    category: "UTILITY",
+    headerType: "none",
+    headerText: "",
+    bodyText: [
+      "Hi {{customer_name}}, this is a payment reminder from {{business_name}} for invoice {{invoice_number}}.",
+      "The pending amount is {{due_amount}} from the total invoice amount {{amount}}.",
+      "Please complete the payment when convenient or contact our team if you need any clarification."
+    ].join("\n"),
+    footerText: "Autocare24",
+    buttons: []
+  },
+  {
+    useCase: "quotation",
+    templateName: "quotation_ready",
+    languageCode: "en",
+    category: "UTILITY",
+    headerType: "none",
+    headerText: "",
+    bodyText: [
+      "Hi {{customer_name}}, your quotation {{quotation_number}} from {{business_name}} is ready for review.",
+      "The estimated amount is {{amount}} for vehicle {{vehicle_number}}.",
+      "Please check the details and confirm approval so our team can plan the work."
+    ].join("\n"),
+    footerText: "Autocare24",
+    buttons: []
+  },
+  {
+    useCase: "job_card_status",
+    templateName: "job_card_update",
+    languageCode: "en",
+    category: "UTILITY",
+    headerType: "none",
+    headerText: "",
+    bodyText: [
+      "Hi {{customer_name}}, here is an update from {{business_name}} for job card {{job_number}}.",
+      "Vehicle reference: {{vehicle_number}}.",
+      "Current status: {{status}}.",
+      "Expected delivery: {{delivery_time}}.",
+      "Please contact our team if you need any change or clarification."
+    ].join("\n"),
+    footerText: "Autocare24",
+    buttons: []
+  },
+  {
+    useCase: "job_card_pdf",
+    templateName: "job_card_pdf_ready",
+    languageCode: "en",
+    category: "UTILITY",
+    headerType: "document",
+    headerText: "",
+    bodyText: [
+      "Hi {{customer_name}}, your job card document from {{business_name}} for job card {{job_number}} is attached.",
+      "Vehicle reference: {{vehicle_number}}.",
+      "The estimated amount is {{amount}} and the expected delivery time is {{delivery_time}}.",
+      "Please review the document for service details."
+    ].join("\n"),
+    footerText: "Autocare24",
+    buttons: []
+  },
+  {
+    useCase: "customer_chat",
+    templateName: "customer_chat",
+    languageCode: "en",
+    category: "UTILITY",
+    headerType: "none",
+    headerText: "",
+    bodyText: [
+      "Hi {{customer_name}}, this is {{business_name}} from customer support.",
+      "We are contacting you with an update: {{message}}",
+      "Please reply here if you need help."
+    ].join("\n"),
+    footerText: "Autocare24",
+    buttons: []
+  }
+].map((draft) => ({
+  ...draft,
+  variableTokens: extractTemplateTokensFromText(draft.bodyText)
+}));
 const UPDATE_FEED_PREFIX = "/updates/win";
 const GITHUB_RELEASE_TOKEN = String(process.env.GITHUB_RELEASE_TOKEN || process.env.GH_TOKEN || "").trim();
 const GITHUB_RELEASE_OWNER = String(process.env.GITHUB_RELEASE_OWNER || "kishoresharmaks").trim();
@@ -151,6 +371,17 @@ const errorFromThrown = (res, err) => {
   const code = err?.code || (status === 400 ? "invalid_request" : status === 413 ? "request_body_too_large" : status === 429 ? "rate_limited" : "internal_error");
   const message = status >= 500 ? "Unexpected API error." : err?.message || "Request could not be processed.";
   return error(res, status, code, message);
+};
+const handleRouteRejection = (req, res, err) => {
+  console.error("Cloud API request failed", {
+    method: req.method,
+    url: req.url,
+    status: Number.isInteger(err?.status) ? err.status : 500,
+    code: err?.code || "internal_error",
+    message: err?.message || String(err || "Unknown error")
+  });
+  if (res.writableEnded) return;
+  return errorFromThrown(res, err);
 };
 const noContent = (res) => {
   res.writeHead(204, SECURITY_HEADERS);
@@ -629,6 +860,80 @@ const recordFlag = (value, fallback = false) => {
   if (typeof value === "number") return value !== 0;
   return /^(1|true|yes|on)$/i.test(String(value).trim());
 };
+const MAX_WARRANTY_MONTHS = 240;
+const parseWarrantyDurationMonths = (value) => {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.min(MAX_WARRANTY_MONTHS, Math.max(1, Math.round(value)));
+  }
+  const text = String(value ?? "").trim().toLowerCase();
+  if (!text) return 0;
+  const compact = text.replace(/\s+/g, "");
+  const match = /^(\d+(?:\.\d+)?)(y|yr|yrs|year|years|m|mo|mos|month|months)?$/.exec(compact);
+  if (match) {
+    const amount = Number(match[1]);
+    const unit = match[2] || "m";
+    const months = unit.startsWith("y") ? amount * 12 : amount;
+    return Number.isFinite(months) && months > 0 ? Math.min(MAX_WARRANTY_MONTHS, Math.max(1, Math.round(months))) : 0;
+  }
+  const years = /(\d+(?:\.\d+)?)\s*(?:y|yr|yrs|year|years)\b/.exec(text);
+  if (years) return Math.min(MAX_WARRANTY_MONTHS, Math.max(1, Math.round(Number(years[1]) * 12)));
+  const months = /(\d+(?:\.\d+)?)\s*(?:m|mo|mos|month|months)\b/.exec(text);
+  if (months) return Math.min(MAX_WARRANTY_MONTHS, Math.max(1, Math.round(Number(months[1]))));
+  return 0;
+};
+const warrantyDurationLabel = (months) => {
+  const value = parseWarrantyDurationMonths(months);
+  if (!value) return "";
+  if (value % 12 === 0) {
+    const years = value / 12;
+    return `${years} ${years === 1 ? "year" : "years"}`;
+  }
+  return `${value} ${value === 1 ? "month" : "months"}`;
+};
+const normalizeWarrantyText = (value, months = 0) => String(value ?? "").trim().slice(0, 180) || warrantyDurationLabel(months);
+const normalizeDateOnly = (value) => {
+  const text = String(value ?? "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : "";
+};
+const addMonthsToDate = (date, months) => {
+  const startDate = normalizeDateOnly(date);
+  const durationMonths = parseWarrantyDurationMonths(months);
+  if (!startDate || !durationMonths) return "";
+  const [year, month, day] = startDate.split("-").map(Number);
+  if (!year || !month || !day) return "";
+  const lastDayOfTargetMonth = new Date(year, month - 1 + durationMonths + 1, 0).getDate();
+  const normalized = new Date(year, month - 1 + durationMonths, Math.min(day, lastDayOfTargetMonth));
+  const local = new Date(normalized.getTime() - normalized.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+};
+const warrantyStatus = (endDate) => {
+  const date = normalizeDateOnly(endDate);
+  if (!date) return "none";
+  const today = localDate();
+  if (date < today) return "expired";
+  const diffMs = new Date(`${date}T00:00:00`).getTime() - new Date(`${today}T00:00:00`).getTime();
+  const days = Math.ceil(diffMs / 86400000);
+  return days <= 30 ? "expiring" : "active";
+};
+const invoiceItemWarrantyFields = (item = {}) => {
+  const warrantyDurationMonths = parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText);
+  const warrantyText = normalizeWarrantyText(item.warrantyText, warrantyDurationMonths);
+  const warrantyIncluded = recordFlag(item.warrantyIncluded, false) && warrantyDurationMonths > 0;
+  return {
+    warrantyIncluded,
+    warrantyDurationMonths,
+    warrantyText,
+    warrantyStartDate: warrantyIncluded ? normalizeDateOnly(item.warrantyStartDate) : "",
+    warrantyEndDate: warrantyIncluded ? normalizeDateOnly(item.warrantyEndDate) : ""
+  };
+};
+const invoiceItemWarrantyFieldsForInvoice = (item = {}, invoiceDate = "") => {
+  const fields = invoiceItemWarrantyFields(item);
+  if (!fields.warrantyIncluded) return fields;
+  const warrantyStartDate = fields.warrantyStartDate || normalizeDateOnly(invoiceDate);
+  const warrantyEndDate = fields.warrantyEndDate || addMonthsToDate(warrantyStartDate, fields.warrantyDurationMonths);
+  return { ...fields, warrantyStartDate, warrantyEndDate };
+};
 const validatePassword = (password) => {
   const text = String(password || "");
   if (text.length < 8) throw Object.assign(new Error("Password must be at least 8 characters."), { status: 422 });
@@ -1072,6 +1377,14 @@ async function migrate() {
     await ensureIndex(connection, "business_records", "idx_business_records_entity_active", "(business_id, entity, deleted_at, revision)");
     await ensureIndex(connection, "sync_revisions", "idx_sync_revisions_record", "(business_id, entity, record_id, id)");
     await ensureIndex(connection, "file_metadata", "idx_file_metadata_entity", "(business_id, entity, entity_id, created_at)");
+    await ensureColumn(connection, "whatsapp_settings", "provider", "VARCHAR(20) NOT NULL DEFAULT 'meta'");
+    await ensureColumn(connection, "whatsapp_settings", "graph_base_url", "VARCHAR(200) NOT NULL DEFAULT 'https://graph.facebook.com'");
+    await ensureColumn(connection, "whatsapp_settings", "access_token", "TEXT");
+    await ensureColumn(connection, "whatsapp_settings", "webhook_verify_token", "VARCHAR(160) NOT NULL DEFAULT ''");
+    await ensureColumn(connection, "whatsapp_settings", "app_secret", "VARCHAR(255) NOT NULL DEFAULT ''");
+    await ensureColumn(connection, "whatsapp_settings", "ycloud_api_base_url", "VARCHAR(200) NOT NULL DEFAULT 'https://api.ycloud.com'");
+    await ensureColumn(connection, "whatsapp_settings", "ycloud_api_key", "VARCHAR(255) NOT NULL DEFAULT ''");
+    await ensureColumn(connection, "whatsapp_settings", "ycloud_webhook_secret", "VARCHAR(255) NOT NULL DEFAULT ''");
     await ensurePrimaryKey(connection, "idempotency_keys", ["business_id", "idempotency_key"]);
     await ensureIndex(connection, "idempotency_keys", "idx_idempotency_business_created", "(business_id, created_at)");
     await ensureIndex(connection, "sync_conflicts", "idx_conflicts_device_created", "(business_id, device_id, status, created_at)");
@@ -1079,6 +1392,8 @@ async function migrate() {
     await ensureIndex(connection, "audit_log", "idx_audit_log_entity", "(business_id, entity, entity_id, created_at)");
     await connection.query("INSERT IGNORE INTO businesses (id, name) VALUES (1, 'Autocare24')");
     await connection.query("INSERT IGNORE INTO number_sequences (business_id, sequence_key, prefix, last_number) VALUES (1, 'invoice', 'INV', 0), (1, 'quotation', 'QT', 0), (1, 'job_card', 'JC', 0), (1, 'customer', 'CUS', 0)");
+    const [businessRows] = await connection.query("SELECT id FROM businesses");
+    for (const business of businessRows) await ensureWhatsAppTemplateDefaults(connection, business.id);
     await backfillCustomerCodes(connection);
     await alignSyncRevisionAutoIncrement(connection);
   } finally {
@@ -2041,6 +2356,58 @@ async function listInvoiceSummaries(connection, businessId, query = "", limit = 
   return limit > 0 ? invoices.slice(0, limit) : invoices;
 }
 
+async function listWarrantyRecords(connection, businessId, query = "") {
+  const q = String(query || "").trim().toLowerCase();
+  const invoices = await listInvoiceSummaries(connection, businessId, "", 0);
+  const invoiceMap = new Map(invoices.map((invoice) => [String(invoice.id || ""), invoice]));
+  const items = rowList(await loadBusinessRecords(connection, businessId, "invoice_items"));
+  return items
+    .filter((item) => recordFlag(item.warrantyIncluded, false))
+    .map((item) => {
+      const invoice = invoiceMap.get(String(item.invoiceId || ""));
+      if (!invoice || invoice.invoiceStatus === "cancelled") return null;
+      const warrantyDurationMonths = parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText);
+      const warrantyStartDate = normalizeDateOnly(item.warrantyStartDate) || normalizeDateOnly(invoice.invoiceDate);
+      const warrantyEndDate = normalizeDateOnly(item.warrantyEndDate) || addMonthsToDate(warrantyStartDate, warrantyDurationMonths);
+      if (!warrantyDurationMonths || !warrantyEndDate) return null;
+      return {
+        invoiceId: invoice.id,
+        invoiceNumber: invoice.invoiceNumber,
+        invoiceDate: invoice.invoiceDate,
+        invoiceStatus: invoice.invoiceStatus,
+        itemId: String(item.id || ""),
+        serviceId: String(item.serviceId || ""),
+        description: String(item.description || ""),
+        customerId: String(invoice.customerId || ""),
+        customerCode: String(invoice.customerCode || ""),
+        customerName: String(invoice.customerName || ""),
+        customerPhone: String(invoice.customerPhone || ""),
+        vehicleType: normalizeVehicleType(invoice.vehicleType),
+        vehicleNumber: String(invoice.vehicleNumber || ""),
+        warrantyDurationMonths,
+        warrantyText: normalizeWarrantyText(item.warrantyText, warrantyDurationMonths),
+        warrantyStartDate,
+        warrantyEndDate,
+        status: warrantyStatus(warrantyEndDate)
+      };
+    })
+    .filter(Boolean)
+    .filter((record) => {
+      if (!q) return true;
+      return [
+        record.invoiceNumber,
+        record.customerCode,
+        record.customerName,
+        record.customerPhone,
+        record.vehicleNumber,
+        record.description,
+        record.warrantyText,
+        record.status
+      ].some((value) => String(value || "").toLowerCase().includes(q));
+    })
+    .sort((a, b) => String(a.warrantyEndDate || "").localeCompare(String(b.warrantyEndDate || "")) || String(b.invoiceDate || "").localeCompare(String(a.invoiceDate || "")));
+}
+
 const recentRecordDate = (record = {}) => String(record.updatedAt || record.createdAt || record.jobDate || record.invoiceDate || "");
 const sortRecentRecords = (a, b) => recentRecordDate(b).localeCompare(recentRecordDate(a));
 
@@ -2545,6 +2912,7 @@ async function createFinalInvoiceGraph(connection, device, req, input) {
       unitPrice: item.unitPrice,
       gstRate: item.gstRate,
       sacCode: item.sacCode,
+      ...invoiceItemWarrantyFieldsForInvoice(item, invoiceDate),
       lineSubTotal: item.lineSubTotal,
       lineTax: item.lineTax,
       lineTotal: item.lineTotal
@@ -2675,6 +3043,16 @@ async function handleInvoicesList(req, res, device, url) {
   }
 }
 
+async function handleWarrantiesList(req, res, device, url) {
+  const connection = await pool.getConnection();
+  try {
+    const warranties = await listWarrantyRecords(connection, device.business_id, url.searchParams.get("query") || "");
+    ok(res, { warranties });
+  } finally {
+    connection.release();
+  }
+}
+
 async function handleInvoiceGet(res, device, invoiceId) {
   const connection = await pool.getConnection();
   try {
@@ -2774,7 +3152,8 @@ async function handleInvoiceAppendItem(req, res, device, invoiceId) {
       quantity: item.quantity,
       unitPrice: item.unitPrice,
       gstRate: item.gstRate,
-      sacCode: item.sacCode
+      sacCode: item.sacCode,
+      ...invoiceItemWarrantyFieldsForInvoice(item, current.invoiceDate)
     }));
     const totals = calculateInvoiceTotals(current.invoiceMode, current.taxScope, [...existingInputs, appendItem], current.discount);
     const paidAmount = money(current.paidAmount);
@@ -2809,6 +3188,7 @@ async function handleInvoiceAppendItem(req, res, device, invoiceId) {
         unitPrice: item.unitPrice,
         gstRate: item.gstRate,
         sacCode: item.sacCode,
+        ...invoiceItemWarrantyFieldsForInvoice(item, current.invoiceDate),
         lineSubTotal: item.lineSubTotal,
         lineTax: item.lineTax,
         lineTotal: item.lineTotal
@@ -2832,7 +3212,8 @@ const actionItemInput = (item) => ({
   quantity: money(item.quantity),
   unitPrice: money(item.unitPrice),
   gstRate: money(item.gstRate),
-  sacCode: normalizeSacCode(item.sacCode)
+  sacCode: normalizeSacCode(item.sacCode),
+  ...invoiceItemWarrantyFields(item)
 });
 
 async function handleQuotationConvertToInvoice(req, res, device, quotationId) {
@@ -4098,9 +4479,36 @@ async function handleFileDownload(res, device, fileId) {
 async function handleHealth(res) {
   try {
     await pool.query({ sql: "SELECT 1 AS ok", timeout: HEALTHCHECK_DB_TIMEOUT_MS });
-    return ok(res, { ok: true, version: API_VERSION, serverTime: new Date().toISOString(), database: "ok" });
+    const whatsappConfig = await whatsappRuntimeConfig(pool, 1);
+    return ok(res, {
+      ok: true,
+      version: API_VERSION,
+      serverTime: new Date().toISOString(),
+      database: "ok",
+      whatsapp: {
+        provider: whatsappConfig.provider,
+        enabled: whatsappConfig.enabled,
+        configured: whatsappConfig.configured,
+        webhookReady: whatsappConfig.webhookReady,
+        missingConfig: whatsappMissingConfig(whatsappConfig)
+      }
+    });
   } catch {
-    return error(res, 503, "database_unavailable", "Cloud database is not reachable.");
+    return json(res, 503, {
+      error: {
+        code: "database_unavailable",
+        message: "Cloud database is not reachable."
+      },
+      data: {
+        whatsapp: {
+          provider: "database",
+          enabled: false,
+          configured: false,
+          webhookReady: false,
+          missingConfig: ["Database unavailable"]
+        }
+      }
+    });
   }
 }
 
@@ -4232,31 +4640,91 @@ async function handleUpdateAsset(req, res, url) {
   }
 }
 
-const isTruthyEnv = (value) => ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
-const whatsappRuntimeConfig = () => {
-  const enabled = isTruthyEnv(process.env.WHATSAPP_ENABLED);
-  const accessToken = String(process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
-  const phoneNumberId = String(process.env.WHATSAPP_PHONE_NUMBER_ID || "").trim();
-  const businessAccountId = String(process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || "").trim();
-  const verifyToken = String(process.env.WHATSAPP_WEBHOOK_VERIFY_TOKEN || "").trim();
-  const appSecret = String(process.env.WHATSAPP_APP_SECRET || "").trim();
+const isTruthyValue = (value) => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  return ["1", "true", "yes", "on"].includes(String(value || "").trim().toLowerCase());
+};
+const whatsappPhoneDigits = (phone) => String(phone || "").replace(/\D/g, "");
+const whatsappPhoneE164 = (phone) => {
+  const digits = whatsappPhoneDigits(phone);
+  if (!digits) return "";
+  return `+${digits.length === 10 ? `91${digits}` : digits}`;
+};
+const cleanWhatsAppText = (value, max = 500) => String(value || "").trim().slice(0, max);
+const normalizeWhatsAppProvider = (value) => String(value || "").trim().toLowerCase() === "ycloud" ? "ycloud" : "meta";
+
+const whatsappConfigFromRow = (row = {}) => {
+  const provider = normalizeWhatsAppProvider(row.provider);
+  const displayPhoneNumber = provider === "ycloud"
+    ? whatsappPhoneE164(row.display_phone_number || "")
+    : cleanWhatsAppText(row.display_phone_number, 40);
+  const phoneNumberId = provider === "ycloud"
+    ? whatsappPhoneDigits(displayPhoneNumber)
+    : cleanWhatsAppText(row.phone_number_id, 80);
+  const businessAccountId = cleanWhatsAppText(row.business_account_id, 80);
+  const accessToken = cleanWhatsAppText(row.access_token, 5000);
+  const verifyToken = cleanWhatsAppText(row.webhook_verify_token, 160);
+  const appSecret = cleanWhatsAppText(row.app_secret, 255);
+  const ycloudApiKey = cleanWhatsAppText(row.ycloud_api_key, 255);
+  const ycloudFromPhone = whatsappPhoneE164(row.display_phone_number || "");
+  const ycloudWebhookSecret = cleanWhatsAppText(row.ycloud_webhook_secret, 255);
+  const providerConfigured = provider === "ycloud"
+    ? Boolean(ycloudApiKey && ycloudFromPhone)
+    : Boolean(accessToken && phoneNumberId);
+  const providerWebhookReady = provider === "ycloud"
+    ? Boolean(ycloudWebhookSecret)
+    : Boolean(verifyToken && appSecret);
+  const enabled = isTruthyValue(row.enabled);
   return {
+    businessId: Number(row.business_id || 0) || 0,
+    provider,
     enabled,
-    configured: enabled && Boolean(accessToken && phoneNumberId),
-    webhookReady: enabled && Boolean(verifyToken && appSecret),
+    configured: enabled && providerConfigured,
+    webhookReady: enabled && providerWebhookReady,
     accessToken,
     phoneNumberId,
     businessAccountId,
     verifyToken,
     appSecret,
-    graphVersion: WHATSAPP_GRAPH_VERSION,
-    graphBaseUrl: WHATSAPP_GRAPH_BASE_URL,
-    displayPhoneNumber: String(process.env.WHATSAPP_DISPLAY_PHONE_NUMBER || "").trim()
+    graphVersion: cleanWhatsAppText(row.graph_version, 20).replace(/^\/+/, "") || DEFAULT_WHATSAPP_GRAPH_VERSION,
+    graphBaseUrl: cleanWhatsAppText(row.graph_base_url, 200).replace(/\/+$/, "") || DEFAULT_WHATSAPP_GRAPH_BASE_URL,
+    ycloudApiKey,
+    ycloudFromPhone,
+    ycloudWebhookSecret,
+    ycloudApiBaseUrl: cleanWhatsAppText(row.ycloud_api_base_url, 200).replace(/\/+$/, "") || DEFAULT_YCLOUD_API_BASE_URL,
+    displayPhoneNumber
   };
 };
 
+async function whatsappRuntimeConfig(connection, businessId) {
+  const [rows] = await connection.query("SELECT * FROM whatsapp_settings WHERE business_id = ? LIMIT 1", [businessId]);
+  return whatsappConfigFromRow(rows[0] || { business_id: businessId });
+}
+
+async function listWhatsAppRuntimeConfigs(connection, provider = "") {
+  const params = [];
+  const where = provider ? "WHERE provider = ?" : "";
+  if (provider) params.push(normalizeWhatsAppProvider(provider));
+  const [rows] = await connection.query(`SELECT * FROM whatsapp_settings ${where}`, params);
+  return rows.map(whatsappConfigFromRow);
+}
+
+const whatsappMissingConfig = (config) => {
+  const missing = [];
+  if (!config.enabled) missing.push("Enable WhatsApp");
+  if (config.provider === "ycloud") {
+    if (!config.ycloudApiKey) missing.push("YCloud API key");
+    if (!config.ycloudFromPhone) missing.push("YCloud sender phone");
+  } else {
+    if (!config.accessToken) missing.push("Meta access token");
+    if (!config.phoneNumberId) missing.push("Meta phone number ID");
+  }
+  return missing;
+};
+
 const normalizeWhatsAppPhone = (phone) => {
-  const digits = String(phone || "").replace(/\D/g, "");
+  const digits = whatsappPhoneDigits(phone);
   if (digits.length === 10) return `91${digits}`;
   if (digits.length >= 8 && digits.length <= 15) return digits;
   throwHttpError(422, "validation_error", "A valid WhatsApp phone number is required.");
@@ -4272,6 +4740,10 @@ const normalizeWhatsAppPhoneOptional = (phone) => {
 
 const whatsappDateIso = (value) => dateColumnIso(value);
 const mysqlDateFromUnix = (value) => {
+  if (typeof value === "string" && value.trim() && !/^\d+(\.\d+)?$/.test(value.trim())) {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+  }
   const seconds = Number(value || 0);
   return Number.isFinite(seconds) && seconds > 0 ? new Date(seconds * 1000) : new Date();
 };
@@ -4326,26 +4798,509 @@ const mapWhatsAppTemplate = (row = {}) => ({
   updatedAt: whatsappDateIso(row.updated_at)
 });
 
-async function ensureWhatsAppSettings(connection, businessId) {
-  const config = whatsappRuntimeConfig();
+const parseJsonArrayColumn = (value) => {
+  const parsed = parseJsonColumn(value, []);
+  return Array.isArray(parsed) ? parsed : [];
+};
+const normalizeWhatsAppTemplateUseCase = (value) => {
+  const useCase = String(value || "").trim();
+  return WHATSAPP_TEMPLATE_USE_CASES.has(useCase) ? useCase : "customer_chat";
+};
+const normalizeWhatsAppTemplateCategory = (value) => {
+  const category = String(value || "").trim().toUpperCase();
+  return ["UTILITY", "MARKETING", "AUTHENTICATION"].includes(category) ? category : "UTILITY";
+};
+const normalizeWhatsAppTemplateHeaderType = (value) => {
+  const headerType = String(value || "").trim().toLowerCase();
+  return ["none", "text", "document"].includes(headerType) ? headerType : "none";
+};
+const normalizeWhatsAppTemplateHeaderTypeForUseCase = (useCase, headerType) => {
+  if (WHATSAPP_DOCUMENT_TEMPLATE_USE_CASES.has(useCase)) return "document";
+  if (useCase !== "custom" && headerType === "document") return "none";
+  return headerType;
+};
+const normalizeWhatsAppLanguage = (value) => {
+  const language = String(value || "en").trim().replace(/[^A-Za-z0-9_-]/g, "").slice(0, 20);
+  return language || "en";
+};
+const safeWhatsAppTemplateName = (value, fallback = "autocare24_template") => {
+  const cleaned = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .replace(/_{2,}/g, "_")
+    .slice(0, 120);
+  return cleaned || fallback;
+};
+const versionedWhatsAppTemplateName = (name, now = new Date()) => {
+  const pad = (value) => String(value).padStart(2, "0");
+  const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
+  return safeWhatsAppTemplateName(`${safeWhatsAppTemplateName(name)}_v${stamp}`).slice(0, 120);
+};
+const whatsappTemplateStatus = (value) => String(value || "").trim().toUpperCase();
+const isApprovedWhatsAppTemplateStatus = (value) => whatsappTemplateStatus(value) === "APPROVED";
+const isPendingWhatsAppTemplateStatus = (value) =>
+  ["", "PENDING", "IN_REVIEW", "IN REVIEW", "IN_APPEAL", "APPEAL_IN_REVIEW"].includes(whatsappTemplateStatus(value));
+const isRejectedWhatsAppTemplateStatus = (value) => whatsappTemplateStatus(value) === "REJECTED";
+const whatsappTemplateRejectionReason = (item = {}) =>
+  String(item.rejectedReason || item.rejectionReason || item.reason || item.statusReason || item.message || "").trim().slice(0, 1000);
+const mapWhatsAppTemplateVariable = (row = {}) => ({
+  token: String(row.token || ""),
+  label: String(row.label || ""),
+  sampleValue: String(row.sample_value || row.sampleValue || ""),
+  sortOrder: Number(row.sort_order || row.sortOrder || 0),
+  active: recordFlag(row.active, true)
+});
+const mapWhatsAppTemplateButton = (button = {}) => ({
+  type: ["PHONE_NUMBER", "URL"].includes(String(button.type || "").toUpperCase()) ? String(button.type || "").toUpperCase() : "QUICK_REPLY",
+  text: String(button.text || "").trim().slice(0, 80),
+  value: String(button.value || button.url || button.phone_number || "").trim().slice(0, 255)
+});
+const mapWhatsAppTemplateDraft = (row = {}) => ({
+  id: String(row.id || ""),
+  useCase: normalizeWhatsAppTemplateUseCase(row.use_case || row.useCase),
+  templateName: String(row.template_name || row.templateName || ""),
+  languageCode: String(row.language_code || row.languageCode || "en"),
+  category: normalizeWhatsAppTemplateCategory(row.category),
+  headerType: normalizeWhatsAppTemplateHeaderType(row.header_type || row.headerType),
+  headerText: String(row.header_text || row.headerText || ""),
+  bodyText: String(row.body_text || row.bodyText || ""),
+  footerText: String(row.footer_text || row.footerText || ""),
+  buttons: parseJsonArrayColumn(row.buttons).map(mapWhatsAppTemplateButton),
+  variableTokens: parseJsonArrayColumn(row.variable_tokens || row.variableTokens).map((token) => String(token || "")).filter(Boolean),
+  status: String(row.status || "DRAFT"),
+  providerTemplateName: String(row.provider_template_name || row.providerTemplateName || ""),
+  providerStatus: String(row.provider_status || row.providerStatus || ""),
+  rejectionReason: String(row.rejection_reason || row.rejectionReason || ""),
+  replacementOfName: String(row.replacement_of_name || row.replacementOfName || ""),
+  submittedByUserId: String(row.submitted_by_user_id || row.submittedByUserId || ""),
+  submittedAt: whatsappDateIso(row.submitted_at || row.submittedAt),
+  approvedAt: whatsappDateIso(row.approved_at || row.approvedAt),
+  createdAt: whatsappDateIso(row.created_at || row.createdAt),
+  updatedAt: whatsappDateIso(row.updated_at || row.updatedAt)
+});
+const mapWhatsAppTemplateMapping = (row = {}) => ({
+  useCase: normalizeWhatsAppTemplateUseCase(row.use_case || row.useCase),
+  templateName: String(row.template_name || row.templateName || ""),
+  languageCode: String(row.language_code || row.languageCode || "en"),
+  variableTokens: parseJsonArrayColumn(row.variable_tokens || row.variableTokens).map((token) => String(token || "")).filter(Boolean),
+  requiresDocumentHeader: recordFlag(row.requires_document_header ?? row.requiresDocumentHeader, false),
+  pendingTemplateName: String(row.pending_template_name || row.pendingTemplateName || ""),
+  pendingLanguageCode: String(row.pending_language_code || row.pendingLanguageCode || ""),
+  updatedAt: whatsappDateIso(row.updated_at || row.updatedAt)
+});
+const mapWhatsAppTemplateSubmissionHistory = (row = {}) => ({
+  id: Number(row.id || 0),
+  draftId: String(row.draft_id || row.draftId || ""),
+  templateName: String(row.template_name || row.templateName || ""),
+  languageCode: String(row.language_code || row.languageCode || "en"),
+  submittedByUserId: String(row.submitted_by_user_id || row.submittedByUserId || ""),
+  bodyText: String(row.body_text || row.bodyText || ""),
+  providerStatus: String(row.provider_status || row.providerStatus || ""),
+  errorMessage: String(row.error_message || row.errorMessage || ""),
+  createdAt: whatsappDateIso(row.created_at || row.createdAt)
+});
+const mapWhatsAppTemplateMappingHistory = (row = {}) => ({
+  id: Number(row.id || 0),
+  useCase: normalizeWhatsAppTemplateUseCase(row.use_case || row.useCase),
+  previousTemplateName: String(row.previous_template_name || row.previousTemplateName || ""),
+  previousLanguageCode: String(row.previous_language_code || row.previousLanguageCode || ""),
+  nextTemplateName: String(row.next_template_name || row.nextTemplateName || ""),
+  nextLanguageCode: String(row.next_language_code || row.nextLanguageCode || "en"),
+  changedByUserId: String(row.changed_by_user_id || row.changedByUserId || ""),
+  reason: String(row.reason || ""),
+  createdAt: whatsappDateIso(row.created_at || row.createdAt)
+});
+const mapWhatsAppTemplateSyncEvent = (row = {}) => ({
+  id: Number(row.id || 0),
+  eventType: String(row.event_type || row.eventType || ""),
+  templateName: String(row.template_name || row.templateName || ""),
+  languageCode: String(row.language_code || row.languageCode || ""),
+  status: String(row.status || ""),
+  message: String(row.message || ""),
+  createdAt: whatsappDateIso(row.created_at || row.createdAt)
+});
+const defaultWhatsAppTemplateMapping = (useCase) =>
+  WHATSAPP_REQUIRED_TEMPLATE_DEFAULTS.find((item) => item.useCase === useCase) || WHATSAPP_REQUIRED_TEMPLATE_DEFAULTS[WHATSAPP_REQUIRED_TEMPLATE_DEFAULTS.length - 1];
+const whatsappTemplateVariableRegistryMap = (variables) =>
+  new Map(variables.filter((item) => item.active !== false).map((item) => [item.token, item]));
+const extractWhatsAppTemplateTokens = (text) => {
+  const tokens = [];
+  const seen = new Set();
+  const pattern = /{{\s*([^{}\s]+)\s*}}/g;
+  let match;
+  while ((match = pattern.exec(String(text || "")))) {
+    const token = String(match[1] || "").trim();
+    if (!seen.has(token)) {
+      seen.add(token);
+      tokens.push(token);
+    }
+  }
+  return tokens;
+};
+const countWhatsAppTemplateVariableSlots = (text) => {
+  const matches = String(text || "").match(/{{\s*[^{}\s]+\s*}}/g);
+  return matches ? matches.length : 0;
+};
+const countWhatsAppTemplateStaticWords = (text) => {
+  const staticText = String(text || "").replace(/{{\s*[^{}\s]+\s*}}/g, " ");
+  const words = staticText.match(/[A-Za-z0-9][A-Za-z0-9'/-]*/g);
+  return words ? words.length : 0;
+};
+const hasSafeWhatsAppTemplateVariableDensity = (bodyText) => {
+  const variableSlots = countWhatsAppTemplateVariableSlots(bodyText);
+  if (!variableSlots) return true;
+  const staticWords = countWhatsAppTemplateStaticWords(bodyText);
+  return staticWords >= variableSlots * WHATSAPP_TEMPLATE_MIN_STATIC_WORDS_PER_VARIABLE;
+};
+const assertWhatsAppTemplateVariableDensity = (bodyText) => {
+  if (!hasSafeWhatsAppTemplateVariableDensity(bodyText)) {
+    throwHttpError(422, "template_variable_density", WHATSAPP_TEMPLATE_MANAGER_ERRORS.variableDensity);
+  }
+};
+
+async function ensureWhatsAppTemplateDefaults(connection, businessId) {
+  await ensureWhatsAppSettings(connection, businessId);
+  for (const variable of WHATSAPP_TEMPLATE_VARIABLES) {
+    await connection.query(
+      `INSERT INTO template_variable_registry (business_id, token, label, sample_value, sort_order, active)
+       VALUES (?, ?, ?, ?, ?, TRUE)
+       ON DUPLICATE KEY UPDATE label = VALUES(label), sample_value = VALUES(sample_value), sort_order = VALUES(sort_order), active = TRUE`,
+      [businessId, variable.token, variable.label, variable.sampleValue, variable.sortOrder]
+    );
+  }
+  for (const mapping of WHATSAPP_REQUIRED_TEMPLATE_DEFAULTS) {
+    await connection.query(
+      `INSERT IGNORE INTO whatsapp_template_mappings
+         (business_id, use_case, template_name, language_code, variable_tokens, requires_document_header)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        businessId,
+        mapping.useCase,
+        mapping.templateName,
+        mapping.languageCode,
+        JSON.stringify(mapping.variableTokens),
+        mapping.requiresDocumentHeader ? 1 : 0
+      ]
+    );
+  }
+  for (const draft of WHATSAPP_PRODUCTION_TEMPLATE_DRAFTS) {
+    const [existingRows] = await connection.query(
+      `SELECT *
+       FROM whatsapp_template_drafts
+       WHERE business_id = ? AND use_case = ? AND template_name = ? AND language_code = ?
+       LIMIT 1`,
+      [businessId, draft.useCase, draft.templateName, draft.languageCode]
+    );
+    await connection.query(
+      `INSERT IGNORE INTO whatsapp_template_drafts
+         (id, business_id, use_case, template_name, language_code, category, header_type, header_text, body_text, footer_text, buttons, variable_tokens, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'READY_TO_SUBMIT')`,
+      [
+        uuid(),
+        businessId,
+        draft.useCase,
+        draft.templateName,
+        draft.languageCode,
+        draft.category,
+        draft.headerType,
+        draft.headerText,
+        draft.bodyText,
+        draft.footerText,
+        JSON.stringify(draft.buttons),
+        JSON.stringify(draft.variableTokens)
+      ]
+    );
+    const existing = existingRows[0] ? mapWhatsAppTemplateDraft(existingRows[0]) : null;
+    const canRefreshSeededDraft =
+      existing &&
+      !existing.providerTemplateName &&
+      ["READY_TO_SUBMIT", "SUBMISSION_FAILED"].includes(String(existing.status || "").toUpperCase()) &&
+      (!hasSafeWhatsAppTemplateVariableDensity(existing.bodyText) ||
+        (draft.headerType === "document" && existing.headerType !== "document"));
+    if (canRefreshSeededDraft) {
+      await connection.query(
+        `UPDATE whatsapp_template_drafts
+         SET category = ?,
+             header_type = ?,
+             header_text = ?,
+             body_text = ?,
+             footer_text = ?,
+             buttons = ?,
+             variable_tokens = ?,
+             status = 'READY_TO_SUBMIT',
+             provider_status = '',
+             rejection_reason = ''
+         WHERE business_id = ? AND id = ?`,
+        [
+          draft.category,
+          draft.headerType,
+          draft.headerText,
+          draft.bodyText,
+          draft.footerText,
+          JSON.stringify(draft.buttons),
+          JSON.stringify(draft.variableTokens),
+          businessId,
+          existing.id
+        ]
+      );
+    }
+  }
+}
+
+async function loadWhatsAppTemplateManagerData(connection, businessId) {
+  await ensureWhatsAppTemplateDefaults(connection, businessId);
+  const [variables] = await connection.query(
+    "SELECT * FROM template_variable_registry WHERE business_id = ? ORDER BY active DESC, sort_order ASC, token ASC",
+    [businessId]
+  );
+  const [drafts] = await connection.query(
+    "SELECT * FROM whatsapp_template_drafts WHERE business_id = ? ORDER BY updated_at DESC LIMIT 120",
+    [businessId]
+  );
+  const [mappings] = await connection.query(
+    "SELECT * FROM whatsapp_template_mappings WHERE business_id = ? ORDER BY FIELD(use_case, 'invoice', 'invoice_pdf', 'due_reminder', 'quotation', 'job_card_status', 'job_card_pdf', 'customer_chat', 'custom'), use_case ASC",
+    [businessId]
+  );
+  const [templates] = await connection.query(
+    "SELECT * FROM whatsapp_templates WHERE business_id = ? ORDER BY name ASC, language_code ASC",
+    [businessId]
+  );
+  const [submissionHistory] = await connection.query(
+    "SELECT * FROM whatsapp_template_submission_history WHERE business_id = ? ORDER BY created_at DESC LIMIT 80",
+    [businessId]
+  );
+  const [mappingHistory] = await connection.query(
+    "SELECT * FROM whatsapp_template_mapping_history WHERE business_id = ? ORDER BY created_at DESC LIMIT 80",
+    [businessId]
+  );
+  const [syncEvents] = await connection.query(
+    "SELECT * FROM whatsapp_template_sync_events WHERE business_id = ? ORDER BY created_at DESC LIMIT 80",
+    [businessId]
+  );
+  return {
+    variables: variables.map(mapWhatsAppTemplateVariable),
+    drafts: drafts.map(mapWhatsAppTemplateDraft),
+    mappings: mappings.map(mapWhatsAppTemplateMapping),
+    templates: templates.map(mapWhatsAppTemplate),
+    submissionHistory: submissionHistory.map(mapWhatsAppTemplateSubmissionHistory),
+    mappingHistory: mappingHistory.map(mapWhatsAppTemplateMappingHistory),
+    syncEvents: syncEvents.map(mapWhatsAppTemplateSyncEvent)
+  };
+}
+
+function normalizeWhatsAppTemplateButtons(value) {
+  return (Array.isArray(value) ? value : [])
+    .map(mapWhatsAppTemplateButton)
+    .filter((button) => button.text)
+    .slice(0, WHATSAPP_TEMPLATE_BUTTON_MAX);
+}
+
+async function normalizeWhatsAppTemplateDraftInput(connection, businessId, input = {}, existing = null) {
+  const [variables] = await connection.query("SELECT * FROM template_variable_registry WHERE business_id = ? AND active = TRUE", [businessId]);
+  const registry = whatsappTemplateVariableRegistryMap(variables.map(mapWhatsAppTemplateVariable));
+  const useCase = normalizeWhatsAppTemplateUseCase(input.useCase ?? input.use_case ?? existing?.use_case);
+  const defaultMapping = defaultWhatsAppTemplateMapping(useCase);
+  const languageCode = normalizeWhatsAppLanguage(input.languageCode ?? input.language_code ?? existing?.language_code ?? defaultMapping.languageCode);
+  const category = normalizeWhatsAppTemplateCategory(input.category ?? existing?.category);
+  const headerType = normalizeWhatsAppTemplateHeaderTypeForUseCase(
+    useCase,
+    normalizeWhatsAppTemplateHeaderType(input.headerType ?? input.header_type ?? existing?.header_type)
+  );
+  const headerText = headerType === "text"
+    ? cleanWhatsAppText(input.headerText ?? input.header_text ?? existing?.header_text ?? "", WHATSAPP_TEMPLATE_HEADER_TEXT_MAX)
+    : "";
+  const bodyText = String(input.bodyText ?? input.body_text ?? existing?.body_text ?? "").trim();
+  const footerText = cleanWhatsAppText(input.footerText ?? input.footer_text ?? existing?.footer_text ?? "", WHATSAPP_TEMPLATE_FOOTER_MAX);
+  const buttons = normalizeWhatsAppTemplateButtons(input.buttons ?? parseJsonArrayColumn(existing?.buttons));
+  const replacementOfName = safeWhatsAppTemplateName(input.replacementOfName ?? input.replacement_of_name ?? existing?.replacement_of_name ?? "", "");
+  let templateName = safeWhatsAppTemplateName(input.templateName ?? input.template_name ?? existing?.template_name ?? defaultMapping.templateName);
+
+  if (!bodyText) throwHttpError(422, "validation_error", "Template body is required.");
+  if (bodyText.length > WHATSAPP_TEMPLATE_BODY_MAX) throwHttpError(422, "validation_error", "Template body must be 1024 characters or less.");
+  if (footerText.length > WHATSAPP_TEMPLATE_FOOTER_MAX) throwHttpError(422, "validation_error", "Template footer must be 60 characters or less.");
+  if (headerType === "text" && !headerText) throwHttpError(422, "validation_error", "Header text is required when the header type is Text.");
+  if (headerText.length > WHATSAPP_TEMPLATE_HEADER_TEXT_MAX) throwHttpError(422, "validation_error", "Template header text must be 60 characters or less.");
+  if ((useCase === "invoice_pdf" || useCase === "job_card_pdf") && headerType !== "document") {
+    throwHttpError(422, "template_document_header_required", WHATSAPP_TEMPLATE_MANAGER_ERRORS.missingDocumentHeader);
+  }
+  if (headerType === "none" && headerText) throwHttpError(422, "validation_error", "Remove header text or switch the header type to Text.");
+  if (extractWhatsAppTemplateTokens(headerText).length) throwHttpError(422, "invalid_variables", "Header variables are not supported in the current send flow.");
+  if (buttons.length > WHATSAPP_TEMPLATE_BUTTON_MAX) throwHttpError(422, "validation_error", "WhatsApp templates can have at most 10 buttons.");
+
+  const variableTokens = extractWhatsAppTemplateTokens(bodyText);
+  if (variableTokens.some((token) => !registry.has(token) || /^\d+$/.test(token))) {
+    throwHttpError(422, "invalid_variables", WHATSAPP_TEMPLATE_MANAGER_ERRORS.invalidVariables);
+  }
+  assertWhatsAppTemplateVariableDensity(bodyText);
+  if (replacementOfName && templateName === replacementOfName) templateName = versionedWhatsAppTemplateName(templateName);
+
+  return {
+    useCase,
+    templateName,
+    languageCode,
+    category,
+    headerType,
+    headerText: headerType === "text" ? headerText : "",
+    bodyText,
+    footerText,
+    buttons,
+    variableTokens,
+    replacementOfName
+  };
+}
+
+function compileWhatsAppTemplateText(text, variableTokens) {
+  const tokenPositions = new Map(variableTokens.map((token, index) => [token, index + 1]));
+  return String(text || "").replace(/{{\s*([^{}\s]+)\s*}}/g, (_match, token) => `{{${tokenPositions.get(String(token).trim()) || 1}}}`);
+}
+
+function compileYCloudTemplatePayload(draft, registryVariables, wabaId) {
+  const registry = whatsappTemplateVariableRegistryMap(registryVariables);
+  const variableTokens = Array.isArray(draft.variableTokens) ? draft.variableTokens : [];
+  const sampleValues = variableTokens.map((token) => registry.get(token)?.sampleValue || token);
+  const components = [];
+  if (draft.headerType === "document") {
+    components.push({ type: "HEADER", format: "DOCUMENT" });
+  } else if (draft.headerType === "text" && draft.headerText) {
+    components.push({ type: "HEADER", format: "TEXT", text: draft.headerText });
+  }
+  const bodyComponent = {
+    type: "BODY",
+    text: compileWhatsAppTemplateText(draft.bodyText, variableTokens)
+  };
+  if (sampleValues.length) bodyComponent.example = { body_text: [sampleValues] };
+  components.push(bodyComponent);
+  if (draft.footerText) components.push({ type: "FOOTER", text: draft.footerText });
+  if (draft.buttons.length) {
+    components.push({
+      type: "BUTTONS",
+      buttons: draft.buttons.map((button) => {
+        if (button.type === "PHONE_NUMBER") return { type: "PHONE_NUMBER", text: button.text, phone_number: button.value };
+        if (button.type === "URL") return { type: "URL", text: button.text, url: button.value };
+        return { type: "QUICK_REPLY", text: button.text };
+      })
+    });
+  }
+  return {
+    wabaId,
+    name: draft.templateName,
+    language: draft.languageCode,
+    category: draft.category,
+    components
+  };
+}
+
+async function upsertWhatsAppTemplates(connection, businessId, templates) {
+  for (const template of templates.filter((item) => item.name && item.languageCode)) {
+    await connection.query(
+      `INSERT INTO whatsapp_templates (business_id, name, language_code, status, category, components)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE status = VALUES(status), category = VALUES(category), components = VALUES(components)`,
+      [businessId, template.name, template.languageCode, template.status, template.category, JSON.stringify(template.components || [])]
+    );
+  }
+}
+
+async function recordWhatsAppTemplateSyncEvent(connection, businessId, input) {
   await connection.query(
-    `INSERT INTO whatsapp_settings
-       (business_id, enabled, phone_number_id, business_account_id, display_phone_number, graph_version)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON DUPLICATE KEY UPDATE
-       enabled = VALUES(enabled),
-       phone_number_id = VALUES(phone_number_id),
-       business_account_id = VALUES(business_account_id),
-       display_phone_number = VALUES(display_phone_number),
-       graph_version = VALUES(graph_version)`,
+    `INSERT INTO whatsapp_template_sync_events
+       (business_id, event_type, template_name, language_code, status, message, payload)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
     [
       businessId,
-      config.enabled,
-      config.phoneNumberId,
-      config.businessAccountId,
-      config.displayPhoneNumber,
-      config.graphVersion
+      String(input.eventType || "sync").slice(0, 40),
+      String(input.templateName || "").slice(0, 120),
+      String(input.languageCode || "").slice(0, 20),
+      String(input.status || "").slice(0, 40),
+      String(input.message || "").slice(0, 1000),
+      JSON.stringify(input.payload || null)
     ]
+  );
+}
+
+async function reconcileWhatsAppTemplateApprovals(connection, businessId, templates, userId = "") {
+  for (const template of templates.filter((item) => item.name && item.languageCode)) {
+    const status = whatsappTemplateStatus(template.status);
+    const rejectionReason = whatsappTemplateRejectionReason(template);
+    await connection.query(
+      `UPDATE whatsapp_template_drafts
+       SET provider_status = ?,
+           status = CASE
+             WHEN ? = 'APPROVED' THEN 'APPROVED'
+             WHEN ? = 'REJECTED' THEN 'REJECTED'
+             ELSE status
+           END,
+           rejection_reason = CASE WHEN ? = 'REJECTED' THEN ? ELSE rejection_reason END,
+           approved_at = CASE WHEN ? = 'APPROVED' THEN COALESCE(approved_at, CURRENT_TIMESTAMP) ELSE approved_at END
+       WHERE business_id = ? AND provider_template_name = ? AND language_code = ?`,
+      [status, status, status, status, rejectionReason, status, businessId, template.name, template.languageCode]
+    );
+
+    if (isApprovedWhatsAppTemplateStatus(status)) {
+      const [mappings] = await connection.query(
+        `SELECT * FROM whatsapp_template_mappings
+         WHERE business_id = ? AND pending_template_name = ? AND pending_language_code = ?
+         FOR UPDATE`,
+        [businessId, template.name, template.languageCode]
+      );
+      for (const mapping of mappings) {
+        await connection.query(
+          `UPDATE whatsapp_template_mappings
+           SET template_name = ?,
+               language_code = ?,
+               pending_template_name = '',
+               pending_language_code = '',
+               updated_by_user_id = ?
+           WHERE business_id = ? AND use_case = ?`,
+          [template.name, template.languageCode, userId, businessId, mapping.use_case]
+        );
+        await connection.query(
+          `INSERT INTO whatsapp_template_mapping_history
+             (business_id, use_case, previous_template_name, previous_language_code, next_template_name, next_language_code, changed_by_user_id, reason)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            businessId,
+            mapping.use_case,
+            mapping.template_name || "",
+            mapping.language_code || "",
+            template.name,
+            template.languageCode,
+            userId,
+            "Template approved by provider sync"
+          ]
+        );
+      }
+    }
+
+    if (["ARCHIVED", "DISABLED", "DELETED", "PAUSED"].includes(status)) {
+      await recordWhatsAppTemplateSyncEvent(connection, businessId, {
+        eventType: "external_status",
+        templateName: template.name,
+        languageCode: template.languageCode,
+        status,
+        message: `Template is ${status.toLowerCase()} in the provider.`,
+        payload: template
+      });
+    }
+  }
+}
+
+async function resolveWhatsAppTemplateMapping(connection, businessId, useCase) {
+  const normalizedUseCase = normalizeWhatsAppTemplateUseCase(useCase);
+  await ensureWhatsAppTemplateDefaults(connection, businessId);
+  const [rows] = await connection.query(
+    "SELECT * FROM whatsapp_template_mappings WHERE business_id = ? AND use_case = ? LIMIT 1",
+    [businessId, normalizedUseCase]
+  );
+  return rows.length ? mapWhatsAppTemplateMapping(rows[0]) : null;
+}
+
+async function ensureWhatsAppSettings(connection, businessId) {
+  await connection.query(
+    "INSERT IGNORE INTO whatsapp_settings (business_id) VALUES (?)",
+    [businessId]
   );
   const [rows] = await connection.query("SELECT * FROM whatsapp_settings WHERE business_id = ? LIMIT 1", [businessId]);
   return rows[0] || null;
@@ -4407,6 +5362,44 @@ const normalizeWhatsAppMessageStatus = (value) => {
 };
 
 const whatsAppMessagePreview = (value) => String(value || "").replace(/\s+/g, " ").trim().slice(0, 500);
+const cleanWhatsAppTemplateParam = (value, max = 1024) =>
+  String(value ?? "").replace(/\s+/g, " ").trim().slice(0, max).trim();
+const normalizeWhatsAppTemplateVariables = (variables) =>
+  (Array.isArray(variables) ? variables : [])
+    .map((value) => cleanWhatsAppTemplateParam(value))
+    .filter(Boolean)
+    .slice(0, 20);
+const normalizeWhatsAppTemplateVariableList = (variables) =>
+  (Array.isArray(variables) ? variables : [])
+    .map((value) => cleanWhatsAppTemplateParam(value))
+    .map((value) => value || "-")
+    .slice(0, 20);
+const whatsappTemplateBodyComponent = (template) =>
+  (Array.isArray(template?.components) ? template.components : []).find((component) =>
+    String(component?.type || "").toUpperCase() === "BODY"
+  ) || null;
+const whatsappTemplateBodyParameterCount = (template) => {
+  const body = whatsappTemplateBodyComponent(template);
+  if (!body) return 0;
+  const textCount = countWhatsAppTemplateVariableSlots(body.text);
+  if (textCount) return textCount;
+  const exampleRows = body.example?.body_text;
+  if (Array.isArray(exampleRows)) {
+    const firstRow = exampleRows[0];
+    return Array.isArray(firstRow) ? firstRow.length : exampleRows.length;
+  }
+  if (Array.isArray(body.parameters)) return body.parameters.length;
+  if (Array.isArray(body.localizable_params)) return body.localizable_params.length;
+  return 0;
+};
+const alignWhatsAppTemplateVariables = (template, variables) => {
+  const expectedCount = whatsappTemplateBodyParameterCount(template);
+  const normalized = normalizeWhatsAppTemplateVariableList(variables);
+  if (!expectedCount) return normalized;
+  if (!normalized.length) return [];
+  if (normalized.length >= expectedCount) return normalized.slice(0, expectedCount);
+  return [...normalized, ...Array(expectedCount - normalized.length).fill("-")];
+};
 const inboundWhatsAppText = (message = {}) => {
   if (message.text?.body) return String(message.text.body);
   if (message.button?.text) return String(message.button.text);
@@ -4424,14 +5417,52 @@ async function resolveApprovedWhatsAppTemplate(connection, businessId, templateN
   const requestedLanguage = String(languageCode || "").trim();
   const [rows] = await connection.query(
     `SELECT * FROM whatsapp_templates
-     WHERE business_id = ? AND name = ? AND UPPER(status) = 'APPROVED'
+     WHERE business_id = ? AND name = ?
      ORDER BY CASE WHEN language_code = ? THEN 0 WHEN language_code IN ('en', 'en_US') THEN 1 ELSE 2 END
      LIMIT 1`,
     [businessId, name, requestedLanguage]
   );
-  if (!rows.length) throwHttpError(422, "template_not_configured", `Approved WhatsApp template "${name}" is not synced for this business.`);
-  return mapWhatsAppTemplate(rows[0]);
+  if (!rows.length) {
+    throwHttpError(422, "template_not_configured", WHATSAPP_TEMPLATE_MANAGER_ERRORS.missingApprovedMapping);
+  }
+  const row = rows[0];
+  if (isApprovedWhatsAppTemplateStatus(row.status)) {
+    return mapWhatsAppTemplate(row);
+  }
+  if (isRejectedWhatsAppTemplateStatus(row.status)) {
+    throwHttpError(422, "template_rejected", WHATSAPP_TEMPLATE_MANAGER_ERRORS.rejected);
+  }
+  if (isPendingWhatsAppTemplateStatus(row.status)) {
+    throwHttpError(422, "template_pending", WHATSAPP_TEMPLATE_MANAGER_ERRORS.pending);
+  }
+  throwHttpError(422, "template_not_configured", WHATSAPP_TEMPLATE_MANAGER_ERRORS.missingApprovedMapping);
 }
+
+async function resolveApprovedWhatsAppTemplateForSend(connection, businessId, body, documentMetadata) {
+  let templateName = String(body.templateName || "").trim();
+  let languageCode = String(body.languageCode || "").trim();
+  const useCase = String(body.templateUseCase || body.useCase || "").trim();
+  let mapping = null;
+  if (useCase) {
+    mapping = await resolveWhatsAppTemplateMapping(connection, businessId, useCase);
+    if (!mapping?.templateName) throwHttpError(422, "template_mapping_missing", WHATSAPP_TEMPLATE_MANAGER_ERRORS.missingApprovedMapping);
+    templateName = mapping.templateName;
+    languageCode = mapping.languageCode || languageCode || "en";
+  }
+  const template = await resolveApprovedWhatsAppTemplate(connection, businessId, templateName, languageCode);
+  if ((documentMetadata || mapping?.requiresDocumentHeader) && !templateHasDocumentHeader(template)) {
+    throwHttpError(422, "template_document_header_required", WHATSAPP_TEMPLATE_MANAGER_ERRORS.missingDocumentHeader);
+  }
+  return { template, mapping };
+}
+
+const whatsappVariablesFromTokenValues = (mapping, tokenValues) => {
+  if (!mapping || !tokenValues || typeof tokenValues !== "object" || Array.isArray(tokenValues)) return [];
+  return (mapping.variableTokens || [])
+    .map((token) => cleanWhatsAppTemplateParam(tokenValues[token]))
+    .map((value) => value || "-")
+    .slice(0, 20);
+};
 
 const safeWhatsAppFileName = (value, fallback = "autocare24-document.pdf") => {
   const cleaned = String(value || "")
@@ -4480,11 +5511,8 @@ const templateHasDocumentHeader = (template) =>
   );
 
 function buildWhatsAppTemplatePayload(phone, template, variables, documentMedia) {
-  const parameters = (Array.isArray(variables) ? variables : [])
-    .map((value) => String(value ?? "").trim())
-    .filter(Boolean)
-    .slice(0, 20)
-    .map((text) => ({ type: "text", text: text.slice(0, 1024) }));
+  const parameters = normalizeWhatsAppTemplateVariables(variables)
+    .map((text) => ({ type: "text", text }));
   const components = [];
   if (documentMedia?.id) {
     components.push({
@@ -4571,6 +5599,46 @@ async function fetchWhatsAppGraph(config, pathName, options = {}) {
   }
 }
 
+async function fetchYCloud(config, pathName, options = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs || 15000);
+  try {
+    const body = options.formData || (options.body ? JSON.stringify(options.body) : undefined);
+    const response = await fetch(`${config.ycloudApiBaseUrl}/${pathName.replace(/^\/+/, "")}`, {
+      method: options.method || "GET",
+      headers: {
+        accept: "application/json",
+        "X-API-Key": config.ycloudApiKey,
+        ...(options.body ? { "content-type": "application/json" } : {})
+      },
+      body,
+      signal: controller.signal
+    });
+    const text = await response.text();
+    let payload = {};
+    try {
+      payload = text ? JSON.parse(text) : {};
+    } catch {
+      payload = { message: text };
+    }
+    if (!response.ok) {
+      const providerMessage =
+        payload?.error?.message ||
+        payload?.error?.whatsappApiError?.message ||
+        payload?.whatsappApiError?.message ||
+        payload?.message ||
+        `YCloud WhatsApp API failed with HTTP ${response.status}.`;
+      const friendlyMessage = /Params Words Ratio Exceeds Limit|too many variables/i.test(String(providerMessage || ""))
+        ? WHATSAPP_TEMPLATE_MANAGER_ERRORS.variableDensity
+        : providerMessage;
+      throw Object.assign(new Error(friendlyMessage), { status: response.status, provider: "ycloud", meta: payload });
+    }
+    return payload;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function uploadWhatsAppDocumentMedia(config, media) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 30000);
@@ -4607,33 +5675,270 @@ async function uploadWhatsAppDocumentMedia(config, media) {
   }
 }
 
+async function uploadYCloudDocumentMedia(config, media) {
+  const form = new FormData();
+  form.append("file", new Blob([media.buffer], { type: media.mimeType }), media.fileName);
+  const body = await fetchYCloud(config, `v2/whatsapp/media/${encodeURIComponent(config.ycloudFromPhone)}/upload`, {
+    method: "POST",
+    formData: form,
+    timeoutMs: 30000
+  });
+  if (!body.id) {
+    throw Object.assign(new Error("YCloud media upload did not return a media id."), { status: 502, provider: "ycloud", meta: body });
+  }
+  return {
+    id: String(body.id),
+    fileName: media.fileName,
+    mimeType: media.mimeType,
+    sizeBytes: media.sizeBytes
+  };
+}
+
 async function sendWhatsAppCloudMessage(config, phone, payload) {
   return fetchWhatsAppGraph(config, `${config.phoneNumberId}/messages`, { method: "POST", body: payload });
+}
+
+function buildYCloudTemplatePayload(config, phone, template, variables, documentMedia, externalId) {
+  const metaPayload = buildWhatsAppTemplatePayload(phone, template, variables, documentMedia);
+  return {
+    from: config.ycloudFromPhone,
+    to: whatsappPhoneE164(phone),
+    type: "template",
+    template: metaPayload.template,
+    externalId,
+    filterUnsubscribed: true,
+    filterBlocked: true
+  };
+}
+
+function buildYCloudTextPayload(config, phone, text, externalId) {
+  const metaPayload = buildWhatsAppTextPayload(phone, text);
+  return {
+    from: config.ycloudFromPhone,
+    to: whatsappPhoneE164(phone),
+    type: "text",
+    text: metaPayload.text,
+    externalId,
+    filterUnsubscribed: true,
+    filterBlocked: true
+  };
+}
+
+function buildYCloudDocumentPayload(config, phone, documentMedia, caption, externalId) {
+  const metaPayload = buildWhatsAppDocumentPayload(phone, documentMedia, caption);
+  return {
+    from: config.ycloudFromPhone,
+    to: whatsappPhoneE164(phone),
+    type: "document",
+    document: metaPayload.document,
+    externalId,
+    filterUnsubscribed: true,
+    filterBlocked: true
+  };
+}
+
+async function sendYCloudWhatsAppMessage(config, payload) {
+  return fetchYCloud(config, "v2/whatsapp/messages", { method: "POST", body: payload });
+}
+
+async function createYCloudWhatsAppTemplate(config, payload) {
+  return fetchYCloud(config, "v2/whatsapp/templates", { method: "POST", body: payload });
+}
+
+async function editYCloudWhatsAppTemplate(config, wabaId, name, language, payload) {
+  const pathName = [
+    "v2/whatsapp/templates",
+    encodeURIComponent(wabaId),
+    encodeURIComponent(name),
+    encodeURIComponent(language)
+  ].join("/");
+  return fetchYCloud(config, pathName, { method: "PATCH", body: payload });
+}
+
+const ycloudTemplateProviderStatus = (response, fallback = "PENDING") =>
+  whatsappTemplateStatus(response?.status || response?.template?.status || response?.data?.status || fallback) || fallback;
+
+const publicWhatsAppConfig = (config) => ({
+  enabled: config.enabled,
+  provider: config.provider,
+  graphBaseUrl: config.graphBaseUrl,
+  graphVersion: config.graphVersion,
+  accessToken: "",
+  hasAccessToken: Boolean(config.accessToken),
+  phoneNumberId: config.provider === "meta" ? config.phoneNumberId : "",
+  businessAccountId: config.provider === "meta" ? config.businessAccountId : "",
+  webhookVerifyToken: "",
+  hasWebhookVerifyToken: Boolean(config.verifyToken),
+  appSecret: "",
+  hasAppSecret: Boolean(config.appSecret),
+  displayPhoneNumber: config.displayPhoneNumber,
+  ycloudApiBaseUrl: config.ycloudApiBaseUrl,
+  ycloudApiKey: "",
+  hasYCloudApiKey: Boolean(config.ycloudApiKey),
+  ycloudFromPhone: config.ycloudFromPhone,
+  ycloudWabaId: config.provider === "ycloud" ? config.businessAccountId : "",
+  ycloudWebhookSecret: "",
+  hasYCloudWebhookSecret: Boolean(config.ycloudWebhookSecret)
+});
+
+const whatsappStatusMessage = (config, missingConfig) => {
+  if (!config.enabled) return "WhatsApp is disabled. Enable it in Settings > WhatsApp.";
+  if (config.configured) {
+    return `Connected through ${config.provider === "ycloud" ? "YCloud" : "Meta Cloud API"}.`;
+  }
+  return `${config.provider === "ycloud" ? "YCloud WhatsApp" : "WhatsApp Business API"} not configured. Missing: ${missingConfig.join(", ") || "provider settings"}.`;
+};
+
+async function whatsappStatusPayload(connection, businessId) {
+  const settings = await ensureWhatsAppSettings(connection, businessId);
+  const [templateCountRows] = await connection.query("SELECT COUNT(*) AS total FROM whatsapp_templates WHERE business_id = ?", [businessId]);
+  const config = whatsappConfigFromRow(settings || { business_id: businessId });
+  const missingConfig = whatsappMissingConfig(config);
+  return {
+    enabled: config.enabled,
+    configured: config.configured,
+    webhookReady: config.webhookReady,
+    provider: config.provider,
+    phoneNumberId: config.phoneNumberId,
+    businessAccountId: config.businessAccountId,
+    displayPhoneNumber: config.displayPhoneNumber,
+    graphVersion: config.graphVersion,
+    missingConfig,
+    templatesCount: Number(templateCountRows[0]?.total || 0),
+    lastTemplateSyncAt: whatsappDateIso(settings?.last_template_sync_at),
+    webhookVerifiedAt: whatsappDateIso(settings?.webhook_verified_at),
+    message: whatsappStatusMessage(config, missingConfig)
+  };
+}
+
+const secretConfigValue = (body, key, current, max = 500) => {
+  if (!Object.prototype.hasOwnProperty.call(body, key)) return current;
+  const next = cleanWhatsAppText(body[key], max);
+  return next || current;
+};
+
+const normalizeWhatsAppConfigInput = (body = {}, current = {}) => {
+  const provider = normalizeWhatsAppProvider(body.provider ?? current.provider);
+  const enabled = Object.prototype.hasOwnProperty.call(body, "enabled") ? isTruthyValue(body.enabled) : current.enabled;
+  const graphBaseUrl = cleanWhatsAppText(body.graphBaseUrl ?? current.graphBaseUrl, 200).replace(/\/+$/, "") || DEFAULT_WHATSAPP_GRAPH_BASE_URL;
+  const graphVersion = cleanWhatsAppText(body.graphVersion ?? current.graphVersion, 20).replace(/^\/+/, "") || DEFAULT_WHATSAPP_GRAPH_VERSION;
+  const ycloudApiBaseUrl = cleanWhatsAppText(body.ycloudApiBaseUrl ?? current.ycloudApiBaseUrl, 200).replace(/\/+$/, "") || DEFAULT_YCLOUD_API_BASE_URL;
+  const ycloudFromPhone = whatsappPhoneE164(body.ycloudFromPhone ?? body.displayPhoneNumber ?? current.ycloudFromPhone ?? current.displayPhoneNumber);
+  const displayPhoneNumber = provider === "ycloud"
+    ? ycloudFromPhone
+    : cleanWhatsAppText(body.displayPhoneNumber ?? current.displayPhoneNumber, 40);
+  return {
+    enabled,
+    provider,
+    graphBaseUrl,
+    graphVersion,
+    accessToken: secretConfigValue(body, "accessToken", current.accessToken || "", 5000),
+    phoneNumberId: provider === "ycloud"
+      ? whatsappPhoneDigits(ycloudFromPhone)
+      : cleanWhatsAppText(body.phoneNumberId ?? current.phoneNumberId, 80),
+    businessAccountId: provider === "ycloud"
+      ? cleanWhatsAppText(body.ycloudWabaId ?? body.businessAccountId ?? current.businessAccountId, 80)
+      : cleanWhatsAppText(body.businessAccountId ?? current.businessAccountId, 80),
+    verifyToken: secretConfigValue(body, "webhookVerifyToken", current.verifyToken || "", 160),
+    appSecret: secretConfigValue(body, "appSecret", current.appSecret || "", 255),
+    displayPhoneNumber,
+    ycloudApiBaseUrl,
+    ycloudApiKey: secretConfigValue(body, "ycloudApiKey", current.ycloudApiKey || "", 255),
+    ycloudWebhookSecret: secretConfigValue(body, "ycloudWebhookSecret", current.ycloudWebhookSecret || "", 255)
+  };
+};
+
+async function handleWhatsAppConfigGet(res, device) {
+  const connection = await pool.getConnection();
+  try {
+    await ensureWhatsAppSettings(connection, device.business_id);
+    const config = await whatsappRuntimeConfig(connection, device.business_id);
+    return ok(res, {
+      config: publicWhatsAppConfig(config),
+      status: await whatsappStatusPayload(connection, device.business_id)
+    });
+  } finally {
+    connection.release();
+  }
+}
+
+async function handleWhatsAppConfigSave(req, res, device) {
+  const body = await readBody(req);
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const currentRow = await ensureWhatsAppSettings(connection, device.business_id);
+    const currentConfig = whatsappConfigFromRow(currentRow || { business_id: device.business_id });
+    const next = normalizeWhatsAppConfigInput(body, currentConfig);
+    await connection.query(
+      `UPDATE whatsapp_settings
+       SET enabled = ?,
+           provider = ?,
+           phone_number_id = ?,
+           business_account_id = ?,
+           display_phone_number = ?,
+           graph_version = ?,
+           graph_base_url = ?,
+           access_token = ?,
+           webhook_verify_token = ?,
+           app_secret = ?,
+           ycloud_api_base_url = ?,
+           ycloud_api_key = ?,
+           ycloud_webhook_secret = ?
+       WHERE business_id = ?`,
+      [
+        next.enabled,
+        next.provider,
+        next.phoneNumberId,
+        next.businessAccountId,
+        next.displayPhoneNumber,
+        next.graphVersion,
+        next.graphBaseUrl,
+        next.accessToken || null,
+        next.verifyToken,
+        next.appSecret,
+        next.ycloudApiBaseUrl,
+        next.ycloudApiKey,
+        next.ycloudWebhookSecret,
+        device.business_id
+      ]
+    );
+    await insertAuditLog(connection, {
+      businessId: device.business_id,
+      deviceId: device.id,
+      action: "WHATSAPP_CONFIG_UPDATED",
+      entity: "whatsapp_settings",
+      entityId: String(device.business_id),
+      beforeState: {
+        enabled: currentConfig.enabled,
+        provider: currentConfig.provider,
+        configured: currentConfig.configured,
+        webhookReady: currentConfig.webhookReady
+      },
+      afterState: {
+        enabled: next.enabled,
+        provider: next.provider
+      },
+      ipAddress: getRequestIp(req)
+    });
+    await connection.commit();
+    const savedConfig = await whatsappRuntimeConfig(connection, device.business_id);
+    return ok(res, {
+      config: publicWhatsAppConfig(savedConfig),
+      status: await whatsappStatusPayload(connection, device.business_id)
+    });
+  } catch (err) {
+    await connection.rollback();
+    throw err;
+  } finally {
+    connection.release();
+  }
 }
 
 async function handleWhatsAppStatus(res, device) {
   const connection = await pool.getConnection();
   try {
-    const settings = await ensureWhatsAppSettings(connection, device.business_id);
-    const [templateCountRows] = await connection.query("SELECT COUNT(*) AS total FROM whatsapp_templates WHERE business_id = ?", [device.business_id]);
-    const config = whatsappRuntimeConfig();
-    return ok(res, {
-      status: {
-        enabled: config.enabled,
-        configured: config.configured,
-        webhookReady: config.webhookReady,
-        phoneNumberId: config.phoneNumberId,
-        businessAccountId: config.businessAccountId,
-        displayPhoneNumber: settings?.display_phone_number || config.displayPhoneNumber,
-        graphVersion: config.graphVersion,
-        templatesCount: Number(templateCountRows[0]?.total || 0),
-        lastTemplateSyncAt: whatsappDateIso(settings?.last_template_sync_at),
-        webhookVerifiedAt: whatsappDateIso(settings?.webhook_verified_at),
-        message: config.configured
-          ? "WhatsApp Business API is connected through the cloud API."
-          : "WhatsApp Business API not configured. Set WHATSAPP_ENABLED, WHATSAPP_ACCESS_TOKEN, and WHATSAPP_PHONE_NUMBER_ID on cloud-api."
-      }
-    });
+    return ok(res, { status: await whatsappStatusPayload(connection, device.business_id) });
   } finally {
     connection.release();
   }
@@ -4647,8 +5952,445 @@ async function handleWhatsAppTemplatesList(res, device) {
   return ok(res, { templates: rows.map(mapWhatsAppTemplate) });
 }
 
+async function handleWhatsAppTemplateManagerGet(res, device) {
+  const connection = await pool.getConnection();
+  try {
+    return ok(res, await loadWhatsAppTemplateManagerData(connection, device.business_id));
+  } finally {
+    connection.release();
+  }
+}
+
+async function handleWhatsAppTemplateDraftSave(req, res, device, actor, draftId = "") {
+  const body = await readBody(req);
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    await ensureWhatsAppTemplateDefaults(connection, device.business_id);
+    let existing = null;
+    const inputId = String(draftId || body.id || "").trim();
+    if (inputId) {
+      const [rows] = await connection.query(
+        "SELECT * FROM whatsapp_template_drafts WHERE business_id = ? AND id = ? LIMIT 1 FOR UPDATE",
+        [device.business_id, inputId]
+      );
+      existing = rows[0] || null;
+      if (!existing && draftId) throwHttpError(404, "not_found", "WhatsApp template draft was not found.");
+    }
+    const draft = await normalizeWhatsAppTemplateDraftInput(connection, device.business_id, body, existing);
+    const id = existing?.id || uuid();
+    if (existing) {
+      await connection.query(
+        `UPDATE whatsapp_template_drafts
+         SET use_case = ?,
+             template_name = ?,
+             language_code = ?,
+             category = ?,
+             header_type = ?,
+             header_text = ?,
+             body_text = ?,
+             footer_text = ?,
+             buttons = ?,
+             variable_tokens = ?,
+             status = 'DRAFT',
+             rejection_reason = '',
+             replacement_of_name = ?
+         WHERE business_id = ? AND id = ?`,
+        [
+          draft.useCase,
+          draft.templateName,
+          draft.languageCode,
+          draft.category,
+          draft.headerType,
+          draft.headerText,
+          draft.bodyText,
+          draft.footerText,
+          JSON.stringify(draft.buttons),
+          JSON.stringify(draft.variableTokens),
+          draft.replacementOfName,
+          device.business_id,
+          id
+        ]
+      );
+    } else {
+      await connection.query(
+        `INSERT INTO whatsapp_template_drafts
+           (id, business_id, use_case, template_name, language_code, category, header_type, header_text, body_text, footer_text, buttons, variable_tokens, status, replacement_of_name)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DRAFT', ?)`,
+        [
+          id,
+          device.business_id,
+          draft.useCase,
+          draft.templateName,
+          draft.languageCode,
+          draft.category,
+          draft.headerType,
+          draft.headerText,
+          draft.bodyText,
+          draft.footerText,
+          JSON.stringify(draft.buttons),
+          JSON.stringify(draft.variableTokens),
+          draft.replacementOfName
+        ]
+      );
+    }
+    await insertAuditLog(connection, {
+      businessId: device.business_id,
+      deviceId: device.id,
+      action: existing ? "WHATSAPP_TEMPLATE_DRAFT_UPDATED" : "WHATSAPP_TEMPLATE_DRAFT_CREATED",
+      entity: "whatsapp_template_drafts",
+      entityId: id,
+      beforeState: existing ? { templateName: existing.template_name, status: existing.status } : null,
+      afterState: { templateName: draft.templateName, useCase: draft.useCase },
+      ipAddress: getRequestIp(req)
+    });
+    await connection.commit();
+    const [rows] = await connection.query("SELECT * FROM whatsapp_template_drafts WHERE business_id = ? AND id = ? LIMIT 1", [device.business_id, id]);
+    return ok(res, { draft: mapWhatsAppTemplateDraft(rows[0]), ...(await loadWhatsAppTemplateManagerData(connection, device.business_id)) });
+  } catch (err) {
+    await connection.rollback();
+    throw err;
+  } finally {
+    connection.release();
+  }
+}
+
+async function handleWhatsAppTemplateDraftSubmit(req, res, device, actor, draftId) {
+  const config = await whatsappRuntimeConfig(pool, device.business_id);
+  if (config.provider !== "ycloud") {
+    return error(res, 422, "ycloud_required", "Template creation is currently available for YCloud. Meta direct provider remains sync/send only.");
+  }
+  if (!config.configured) return error(res, 422, "whatsapp_not_configured", "Set YCloud API key and sender phone before submitting templates.");
+  if (!config.businessAccountId) return error(res, 422, "waba_id_missing", WHATSAPP_TEMPLATE_MANAGER_ERRORS.missingWabaId);
+
+  const connection = await pool.getConnection();
+  let draftRow = null;
+  let draft = null;
+  let providerPayload = null;
+  let providerTemplateName = "";
+  let providerStatus = "PENDING";
+  let providerResponse = null;
+  try {
+    await ensureWhatsAppTemplateDefaults(connection, device.business_id);
+    const [draftRows] = await connection.query(
+      "SELECT * FROM whatsapp_template_drafts WHERE business_id = ? AND id = ? LIMIT 1",
+      [device.business_id, draftId]
+    );
+    draftRow = draftRows[0] || null;
+    if (!draftRow) throwHttpError(404, "not_found", "WhatsApp template draft was not found.");
+    draft = mapWhatsAppTemplateDraft(draftRow);
+
+    const [registryRows] = await connection.query(
+      "SELECT * FROM template_variable_registry WHERE business_id = ? AND active = TRUE ORDER BY sort_order ASC",
+      [device.business_id]
+    );
+    const [existingTemplateRows] = await connection.query(
+      "SELECT * FROM whatsapp_templates WHERE business_id = ? AND name = ? AND language_code = ? LIMIT 1",
+      [device.business_id, draft.templateName, draft.languageCode]
+    );
+    const existingProviderTemplate = existingTemplateRows[0] || null;
+    const existingProviderStatus = whatsappTemplateStatus(existingProviderTemplate?.status);
+    if (existingProviderStatus === "APPROVED" && !draft.replacementOfName) {
+      draft.templateName = versionedWhatsAppTemplateName(draft.templateName);
+    }
+    assertWhatsAppTemplateVariableDensity(draft.bodyText);
+    providerTemplateName = draft.templateName;
+    providerPayload = compileYCloudTemplatePayload(draft, registryRows.map(mapWhatsAppTemplateVariable), config.businessAccountId);
+
+    if (["REJECTED", "PAUSED"].includes(existingProviderStatus) && providerTemplateName === String(existingProviderTemplate.name || "")) {
+      providerResponse = await editYCloudWhatsAppTemplate(
+        config,
+        config.businessAccountId,
+        providerTemplateName,
+        draft.languageCode,
+        { components: providerPayload.components }
+      );
+    } else {
+      providerResponse = await createYCloudWhatsAppTemplate(config, providerPayload);
+    }
+    providerStatus = ycloudTemplateProviderStatus(providerResponse, "PENDING");
+  } catch (err) {
+    const providerErrorStatus = Number(err?.status || 0);
+    if (draftRow) {
+      await connection.query(
+        `INSERT INTO whatsapp_template_submission_history
+           (business_id, draft_id, template_name, language_code, submitted_by_user_id, body_text, payload, provider_response, provider_status, error_message)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          device.business_id,
+          draftId,
+          providerTemplateName || draft?.templateName || draftRow.template_name,
+          draft?.languageCode || draftRow.language_code,
+          actor?.id || "",
+          draft?.bodyText || draftRow.body_text,
+          JSON.stringify(providerPayload || null),
+          JSON.stringify(err?.meta || null),
+          providerErrorStatus === 429 ? "RATE_LIMITED" : "FAILED",
+          providerErrorStatus === 429 ? WHATSAPP_TEMPLATE_MANAGER_ERRORS.ycloud429 : String(err?.message || "Template submission failed.").slice(0, 1000)
+        ]
+      );
+      await connection.query(
+        "UPDATE whatsapp_template_drafts SET status = 'SUBMISSION_FAILED', provider_status = ?, rejection_reason = ? WHERE business_id = ? AND id = ?",
+        [
+          providerErrorStatus === 429 ? "RATE_LIMITED" : "FAILED",
+          providerErrorStatus === 429 ? WHATSAPP_TEMPLATE_MANAGER_ERRORS.ycloud429 : String(err?.message || "").slice(0, 1000),
+          device.business_id,
+          draftId
+        ]
+      );
+      if (providerErrorStatus === 429) {
+        await recordWhatsAppTemplateSyncEvent(connection, device.business_id, {
+          eventType: "rate_limited",
+          templateName: providerTemplateName || draft?.templateName || "",
+          languageCode: draft?.languageCode || "",
+          status: "429",
+          message: WHATSAPP_TEMPLATE_MANAGER_ERRORS.ycloud429,
+          payload: err?.meta || null
+        });
+      }
+    }
+    if (providerErrorStatus === 429) return error(res, 429, "ycloud_rate_limited", WHATSAPP_TEMPLATE_MANAGER_ERRORS.ycloud429);
+    throw err;
+  } finally {
+    connection.release();
+  }
+
+  const saveConnection = await pool.getConnection();
+  try {
+    await saveConnection.beginTransaction();
+    await saveConnection.query(
+      `UPDATE whatsapp_template_drafts
+       SET template_name = ?,
+           provider_template_name = ?,
+           provider_status = ?,
+           provider_response = ?,
+           status = ?,
+           submitted_by_user_id = ?,
+           submitted_at = CURRENT_TIMESTAMP,
+           rejection_reason = ''
+       WHERE business_id = ? AND id = ?`,
+      [
+        providerTemplateName,
+        providerTemplateName,
+        providerStatus,
+        JSON.stringify(providerResponse || null),
+        isApprovedWhatsAppTemplateStatus(providerStatus) ? "APPROVED" : "SUBMITTED",
+        actor?.id || "",
+        device.business_id,
+        draftId
+      ]
+    );
+    await saveConnection.query(
+      `INSERT INTO whatsapp_template_submission_history
+         (business_id, draft_id, template_name, language_code, submitted_by_user_id, body_text, payload, provider_response, provider_status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        device.business_id,
+        draftId,
+        providerTemplateName,
+        draft.languageCode,
+        actor?.id || "",
+        draft.bodyText,
+        JSON.stringify(providerPayload),
+        JSON.stringify(providerResponse || null),
+        providerStatus
+      ]
+    );
+    await upsertWhatsAppTemplates(saveConnection, device.business_id, [{
+      name: providerTemplateName,
+      languageCode: draft.languageCode,
+      status: providerStatus,
+      category: draft.category,
+      components: providerPayload.components
+    }]);
+    if (draft.useCase !== "custom") {
+      await saveConnection.query(
+        `UPDATE whatsapp_template_mappings
+         SET pending_template_name = ?,
+             pending_language_code = ?,
+             variable_tokens = ?,
+             updated_by_user_id = ?
+         WHERE business_id = ? AND use_case = ?`,
+        [
+          providerTemplateName,
+          draft.languageCode,
+          JSON.stringify(draft.variableTokens),
+          actor?.id || "",
+          device.business_id,
+          draft.useCase
+        ]
+      );
+    }
+    await reconcileWhatsAppTemplateApprovals(saveConnection, device.business_id, [{
+      name: providerTemplateName,
+      languageCode: draft.languageCode,
+      status: providerStatus,
+      category: draft.category,
+      components: providerPayload.components
+    }], actor?.id || "");
+    await insertAuditLog(saveConnection, {
+      businessId: device.business_id,
+      deviceId: device.id,
+      action: "WHATSAPP_TEMPLATE_SUBMITTED",
+      entity: "whatsapp_template_drafts",
+      entityId: draftId,
+      beforeState: { status: draft.status, templateName: draft.templateName },
+      afterState: { status: providerStatus, templateName: providerTemplateName },
+      ipAddress: getRequestIp(req)
+    });
+    await saveConnection.commit();
+    const [savedRows] = await saveConnection.query("SELECT * FROM whatsapp_template_drafts WHERE business_id = ? AND id = ? LIMIT 1", [device.business_id, draftId]);
+    const manager = await loadWhatsAppTemplateManagerData(saveConnection, device.business_id);
+    return ok(res, {
+      draft: mapWhatsAppTemplateDraft(savedRows[0]),
+      templates: manager.templates,
+      mapping: manager.mappings.find((mapping) => mapping.useCase === draft.useCase),
+      message: isApprovedWhatsAppTemplateStatus(providerStatus)
+        ? "Template is approved and ready."
+        : "Template submitted to YCloud. Sync after Meta review completes.",
+      ...manager
+    });
+  } catch (err) {
+    await saveConnection.rollback();
+    throw err;
+  } finally {
+    saveConnection.release();
+  }
+}
+
+async function handleWhatsAppTemplateMappingSave(req, res, device, actor, useCaseParam) {
+  const body = await readBody(req);
+  const useCase = normalizeWhatsAppTemplateUseCase(useCaseParam || body.useCase);
+  const templateName = safeWhatsAppTemplateName(body.templateName, "");
+  const languageCode = normalizeWhatsAppLanguage(body.languageCode);
+  if (!templateName) throwHttpError(422, "validation_error", "Template name is required.");
+  const pendingTemplateName = safeWhatsAppTemplateName(body.pendingTemplateName || "", "");
+  const pendingLanguageCode = pendingTemplateName ? normalizeWhatsAppLanguage(body.pendingLanguageCode || languageCode) : "";
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    await ensureWhatsAppTemplateDefaults(connection, device.business_id);
+    const [currentRows] = await connection.query(
+      "SELECT * FROM whatsapp_template_mappings WHERE business_id = ? AND use_case = ? LIMIT 1 FOR UPDATE",
+      [device.business_id, useCase]
+    );
+    const current = currentRows[0] || {};
+    await connection.query(
+      `INSERT INTO whatsapp_template_mappings
+         (business_id, use_case, template_name, language_code, variable_tokens, requires_document_header, pending_template_name, pending_language_code, updated_by_user_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE
+         template_name = VALUES(template_name),
+         language_code = VALUES(language_code),
+         pending_template_name = VALUES(pending_template_name),
+         pending_language_code = VALUES(pending_language_code),
+         updated_by_user_id = VALUES(updated_by_user_id)`,
+      [
+        device.business_id,
+        useCase,
+        templateName,
+        languageCode,
+        JSON.stringify(defaultWhatsAppTemplateMapping(useCase)?.variableTokens || []),
+        defaultWhatsAppTemplateMapping(useCase)?.requiresDocumentHeader ? 1 : 0,
+        pendingTemplateName,
+        pendingLanguageCode,
+        actor?.id || ""
+      ]
+    );
+    await connection.query(
+      `INSERT INTO whatsapp_template_mapping_history
+         (business_id, use_case, previous_template_name, previous_language_code, next_template_name, next_language_code, changed_by_user_id, reason)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        device.business_id,
+        useCase,
+        current.template_name || "",
+        current.language_code || "",
+        templateName,
+        languageCode,
+        actor?.id || "",
+        "Manual mapping update"
+      ]
+    );
+    await connection.commit();
+    const manager = await loadWhatsAppTemplateManagerData(connection, device.business_id);
+    return ok(res, {
+      mapping: manager.mappings.find((mapping) => mapping.useCase === useCase),
+      mappings: manager.mappings
+    });
+  } catch (err) {
+    await connection.rollback();
+    throw err;
+  } finally {
+    connection.release();
+  }
+}
+
+async function fetchYCloudWhatsAppTemplates(config) {
+  const templates = [];
+  let page = 1;
+  const limit = 100;
+  while (page <= 10) {
+    const params = new URLSearchParams({
+      page: String(page),
+      limit: String(limit),
+      includeTotal: "false"
+    });
+    if (config.businessAccountId) params.set("filter.wabaId", config.businessAccountId);
+    const body = await fetchYCloud(config, `v2/whatsapp/templates?${params.toString()}`);
+    const items = Array.isArray(body.items) ? body.items : Array.isArray(body.data) ? body.data : Array.isArray(body) ? body : [];
+    for (const item of items) {
+      templates.push({
+        name: String(item.name || ""),
+        languageCode: String(item.language || item.languageCode || ""),
+        status: String(item.status || ""),
+        category: String(item.category || ""),
+        components: Array.isArray(item.components) ? item.components : [],
+        rejectionReason: whatsappTemplateRejectionReason(item)
+      });
+    }
+    if (items.length < limit) break;
+    page += 1;
+  }
+  return templates;
+}
+
 async function handleWhatsAppTemplatesSync(res, device) {
-  const config = whatsappRuntimeConfig();
+  const config = await whatsappRuntimeConfig(pool, device.business_id);
+  if (config.provider === "ycloud") {
+    if (!config.configured) {
+      return error(res, 422, "whatsapp_not_configured", "Set YCloud API key and sender phone before syncing templates.");
+    }
+    if (!config.businessAccountId) return error(res, 422, "waba_id_missing", WHATSAPP_TEMPLATE_MANAGER_ERRORS.missingWabaId);
+    let templates = [];
+    try {
+      templates = await fetchYCloudWhatsAppTemplates(config);
+    } catch (err) {
+      if (Number(err?.status || 0) === 429) return error(res, 429, "ycloud_rate_limited", WHATSAPP_TEMPLATE_MANAGER_ERRORS.ycloud429);
+      throw err;
+    }
+    const connection = await pool.getConnection();
+    try {
+      await connection.beginTransaction();
+      await ensureWhatsAppTemplateDefaults(connection, device.business_id);
+      await upsertWhatsAppTemplates(connection, device.business_id, templates);
+      await reconcileWhatsAppTemplateApprovals(connection, device.business_id, templates);
+      await recordWhatsAppTemplateSyncEvent(connection, device.business_id, {
+        eventType: "manual_sync",
+        status: "SUCCESS",
+        message: `Synced ${templates.length} WhatsApp templates from YCloud.`,
+        payload: { syncedCount: templates.length }
+      });
+      await connection.query("UPDATE whatsapp_settings SET last_template_sync_at = CURRENT_TIMESTAMP WHERE business_id = ?", [device.business_id]);
+      await connection.commit();
+    } catch (err) {
+      await connection.rollback();
+      throw err;
+    } finally {
+      connection.release();
+    }
+    return ok(res, { templates, syncedCount: templates.length });
+  }
   if (!config.configured || !config.businessAccountId) {
     return error(res, 422, "whatsapp_not_configured", "Set WhatsApp Business Account ID, phone number ID, and access token before syncing templates.");
   }
@@ -4669,7 +6411,8 @@ async function handleWhatsAppTemplatesSync(res, device) {
         languageCode: String(item.language || ""),
         status: String(item.status || ""),
         category: String(item.category || ""),
-        components: Array.isArray(item.components) ? item.components : []
+        components: Array.isArray(item.components) ? item.components : [],
+        rejectionReason: whatsappTemplateRejectionReason(item)
       });
     }
     nextPath = body.paging?.next || "";
@@ -4678,15 +6421,15 @@ async function handleWhatsAppTemplatesSync(res, device) {
   const connection = await pool.getConnection();
   try {
     await connection.beginTransaction();
-    await ensureWhatsAppSettings(connection, device.business_id);
-    for (const template of templates.filter((item) => item.name && item.languageCode)) {
-      await connection.query(
-        `INSERT INTO whatsapp_templates (business_id, name, language_code, status, category, components)
-         VALUES (?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE status = VALUES(status), category = VALUES(category), components = VALUES(components)`,
-        [device.business_id, template.name, template.languageCode, template.status, template.category, JSON.stringify(template.components)]
-      );
-    }
+    await ensureWhatsAppTemplateDefaults(connection, device.business_id);
+    await upsertWhatsAppTemplates(connection, device.business_id, templates);
+    await reconcileWhatsAppTemplateApprovals(connection, device.business_id, templates);
+    await recordWhatsAppTemplateSyncEvent(connection, device.business_id, {
+      eventType: "manual_sync",
+      status: "SUCCESS",
+      message: `Synced ${templates.length} WhatsApp templates from Meta.`,
+      payload: { syncedCount: templates.length }
+    });
     await connection.query("UPDATE whatsapp_settings SET last_template_sync_at = CURRENT_TIMESTAMP WHERE business_id = ?", [device.business_id]);
     await connection.commit();
   } catch (err) {
@@ -4755,8 +6498,155 @@ async function handleWhatsAppMessagesList(res, device, conversationId, url) {
   }
 }
 
+async function refreshWhatsAppConversationHistorySummary(connection, businessId, conversationId, options = {}) {
+  const [latestRows] = await connection.query(
+    `SELECT * FROM whatsapp_messages
+     WHERE business_id = ? AND conversation_id = ?
+     ORDER BY COALESCE(timestamp, created_at) DESC, created_at DESC
+     LIMIT 1`,
+    [businessId, conversationId]
+  );
+  const latest = latestRows[0] || null;
+  const previewText = latest
+    ? latest.text_body || (latest.template_name ? `Template: ${latest.template_name}` : "WhatsApp message")
+    : "";
+  const lastMessageAt = latest ? latest.timestamp || latest.created_at || null : null;
+  if (options.clearUnread) {
+    await connection.query(
+      `UPDATE whatsapp_conversations
+       SET last_message_preview = ?, last_message_at = ?, unread_count = 0
+       WHERE business_id = ? AND id = ?`,
+      [whatsAppMessagePreview(previewText), lastMessageAt, businessId, conversationId]
+    );
+  } else if (options.unreadDelta) {
+    await connection.query(
+      `UPDATE whatsapp_conversations
+       SET last_message_preview = ?, last_message_at = ?, unread_count = GREATEST(0, unread_count + ?)
+       WHERE business_id = ? AND id = ?`,
+      [whatsAppMessagePreview(previewText), lastMessageAt, options.unreadDelta, businessId, conversationId]
+    );
+  } else {
+    await connection.query(
+      `UPDATE whatsapp_conversations
+       SET last_message_preview = ?, last_message_at = ?
+       WHERE business_id = ? AND id = ?`,
+      [whatsAppMessagePreview(previewText), lastMessageAt, businessId, conversationId]
+    );
+  }
+  const [conversationRows] = await connection.query(
+    "SELECT * FROM whatsapp_conversations WHERE business_id = ? AND id = ? LIMIT 1",
+    [businessId, conversationId]
+  );
+  return conversationRows[0] || null;
+}
+
+async function handleWhatsAppMessageDelete(req, res, device, conversationId, messageId) {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [conversationRows] = await connection.query(
+      "SELECT * FROM whatsapp_conversations WHERE business_id = ? AND id = ? LIMIT 1 FOR UPDATE",
+      [device.business_id, conversationId]
+    );
+    if (!conversationRows.length) throwHttpError(404, "not_found", "WhatsApp conversation was not found.");
+    const [messageRows] = await connection.query(
+      "SELECT * FROM whatsapp_messages WHERE business_id = ? AND conversation_id = ? AND id = ? LIMIT 1 FOR UPDATE",
+      [device.business_id, conversationId, messageId]
+    );
+    if (!messageRows.length) throwHttpError(404, "not_found", "WhatsApp message was not found.");
+    const message = messageRows[0];
+    const whatsappMessageId = String(message.whatsapp_message_id || "");
+    await connection.query(
+      `DELETE FROM whatsapp_message_events
+       WHERE business_id = ? AND (message_id = ? OR (? <> '' AND whatsapp_message_id = ?))`,
+      [device.business_id, message.id, whatsappMessageId, whatsappMessageId]
+    );
+    await connection.query(
+      "DELETE FROM whatsapp_messages WHERE business_id = ? AND conversation_id = ? AND id = ?",
+      [device.business_id, conversationId, message.id]
+    );
+    const conversation = await refreshWhatsAppConversationHistorySummary(connection, device.business_id, conversationId, {
+      unreadDelta: message.direction === "inbound" && message.status === "received" ? -1 : 0
+    });
+    await insertAuditLog(connection, {
+      businessId: device.business_id,
+      deviceId: device.id,
+      action: "WHATSAPP_MESSAGE_DELETED",
+      entity: "whatsapp_messages",
+      entityId: message.id,
+      beforeState: mapWhatsAppMessage(message),
+      afterState: null,
+      ipAddress: getRequestIp(req)
+    });
+    await connection.commit();
+    return ok(res, {
+      deletedMessageId: message.id,
+      conversation: mapWhatsAppConversation(conversation || conversationRows[0])
+    });
+  } catch (err) {
+    await connection.rollback();
+    throw err;
+  } finally {
+    connection.release();
+  }
+}
+
+async function handleWhatsAppConversationHistoryClear(req, res, device, conversationId) {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [conversationRows] = await connection.query(
+      "SELECT * FROM whatsapp_conversations WHERE business_id = ? AND id = ? LIMIT 1 FOR UPDATE",
+      [device.business_id, conversationId]
+    );
+    if (!conversationRows.length) throwHttpError(404, "not_found", "WhatsApp conversation was not found.");
+    const [countRows] = await connection.query(
+      "SELECT COUNT(*) AS total FROM whatsapp_messages WHERE business_id = ? AND conversation_id = ?",
+      [device.business_id, conversationId]
+    );
+    const deletedCount = Number(countRows[0]?.total || 0);
+    await connection.query(
+      `DELETE e FROM whatsapp_message_events e
+       INNER JOIN whatsapp_messages m ON e.business_id = m.business_id AND e.message_id = m.id
+       WHERE m.business_id = ? AND m.conversation_id = ?`,
+      [device.business_id, conversationId]
+    );
+    await connection.query(
+      `DELETE e FROM whatsapp_message_events e
+       INNER JOIN whatsapp_messages m ON e.business_id = m.business_id AND e.whatsapp_message_id = m.whatsapp_message_id
+       WHERE m.business_id = ? AND m.conversation_id = ? AND m.whatsapp_message_id IS NOT NULL AND m.whatsapp_message_id <> ''`,
+      [device.business_id, conversationId]
+    );
+    await connection.query(
+      "DELETE FROM whatsapp_messages WHERE business_id = ? AND conversation_id = ?",
+      [device.business_id, conversationId]
+    );
+    const conversation = await refreshWhatsAppConversationHistorySummary(connection, device.business_id, conversationId, { clearUnread: true });
+    await insertAuditLog(connection, {
+      businessId: device.business_id,
+      deviceId: device.id,
+      action: "WHATSAPP_CHAT_HISTORY_CLEARED",
+      entity: "whatsapp_conversations",
+      entityId: conversationId,
+      beforeState: { conversation: mapWhatsAppConversation(conversationRows[0]), deletedCount },
+      afterState: mapWhatsAppConversation(conversation || conversationRows[0]),
+      ipAddress: getRequestIp(req)
+    });
+    await connection.commit();
+    return ok(res, {
+      deletedCount,
+      conversation: mapWhatsAppConversation(conversation || conversationRows[0])
+    });
+  } catch (err) {
+    await connection.rollback();
+    throw err;
+  } finally {
+    connection.release();
+  }
+}
+
 async function handleWhatsAppMessageSend(req, res, device) {
-  const config = whatsappRuntimeConfig();
+  const config = await whatsappRuntimeConfig(pool, device.business_id);
   if (!config.configured) return error(res, 503, "whatsapp_not_configured", "WhatsApp Business API not configured on cloud-api.");
   const body = await readBody(req);
   const phone = normalizeWhatsAppPhone(body.phone);
@@ -4767,9 +6657,11 @@ async function handleWhatsAppMessageSend(req, res, device) {
   const connection = await pool.getConnection();
   let conversation;
   let template = null;
+  let mapping = null;
   let messageId = "";
   let textBody = "";
   let metaPayload;
+  let templateVariables = [];
   try {
     await connection.beginTransaction();
     await ensureWhatsAppSettings(connection, device.business_id);
@@ -4788,18 +6680,14 @@ async function handleWhatsAppMessageSend(req, res, device) {
       }
       metaPayload = documentMetadata ? { pendingDocument: documentMetadata, caption: textBody } : buildWhatsAppTextPayload(phone, textBody);
     } else {
-      template = await resolveApprovedWhatsAppTemplate(connection, device.business_id, body.templateName, body.languageCode);
-      if (documentMetadata && !templateHasDocumentHeader(template)) {
-        throwHttpError(
-          422,
-          "template_document_header_required",
-          `Approved WhatsApp template "${template.name}" must include a document header before PDF sharing can send the PDF.`
-        );
-      }
+      ({ template, mapping } = await resolveApprovedWhatsAppTemplateForSend(connection, device.business_id, body, documentMetadata));
+      templateVariables = Array.isArray(body.variables) ? alignWhatsAppTemplateVariables(template, body.variables) : [];
+      if (!templateVariables.length) templateVariables = whatsappVariablesFromTokenValues(mapping, body.templateVariableValues);
+      templateVariables = alignWhatsAppTemplateVariables(template, templateVariables);
       textBody = String(body.text || `Template: ${template.name}`).trim();
       metaPayload = documentMetadata
-        ? { pendingTemplateDocument: { templateName: template.name, languageCode: template.languageCode, media: documentMetadata }, variables: body.variables || [] }
-        : buildWhatsAppTemplatePayload(phone, template, body.variables);
+        ? { pendingTemplateDocument: { templateName: template.name, languageCode: template.languageCode, media: documentMetadata }, variables: templateVariables }
+        : buildWhatsAppTemplatePayload(phone, template, templateVariables);
     }
     messageId = uuid();
     await connection.query(
@@ -4816,7 +6704,7 @@ async function handleWhatsAppMessageSend(req, res, device) {
         template?.name || "",
         String(source.type || body.sourceType || "").slice(0, 40),
         String(source.id || body.sourceId || "").slice(0, 80),
-        JSON.stringify({ request: metaPayload, variables: body.variables || [] })
+        JSON.stringify({ request: metaPayload, variables: templateVariables })
       ]
     );
     await connection.query(
@@ -4833,21 +6721,40 @@ async function handleWhatsAppMessageSend(req, res, device) {
   }
   try {
     let uploadedDocument = null;
-    if (documentMedia) uploadedDocument = await uploadWhatsAppDocumentMedia(config, documentMedia);
-    if (uploadedDocument) {
-      metaPayload = mode === "text"
-        ? buildWhatsAppDocumentPayload(phone, uploadedDocument, textBody)
-        : buildWhatsAppTemplatePayload(phone, template, body.variables, uploadedDocument);
+    if (documentMedia) {
+      uploadedDocument = config.provider === "ycloud"
+        ? await uploadYCloudDocumentMedia(config, documentMedia)
+        : await uploadWhatsAppDocumentMedia(config, documentMedia);
     }
-    const metaResponse = await sendWhatsAppCloudMessage(config, phone, metaPayload);
-    const whatsappMessageId = String(metaResponse?.messages?.[0]?.id || "");
+    let providerPayload = metaPayload;
+    let providerResponse;
+    let whatsappMessageId = "";
+    if (config.provider === "ycloud") {
+      providerPayload = uploadedDocument
+        ? mode === "text"
+          ? buildYCloudDocumentPayload(config, phone, uploadedDocument, textBody, messageId)
+          : buildYCloudTemplatePayload(config, phone, template, templateVariables, uploadedDocument, messageId)
+        : mode === "text"
+          ? buildYCloudTextPayload(config, phone, textBody, messageId)
+          : buildYCloudTemplatePayload(config, phone, template, templateVariables, null, messageId);
+      providerResponse = await sendYCloudWhatsAppMessage(config, providerPayload);
+      whatsappMessageId = String(providerResponse?.id || providerResponse?.wamid || "");
+    } else {
+      if (uploadedDocument) {
+        providerPayload = mode === "text"
+          ? buildWhatsAppDocumentPayload(phone, uploadedDocument, textBody)
+          : buildWhatsAppTemplatePayload(phone, template, templateVariables, uploadedDocument);
+      }
+      providerResponse = await sendWhatsAppCloudMessage(config, phone, providerPayload);
+      whatsappMessageId = String(providerResponse?.messages?.[0]?.id || "");
+    }
     await pool.query(
       `UPDATE whatsapp_messages
        SET whatsapp_message_id = ?, status = 'sent', payload = ?
        WHERE business_id = ? AND id = ?`,
       [
         whatsappMessageId || null,
-        JSON.stringify({ request: metaPayload, response: metaResponse, variables: body.variables || [], media: uploadedDocument ? whatsappMediaMetadata(uploadedDocument) : documentMetadata }),
+        JSON.stringify({ provider: config.provider, request: providerPayload, response: providerResponse, variables: templateVariables, media: uploadedDocument ? whatsappMediaMetadata(uploadedDocument) : documentMetadata }),
         device.business_id,
         messageId
       ]
@@ -4855,7 +6762,7 @@ async function handleWhatsAppMessageSend(req, res, device) {
     await pool.query(
       `INSERT INTO whatsapp_message_events (business_id, message_id, whatsapp_message_id, event_type, status, payload, occurred_at)
        VALUES (?, ?, ?, 'send', 'sent', ?, CURRENT_TIMESTAMP)`,
-      [device.business_id, messageId, whatsappMessageId, JSON.stringify(metaResponse)]
+      [device.business_id, messageId, whatsappMessageId, JSON.stringify({ provider: config.provider, response: providerResponse })]
     );
     const [messageRows] = await pool.query("SELECT * FROM whatsapp_messages WHERE business_id = ? AND id = ? LIMIT 1", [device.business_id, messageId]);
     const [conversationRows] = await pool.query("SELECT * FROM whatsapp_conversations WHERE business_id = ? AND id = ? LIMIT 1", [device.business_id, conversation.id]);
@@ -4875,10 +6782,9 @@ async function handleWhatsAppMessageSend(req, res, device) {
   }
 }
 
-const verifyMetaWebhookSignature = (raw, signature) => {
-  const config = whatsappRuntimeConfig();
-  if (!config.appSecret) return false;
-  const expected = `sha256=${crypto.createHmac("sha256", config.appSecret).update(raw).digest("hex")}`;
+const verifyMetaWebhookSignature = (raw, signature, appSecret) => {
+  if (!appSecret) return false;
+  const expected = `sha256=${crypto.createHmac("sha256", appSecret).update(raw).digest("hex")}`;
   const received = String(signature || "");
   const expectedBuffer = Buffer.from(expected);
   const receivedBuffer = Buffer.from(received);
@@ -4888,14 +6794,11 @@ const verifyMetaWebhookSignature = (raw, signature) => {
 async function resolveMetaWebhookBusinessId(connection, phoneNumberId) {
   const id = String(phoneNumberId || "").trim();
   if (!id) return null;
-  const [rows] = await connection.query("SELECT business_id FROM whatsapp_settings WHERE phone_number_id = ? LIMIT 1", [id]);
-  if (rows.length) return Number(rows[0].business_id || 0) || null;
-  const config = whatsappRuntimeConfig();
-  if (config.phoneNumberId && config.phoneNumberId === id) {
-    await ensureWhatsAppSettings(connection, 1);
-    return 1;
-  }
-  return null;
+  const [rows] = await connection.query(
+    "SELECT business_id FROM whatsapp_settings WHERE provider = 'meta' AND enabled = TRUE AND phone_number_id = ? LIMIT 1",
+    [id]
+  );
+  return rows.length ? Number(rows[0].business_id || 0) || null : null;
 }
 
 async function storeInboundWhatsAppMessage(connection, businessId, value, message) {
@@ -4950,15 +6853,26 @@ async function storeInboundWhatsAppMessage(connection, businessId, value, messag
 
 async function storeWhatsAppStatusEvent(connection, businessId, status) {
   const whatsappMessageId = String(status.id || "");
-  if (!whatsappMessageId) return;
+  const candidateIds = [
+    status.id,
+    status.wamid,
+    status.whatsappMessageId,
+    status.externalId
+  ].map((value) => String(value || "").trim()).filter(Boolean);
+  if (!candidateIds.length) return;
   const normalizedStatus = normalizeWhatsAppMessageStatus(status.status);
-  const timestamp = mysqlDateFromUnix(status.timestamp);
+  const timestamp = mysqlDateFromUnix(status.timestamp || status.updateTime || status.readTime || status.deliverTime || status.sendTime || status.createTime);
   const errorMessage = Array.isArray(status.errors) && status.errors.length
     ? String(status.errors[0]?.message || status.errors[0]?.title || "WhatsApp delivery failed.").slice(0, 500)
+    : status.errorMessage || status.errorCode || status.whatsappApiError
+      ? String(status.errorMessage || status.errorCode || status.whatsappApiError?.message || "WhatsApp delivery failed.").slice(0, 500)
     : "";
+  const placeholders = candidateIds.map(() => "?").join(", ");
   const [messages] = await connection.query(
-    "SELECT id, conversation_id FROM whatsapp_messages WHERE business_id = ? AND whatsapp_message_id = ? LIMIT 1",
-    [businessId, whatsappMessageId]
+    `SELECT id, conversation_id FROM whatsapp_messages
+     WHERE business_id = ? AND (whatsapp_message_id IN (${placeholders}) OR id IN (${placeholders}))
+     LIMIT 1`,
+    [businessId, ...candidateIds, ...candidateIds]
   );
   const messageId = messages[0]?.id || null;
   if (messageId) {
@@ -4970,21 +6884,21 @@ async function storeWhatsAppStatusEvent(connection, businessId, status) {
   await connection.query(
     `INSERT INTO whatsapp_message_events (business_id, message_id, whatsapp_message_id, event_type, status, payload, occurred_at)
      VALUES (?, ?, ?, 'status', ?, ?, ?)`,
-    [businessId, messageId, whatsappMessageId, normalizedStatus, JSON.stringify(status), timestamp]
+    [businessId, messageId, whatsappMessageId || candidateIds[0] || "", normalizedStatus, JSON.stringify(status), timestamp]
   );
 }
 
 async function handleMetaWebhookVerify(req, res, url) {
-  const config = whatsappRuntimeConfig();
   const mode = url.searchParams.get("hub.mode");
   const tokenValue = url.searchParams.get("hub.verify_token");
   const challenge = url.searchParams.get("hub.challenge") || "";
-  if (!config.enabled || !config.verifyToken) return error(res, 503, "whatsapp_not_configured", "WhatsApp webhook verify token is not configured.");
-  if (mode !== "subscribe" || tokenValue !== config.verifyToken) return error(res, 403, "forbidden", "WhatsApp webhook verification failed.");
+  if (mode !== "subscribe" || !tokenValue) return error(res, 403, "forbidden", "WhatsApp webhook verification failed.");
   const connection = await pool.getConnection();
   try {
-    await ensureWhatsAppSettings(connection, 1);
-    await connection.query("UPDATE whatsapp_settings SET webhook_verified_at = CURRENT_TIMESTAMP WHERE business_id = 1");
+    const configs = await listWhatsAppRuntimeConfigs(connection, "meta");
+    const matched = configs.find((config) => config.enabled && config.verifyToken && config.verifyToken === tokenValue);
+    if (!matched) return error(res, 403, "forbidden", "WhatsApp webhook verification failed.");
+    await connection.query("UPDATE whatsapp_settings SET webhook_verified_at = CURRENT_TIMESTAMP WHERE business_id = ?", [matched.businessId]);
   } finally {
     connection.release();
   }
@@ -4992,12 +6906,7 @@ async function handleMetaWebhookVerify(req, res, url) {
 }
 
 async function handleMetaWebhookPost(req, res) {
-  const config = whatsappRuntimeConfig();
-  if (!config.webhookReady) return error(res, 503, "whatsapp_not_configured", "WhatsApp webhook signature secret is not configured.");
   const raw = await readRawBody(req);
-  if (!verifyMetaWebhookSignature(raw, req.headers["x-hub-signature-256"])) {
-    return error(res, 401, "invalid_signature", "WhatsApp webhook signature is invalid.");
-  }
   let body = {};
   try {
     body = raw.length ? JSON.parse(raw.toString("utf8")) : {};
@@ -5006,6 +6915,12 @@ async function handleMetaWebhookPost(req, res) {
   }
   const connection = await pool.getConnection();
   try {
+    const configs = await listWhatsAppRuntimeConfigs(connection, "meta");
+    const configured = configs.filter((config) => config.webhookReady);
+    if (!configured.length) return error(res, 503, "whatsapp_not_configured", "WhatsApp webhook signature secret is not configured.");
+    if (!configured.some((config) => verifyMetaWebhookSignature(raw, req.headers["x-hub-signature-256"], config.appSecret))) {
+      return error(res, 401, "invalid_signature", "WhatsApp webhook signature is invalid.");
+    }
     await connection.beginTransaction();
     for (const entry of Array.isArray(body.entry) ? body.entry : []) {
       for (const change of Array.isArray(entry.changes) ? entry.changes : []) {
@@ -5030,6 +6945,113 @@ async function handleMetaWebhookPost(req, res) {
   return ok(res, { received: true });
 }
 
+const verifyYCloudWebhookSignature = (raw, signatureHeader, webhookSecret) => {
+  if (!webhookSecret) return false;
+  const parts = Object.fromEntries(
+    String(signatureHeader || "")
+      .split(",")
+      .map((part) => part.trim().split("="))
+      .filter((pair) => pair.length === 2 && pair[0] && pair[1])
+  );
+  const timestamp = String(parts.t || "").trim();
+  const received = String(parts.s || "").trim();
+  if (!timestamp || !received) return false;
+  const expected = crypto
+    .createHmac("sha256", webhookSecret)
+    .update(Buffer.concat([Buffer.from(`${timestamp}.`, "utf8"), raw]))
+    .digest("hex");
+  const expectedBuffer = Buffer.from(expected);
+  const receivedBuffer = Buffer.from(received);
+  return expectedBuffer.length === receivedBuffer.length && crypto.timingSafeEqual(expectedBuffer, receivedBuffer);
+};
+
+async function resolveYCloudWebhookBusinessId(connection, message = {}) {
+  const phoneCandidates = [message.from, message.to].map(whatsappPhoneDigits).filter(Boolean);
+  const wabaId = String(message.wabaId || "").trim();
+  const [rows] = await connection.query("SELECT business_id, phone_number_id, business_account_id, display_phone_number FROM whatsapp_settings WHERE provider = 'ycloud' AND enabled = TRUE");
+  for (const row of rows) {
+    const settingsPhones = [row.phone_number_id, row.display_phone_number].map(whatsappPhoneDigits).filter(Boolean);
+    const settingsWabaId = String(row.business_account_id || "").trim();
+    if (phoneCandidates.some((phone) => settingsPhones.includes(phone)) || (wabaId && settingsWabaId === wabaId)) {
+      return Number(row.business_id || 0) || null;
+    }
+  }
+  return null;
+}
+
+async function storeYCloudInboundWhatsAppMessage(connection, businessId, event, message) {
+  const messageId = String(message.id || message.wamid || "");
+  if (!messageId) return;
+  const displayName = message.customerProfile?.name || message.profile?.name || message.customer?.name || "";
+  await storeInboundWhatsAppMessage(
+    connection,
+    businessId,
+    { contacts: [{ wa_id: message.from, profile: { name: displayName } }] },
+    {
+      ...message,
+      id: messageId,
+      timestamp: message.sendTime || message.createTime || event.createTime,
+      type: message.type || "unknown"
+    }
+  );
+}
+
+async function handleYCloudWebhookPost(req, res) {
+  const raw = await readRawBody(req);
+  let body = {};
+  try {
+    body = raw.length ? JSON.parse(raw.toString("utf8")) : {};
+  } catch {
+    return error(res, 400, "invalid_json", "Request body must be valid JSON.");
+  }
+  const connection = await pool.getConnection();
+  try {
+    const configs = await listWhatsAppRuntimeConfigs(connection, "ycloud");
+    const configured = configs.filter((config) => config.webhookReady);
+    if (!configured.length) return error(res, 503, "whatsapp_not_configured", "YCloud webhook secret is not configured.");
+    const matchedConfig = configured.find((config) => verifyYCloudWebhookSignature(raw, req.headers["ycloud-signature"], config.ycloudWebhookSecret));
+    if (!matchedConfig) return error(res, 401, "invalid_signature", "YCloud webhook signature is invalid.");
+    await connection.beginTransaction();
+    const eventType = String(body.type || "");
+    if (eventType === "whatsapp.inbound_message.received" || eventType === "whatsapp.inbound.message") {
+      const message = body.whatsappInboundMessage || body.whatsappMessage || {};
+      const businessId = await resolveYCloudWebhookBusinessId(connection, message) || matchedConfig.businessId;
+      if (businessId) await storeYCloudInboundWhatsAppMessage(connection, businessId, body, message);
+    } else if (eventType === "whatsapp.message.updated") {
+      const message = body.whatsappMessage || {};
+      const businessId = await resolveYCloudWebhookBusinessId(connection, message) || matchedConfig.businessId;
+      if (businessId) await storeWhatsAppStatusEvent(connection, businessId, message);
+    }
+    await connection.commit();
+  } catch (err) {
+    await connection.rollback();
+    throw err;
+  } finally {
+    connection.release();
+  }
+  return ok(res, { received: true });
+}
+
+async function handleWhatsAppWebhookVerify(req, res, url) {
+  if (url.searchParams.has("hub.mode")) return handleMetaWebhookVerify(req, res, url);
+  const connection = await pool.getConnection();
+  try {
+    const configs = await listWhatsAppRuntimeConfigs(connection, "ycloud");
+    if (!configs.some((config) => config.enabled)) {
+      return error(res, 503, "whatsapp_not_configured", "YCloud WhatsApp integration is disabled.");
+    }
+    return textResponse(res, 200, "YCloud WhatsApp webhook endpoint is ready.");
+  } finally {
+    connection.release();
+  }
+}
+
+async function handleWhatsAppWebhookPost(req, res) {
+  if (req.headers["ycloud-signature"]) return handleYCloudWebhookPost(req, res);
+  if (req.headers["x-hub-signature-256"]) return handleMetaWebhookPost(req, res);
+  return error(res, 401, "invalid_signature", "WhatsApp webhook signature is missing.");
+}
+
 async function route(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   try {
@@ -5040,8 +7062,8 @@ async function route(req, res) {
     if (req.method === "GET" && url.pathname === "/api/v1/health") {
       return handleHealth(res);
     }
-    if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/webhook") return handleMetaWebhookVerify(req, res, url);
-    if (req.method === "POST" && url.pathname === "/api/v1/whatsapp/webhook") return handleMetaWebhookPost(req, res);
+    if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/webhook") return handleWhatsAppWebhookVerify(req, res, url);
+    if (req.method === "POST" && url.pathname === "/api/v1/whatsapp/webhook") return handleWhatsAppWebhookPost(req, res);
     if (req.method === "POST" && url.pathname === "/api/v1/auth/devices") return handleDeviceRegistration(req, res);
     if (req.method === "GET" && url.pathname === "/api/v1/auth/devices/current/status") return handleCurrentDeviceApprovalStatus(req, res);
     if (req.method === "DELETE" && url.pathname === "/api/v1/auth/devices/current") return handleCurrentDeviceDisconnect(req, res);
@@ -5135,14 +7157,54 @@ async function route(req, res) {
       await requireCloudUser(req, device, ["sharing.whatsapp"]);
       return handleWhatsAppStatus(res, device);
     }
+    if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/config") {
+      await requireCloudUser(req, device, ["settings.manage"]);
+      return handleWhatsAppConfigGet(res, device);
+    }
+    if ((req.method === "PUT" || req.method === "POST") && url.pathname === "/api/v1/whatsapp/config") {
+      await requireCloudUser(req, device, ["settings.manage"]);
+      return handleWhatsAppConfigSave(req, res, device);
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/template-manager") {
+      await requireCloudUser(req, device, ["settings.manage"]);
+      return handleWhatsAppTemplateManagerGet(res, device);
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/whatsapp/template-drafts") {
+      const actor = await requireCloudUser(req, device, ["settings.manage"]);
+      return handleWhatsAppTemplateDraftSave(req, res, device, actor);
+    }
+    const whatsappTemplateDraftSubmitMatch = /^\/api\/v1\/whatsapp\/template-drafts\/([^/]+)\/submit$/.exec(url.pathname);
+    if (whatsappTemplateDraftSubmitMatch && req.method === "POST") {
+      const actor = await requireCloudUser(req, device, ["settings.manage"]);
+      return handleWhatsAppTemplateDraftSubmit(req, res, device, actor, whatsappTemplateDraftSubmitMatch[1]);
+    }
+    const whatsappTemplateDraftMatch = /^\/api\/v1\/whatsapp\/template-drafts\/([^/]+)$/.exec(url.pathname);
+    if (whatsappTemplateDraftMatch && req.method === "PATCH") {
+      const actor = await requireCloudUser(req, device, ["settings.manage"]);
+      return handleWhatsAppTemplateDraftSave(req, res, device, actor, whatsappTemplateDraftMatch[1]);
+    }
+    const whatsappTemplateMappingMatch = /^\/api\/v1\/whatsapp\/template-mappings\/([^/]+)$/.exec(url.pathname);
+    if (whatsappTemplateMappingMatch && req.method === "PUT") {
+      const actor = await requireCloudUser(req, device, ["settings.manage"]);
+      return handleWhatsAppTemplateMappingSave(req, res, device, actor, whatsappTemplateMappingMatch[1]);
+    }
     if (req.method === "GET" && url.pathname === "/api/v1/whatsapp/conversations") {
       await requireCloudUser(req, device, ["sharing.whatsapp"]);
       return handleWhatsAppConversationsList(res, device, url);
+    }
+    const whatsappMessageDeleteMatch = /^\/api\/v1\/whatsapp\/conversations\/([^/]+)\/messages\/([^/]+)$/.exec(url.pathname);
+    if (whatsappMessageDeleteMatch && req.method === "DELETE") {
+      await requireCloudUser(req, device, ["sharing.whatsapp"]);
+      return handleWhatsAppMessageDelete(req, res, device, whatsappMessageDeleteMatch[1], whatsappMessageDeleteMatch[2]);
     }
     const whatsappMessagesMatch = /^\/api\/v1\/whatsapp\/conversations\/([^/]+)\/messages$/.exec(url.pathname);
     if (whatsappMessagesMatch && req.method === "GET") {
       await requireCloudUser(req, device, ["sharing.whatsapp"]);
       return handleWhatsAppMessagesList(res, device, whatsappMessagesMatch[1], url);
+    }
+    if (whatsappMessagesMatch && req.method === "DELETE") {
+      await requireCloudUser(req, device, ["sharing.whatsapp"]);
+      return handleWhatsAppConversationHistoryClear(req, res, device, whatsappMessagesMatch[1]);
     }
     if (req.method === "POST" && url.pathname === "/api/v1/whatsapp/messages") {
       await requireCloudUser(req, device, ["sharing.whatsapp"]);
@@ -5159,6 +7221,10 @@ async function route(req, res) {
     if (req.method === "GET" && url.pathname === "/api/v1/invoices") {
       await requireCloudUser(req, device, ["billing.view"]);
       return handleInvoicesList(req, res, device, url);
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/warranties") {
+      await requireCloudUser(req, device, ["billing.view"]);
+      return handleWarrantiesList(req, res, device, url);
     }
     if (req.method === "POST" && url.pathname === "/api/v1/invoices/finalize") {
       await requireCloudUser(req, device, ["billing.create"]);
@@ -5232,7 +7298,9 @@ async function route(req, res) {
     await pool.end();
     return;
   }
-  http.createServer((req, res) => void route(req, res)).listen(PORT, () => {
+  http.createServer((req, res) => {
+    route(req, res).catch((err) => handleRouteRejection(req, res, err));
+  }).listen(PORT, () => {
     console.log(`Autocare24 cloud sync API listening on port ${PORT}`);
   });
 })();

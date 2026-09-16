@@ -119,27 +119,18 @@ GITHUB_RELEASE_OWNER=kishoresharmaks
 GITHUB_RELEASE_REPO=autocare24_billing
 GITHUB_RELEASE_TAG=
 INVOICE_PREFIX=AUTOCARE24
-WHATSAPP_ENABLED=false
-WHATSAPP_GRAPH_VERSION=v20.0
-WHATSAPP_ACCESS_TOKEN=
-WHATSAPP_PHONE_NUMBER_ID=
-WHATSAPP_BUSINESS_ACCOUNT_ID=
-WHATSAPP_WEBHOOK_VERIFY_TOKEN=
-WHATSAPP_APP_SECRET=
-WHATSAPP_DISPLAY_PHONE_NUMBER=
-WHATSAPP_DOCUMENT_MAX_BYTES=18874368
 ```
 
 Important:
 
-- If your hosting panel automatically sets `PORT`, leave `PORT` unset. If it asks you for a port, use the panel-assigned port. For local testing, the API defaults to `8080`.
+- If your hosting panel automatically sets `PORT`, leave `PORT` unset. If it asks you for a port, use the panel-assigned port. For local testing, the API defaults to `8081`.
 - `NODE_ENV=production` enables startup checks that refuse unsafe defaults such as missing `TOKEN_HASH_SECRET`, empty database passwords, or `DB_USER=root`.
 - `SYNC_REGISTRATION_KEY` is what you enter in the desktop app when connecting a PC.
 - Use a long private value, not a simple password.
 - `UPLOAD_DIR` should be a dedicated folder outside `public_html`; do not point it at `/`, a drive root, or a public web folder.
 - `TOKEN_HASH_SECRET` protects stored device token hashes. Keep it stable after deployment.
 - `ALLOW_LEGACY_TOKEN_MIGRATION=false` is the secure production default. Set it to `true` only temporarily when migrating old SHA-256 device-token hashes to HMAC, then set it back to `false` after devices reconnect.
-- `MAX_BODY_BYTES` defaults to 32 MB so 15 MB purchase documents and 18 MB WhatsApp PDFs have room for base64 JSON overhead.
+- `MAX_BODY_BYTES` defaults to 32 MB so 15 MB purchase documents and WhatsApp PDFs have room for base64 JSON overhead.
 - Auth and device registration rate limits default to 10 attempts per 15 minutes per IP.
 - `RATE_LIMIT_MAX_BUCKETS` caps in-memory rate-limit keys so a rotating-IP attack cannot grow memory without bound.
 - This API is desktop/server-to-server only. Browser requests with an `Origin` header are rejected instead of using CORS.
@@ -149,9 +140,9 @@ Important:
 - `GITHUB_RELEASE_TOKEN` is server-only. Use a GitHub fine-grained token for the private `autocare24_billing` repository with **Contents: Read-only** for update downloads. Do not put this token in the desktop app.
 - Leave `GITHUB_RELEASE_TAG` empty to serve the latest published GitHub Release, or set it to a fixed tag like `v0.1.14` for controlled rollout.
 - `INVOICE_PREFIX` is optional. The desktop also sends its configured invoice prefix during finalization.
-- WhatsApp Business API is optional. Set `WHATSAPP_ENABLED=true` only after adding the Meta access token, phone number ID, business account ID, webhook verify token, and app secret.
-- Invoice/job-card PDF sharing uses Meta media upload and requires approved document-header templates named `invoice_pdf_ready` and `job_card_pdf_ready`.
-- Configure the Meta webhook callback URL as `https://sync.yourdomain.com/api/v1/whatsapp/webhook`.
+- WhatsApp Business API provider settings are configured from the desktop Settings page and stored in the cloud API database, not in `.env`.
+- Invoice/job-card PDF sharing uses provider media upload and requires the active invoice/job-card PDF mappings to point at approved document-header templates.
+- Configure the webhook callback URL as `https://sync.yourdomain.com/api/v1/whatsapp/webhook`. In YCloud, enable `whatsapp.message.updated` and `whatsapp.inbound_message.received` events.
 - Keep HTTPS enabled through the hosting panel or a TLS-terminating reverse proxy. The desktop app rejects normal HTTP except for local development.
 
 ## 7. Install Dependencies
@@ -189,6 +180,12 @@ This creates:
 - `whatsapp_messages`
 - `whatsapp_message_events`
 - `whatsapp_templates`
+- `template_variable_registry`
+- `whatsapp_template_drafts`
+- `whatsapp_template_mappings`
+- `whatsapp_template_submission_history`
+- `whatsapp_template_mapping_history`
+- `whatsapp_template_sync_events`
 
 It also seeds the first business and number sequences for invoices, quotations, and job cards.
 
@@ -379,6 +376,7 @@ Final invoices are cloud-issued now.
 - If the API is unreachable, the desktop keeps the bill as a draft and shows: `Internet required to create final invoice number. Saved as draft.`
 - Print, PDF, and WhatsApp sharing stay blocked for old `LOCAL-...` invoices until they are repaired.
 - Old temporary invoices can be repaired in the desktop by choosing **Finalize with cloud** or **Move back to draft**.
+- Service warranties are stored on invoice items with duration, start date, and expiry date. Use `GET /api/v1/warranties` to list active, expiring, and expired service warranties for tracking.
 
 Do not create final invoice numbers directly in MySQL or in the desktop app.
 
@@ -406,23 +404,48 @@ Make sure this folder is writable by the Node app.
 
 ## 17. WhatsApp Business API
 
-The desktop app uses the cloud API for WhatsApp Connect. Meta credentials stay on the server, and the desktop never receives the WhatsApp access token.
+The desktop app uses the cloud API for WhatsApp Connect. Provider credentials are stored in the cloud API database through Settings > WhatsApp, not in `.env`, and normal sync records do not expose the Meta access token or YCloud API key.
+
+Supported providers:
+
+- `meta`: sends directly through Meta Cloud API.
+- `ycloud`: sends through YCloud as the WhatsApp Business Solution Provider.
 
 Authenticated desktop endpoints:
 
 - `GET /api/v1/whatsapp/status`
+- `GET /api/v1/whatsapp/config`
+- `PUT /api/v1/whatsapp/config`
 - `GET /api/v1/whatsapp/conversations`
 - `GET /api/v1/whatsapp/conversations/:id/messages`
+- `DELETE /api/v1/whatsapp/conversations/:id/messages`
+- `DELETE /api/v1/whatsapp/conversations/:id/messages/:messageId`
 - `POST /api/v1/whatsapp/messages`
 - `GET /api/v1/whatsapp/templates`
 - `POST /api/v1/whatsapp/templates/sync`
+- `GET /api/v1/whatsapp/template-manager`
+- `POST /api/v1/whatsapp/template-drafts`
+- `PATCH /api/v1/whatsapp/template-drafts/:id`
+- `POST /api/v1/whatsapp/template-drafts/:id/submit`
+- `PUT /api/v1/whatsapp/template-mappings/:useCase`
 
-Public Meta webhook endpoints:
+Delete endpoints remove local app chat history only. They do not remove already delivered messages from the customer's WhatsApp app.
+
+Public provider webhook endpoints:
 
 - `GET /api/v1/whatsapp/webhook`
 - `POST /api/v1/whatsapp/webhook`
 
-Approved templates are required for first contact and notifications. Freeform text replies are allowed only after an inbound customer message opens the WhatsApp customer-service window.
+Approved templates are required for first contact and notifications. Freeform text replies are allowed only after an inbound customer message opens the WhatsApp customer-service window. Settings > WhatsApp > Templates lets the desktop app draft YCloud templates, compile approved app tokens like `{{customer_name}}` into positional WhatsApp variables, submit to YCloud, manually sync review status, and switch active mappings only after the replacement template is approved.
+
+YCloud setup notes:
+
+- Create or select the WhatsApp sender in YCloud and copy the API key, sender phone, optional WABA ID, and webhook secret into Settings > WhatsApp.
+- Use the sender phone in E.164 format, for example `+919000000000`. Do not use a local 10-digit value here.
+- Add the webhook URL `https://sync.yourdomain.com/api/v1/whatsapp/webhook` in YCloud and enable `whatsapp.message.updated` plus `whatsapp.inbound_message.received`.
+- Run manual template sync from Settings > WhatsApp after templates are approved in YCloud.
+- Invoice/job-card PDF mappings require approved document-header templates. If PDF sharing returns a document-header or mapping error, edit the mapped template in Settings > WhatsApp > Templates, submit it, and sync after approval.
+- Offline WhatsApp sends are not sent from cached mappings. The desktop app saves them as local unsent drafts for manual retry when the cloud API is reachable again.
 
 ## 18. Production Checklist
 
