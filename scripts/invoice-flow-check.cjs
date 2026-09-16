@@ -169,6 +169,65 @@ const run = async () => {
   assert.equal(db.listCustomers().some((row) => row.email === "billing.customer@example.com"), true, "New bill email should be stored on customer");
   passed.push("New bill customer email is stored on the customer record");
 
+  const warrantyService = db.saveService({
+    name: "Ceramic Coating",
+    category: "Protection",
+    defaultPrice: 500,
+    gstRate: 18,
+    sacCode: "9987",
+    warrantyEnabled: true,
+    warrantyDurationMonths: 24,
+    warrantyText: "Paint protection warranty",
+    active: true
+  });
+  assert.equal(warrantyService.warrantyEnabled, true);
+  assert.equal(warrantyService.warrantyDurationMonths, 24);
+  assert.equal(warrantyService.warrantyText, "Paint protection warranty");
+  const warrantyInvoice = db.createInvoice(invoiceInput({
+    suffix: "WARRANTY",
+    items: [
+      {
+        serviceId: warrantyService.id,
+        description: warrantyService.name,
+        quantity: 1,
+        unitPrice: warrantyService.defaultPrice,
+        gstRate: warrantyService.gstRate,
+        sacCode: warrantyService.sacCode,
+        warrantyIncluded: true,
+        warrantyDurationMonths: warrantyService.warrantyDurationMonths,
+        warrantyText: warrantyService.warrantyText
+      },
+      {
+        serviceId: warrantyService.id,
+        description: "Ceramic Coating - no warranty customer",
+        quantity: 1,
+        unitPrice: warrantyService.defaultPrice,
+        gstRate: warrantyService.gstRate,
+        sacCode: warrantyService.sacCode,
+        warrantyIncluded: false,
+        warrantyDurationMonths: warrantyService.warrantyDurationMonths,
+        warrantyText: warrantyService.warrantyText
+      }
+    ]
+  }));
+  assert.equal(warrantyInvoice.items[0].warrantyIncluded, true);
+  assert.equal(warrantyInvoice.items[0].warrantyDurationMonths, 24);
+  assert.equal(warrantyInvoice.items[0].warrantyText, "Paint protection warranty");
+  assert.equal(warrantyInvoice.items[0].warrantyStartDate, "2026-05-03");
+  assert.equal(warrantyInvoice.items[0].warrantyEndDate, "2028-05-03");
+  assert.equal(warrantyInvoice.items[1].warrantyIncluded, false);
+  assert.equal(warrantyInvoice.items[1].warrantyDurationMonths, 24);
+  assert.equal(warrantyInvoice.items[1].warrantyText, "Paint protection warranty");
+  assert.equal(warrantyInvoice.items[1].warrantyStartDate, "");
+  assert.equal(warrantyInvoice.items[1].warrantyEndDate, "");
+  const warrantyRecords = db.listWarrantyRecords("Paint protection");
+  assert.equal(warrantyRecords.length, 1);
+  assert.equal(warrantyRecords[0].invoiceId, warrantyInvoice.id);
+  assert.equal(warrantyRecords[0].warrantyEndDate, "2028-05-03");
+  assert.equal(warrantyRecords[0].status, "active");
+  closeToMoney(sum(warrantyInvoice.items, (item) => item.lineTotal), warrantyInvoice.grandTotal, "Warranty line total sum");
+  passed.push("Year-based service warranty is tracked with start and expiry dates");
+
   assert.throws(
     () => db.saveInventoryItem({ name: "Bad negative price", retailPrice: -1, gstRate: 18, lowStockLevel: 0, active: true }),
     /Selling price cannot be negative/

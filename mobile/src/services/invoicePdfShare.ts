@@ -5,6 +5,7 @@ import QRCode from "qrcode";
 import { Linking } from "react-native";
 import type { BusinessSettings, InvoiceDetail, InvoiceItem } from "../types/cloud";
 import { cleanBaseUrl } from "../utils/format";
+import { warrantyDurationLabel } from "../utils/warranty";
 
 type PaperSize = "A4" | "Letter" | "Legal";
 type InvoicePageChunk = {
@@ -371,15 +372,20 @@ function premiumItemsTable(invoice: InvoiceDetail, settings: NormalizedBusinessS
   const showItemGstRate = gstMode && enabled(settings.showItemGstRate);
   const showSacCode = gstMode && enabled(settings.showSacCode);
   const columnCount = 5 + (showItemGstRate ? 1 : 0) + (showSacCode ? 1 : 0);
-  const rows = items.map((item, index) => `<tr>
+  const rows = items.map((item, index) => {
+    const warranty = item.warrantyIncluded
+      ? `${item.warrantyText || warrantyDurationLabel(item.warrantyDurationMonths || 0)}${item.warrantyEndDate ? `, valid until ${item.warrantyEndDate}` : ""}`
+      : "";
+    return `<tr>
     <td>${startIndex + index + 1}</td>
-    <td>${escapeHtml(item.description || "Invoice item")}</td>
+    <td>${escapeHtml(item.description || "Invoice item")}${warranty ? `<div class="premium-item-warranty">Warranty: ${escapeHtml(warranty)}</div>` : ""}</td>
     <td>${escapeHtml(item.quantity)}</td>
     <td>${money(item.unitPrice).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
     ${showItemGstRate ? `<td>${escapeHtml(item.gstRate)}%</td>` : ""}
     ${showSacCode ? `<td>${escapeHtml(item.sacCode || "")}</td>` : ""}
     <td>${money(item.lineTotal).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-  </tr>`);
+  </tr>`;
+  });
   return `<table class="premium-items-table ${gstMode ? "premium-gst-table" : "premium-simple-table"}">
     <colgroup>
       <col class="premium-col-index" />
@@ -599,6 +605,7 @@ function premiumInvoiceCss() {
     .premium-items-table td:last-child, .premium-items-table th:last-child { border-right: 0; text-align: right; }
     .premium-items-table tbody tr:last-child td { border-bottom: 1px solid var(--premium-border); }
     .premium-items-table tfoot td { border: 0; color: var(--premium-brand-black); font-weight: 900; text-align: left; }
+    .premium-item-warranty { margin-top: 1mm; color: var(--invoice-accent); font-size: 7.2pt; font-weight: 800; line-height: 1.2; }
     .premium-col-index { width: 11mm; }
     .premium-col-qty, .premium-col-gst { width: 18mm; }
     .premium-col-rate { width: 27mm; }

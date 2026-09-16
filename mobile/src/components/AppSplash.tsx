@@ -7,7 +7,6 @@ import { colors, radius } from "../theme";
 
 export function AppSplash() {
   const pulse = useRef(new Animated.Value(0)).current;
-  const orbit = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     const pulseLoop = Animated.loop(
@@ -26,50 +25,28 @@ export function AppSplash() {
         })
       ])
     );
-    const orbitLoop = Animated.loop(
-      Animated.timing(orbit, {
-        toValue: 1,
-        duration: 1350,
-        easing: Easing.linear,
-        useNativeDriver: true
-      })
-    );
 
     pulseLoop.start();
-    orbitLoop.start();
     return () => {
       pulseLoop.stop();
-      orbitLoop.stop();
     };
-  }, [orbit, pulse]);
+  }, [pulse]);
 
   const logoScale = pulse.interpolate({
     inputRange: [0, 1],
-    outputRange: [1, 1.035]
+    outputRange: [0.985, 1.015]
   });
-  const ringOpacity = pulse.interpolate({
+  const progressOpacity = pulse.interpolate({
     inputRange: [0, 1],
-    outputRange: [0.34, 0.78]
-  });
-  const ringScale = pulse.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.86, 1.08]
-  });
-  const rotate = orbit.interpolate({
-    inputRange: [0, 1],
-    outputRange: ["0deg", "360deg"]
+    outputRange: [0.42, 0.9]
   });
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["top", "left", "right", "bottom"]}>
       <View style={styles.content}>
         <View style={styles.brandBlock}>
-          <Animated.View style={[styles.logoGlow, { opacity: ringOpacity, transform: [{ scale: ringScale }] }]} />
-          <Animated.View style={[styles.spinnerArc, { transform: [{ rotate }] }]} />
-          <Animated.View style={[styles.logoDisc, { transform: [{ scale: logoScale }] }]}>
-            <View style={styles.logoClip}>
-              <Image source={require("../../assets/autocare24-icon.png")} resizeMode="cover" style={styles.logo} />
-            </View>
+          <Animated.View style={[styles.logoPanel, { transform: [{ scale: logoScale }] }]}>
+            <Image source={require("../../assets/autocare24-splash-full.png")} resizeMode="contain" style={styles.logo} />
           </Animated.View>
         </View>
         <View style={styles.textBlock}>
@@ -78,7 +55,7 @@ export function AppSplash() {
           <Text style={styles.subtitle}>Loading your secure workspace</Text>
         </View>
         <View style={styles.progressTrack}>
-          <Animated.View style={[styles.progressFill, { opacity: ringOpacity }]} />
+          <Animated.View style={[styles.progressFill, { opacity: progressOpacity }]} />
         </View>
       </View>
       <DeveloperCredit compact />
@@ -103,35 +80,20 @@ const styles = StyleSheet.create({
     gap: 24
   },
   brandBlock: {
-    width: 196,
-    height: 196,
+    width: "100%",
+    maxWidth: 390,
+    height: 190,
     alignItems: "center",
     justifyContent: "center"
   },
-  logoGlow: {
-    position: "absolute",
-    width: 184,
-    height: 184,
-    borderRadius: 92,
-    backgroundColor: colors.purpleSoft
-  },
-  spinnerArc: {
-    position: "absolute",
-    width: 172,
-    height: 172,
-    borderRadius: 86,
-    borderWidth: 5,
-    borderColor: colors.border,
-    borderTopColor: colors.primary,
-    borderRightColor: colors.accent
-  },
-  logoDisc: {
-    width: 132,
-    height: 132,
+  logoPanel: {
+    width: "100%",
+    aspectRatio: 1600 / 760,
     alignItems: "center",
     justifyContent: "center",
-    borderRadius: 66,
-    padding: 8,
+    borderRadius: radius.md,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     borderWidth: 1,
     borderColor: colors.border,
     backgroundColor: colors.surfaceStrong,
@@ -140,15 +102,6 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 20,
     elevation: 4
-  },
-  logoClip: {
-    width: "100%",
-    height: "100%",
-    alignItems: "center",
-    justifyContent: "center",
-    overflow: "hidden",
-    borderRadius: 58,
-    backgroundColor: colors.surfaceStrong
   },
   logo: {
     width: "100%",

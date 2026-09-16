@@ -21,7 +21,7 @@ type SyncLogger = (level: "info" | "warn" | "error", message: string, details?: 
 type SyncEmitter = (status: SyncDeviceStatus) => void;
 type ApiErrorBody = { error?: { code?: string; message?: string }; message?: string; code?: string };
 type CloudRequestOptions = {
-  method?: "GET" | "POST" | "PATCH" | "DELETE";
+  method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   body?: unknown;
   timeoutMs?: number;
 };
@@ -76,7 +76,15 @@ export class CloudSyncEngine {
   ) {}
 
   start() {
-    // Cloud-only mode keeps manual legacy import available, but does not run a repeating local-first sync loop.
+    if (this.timer) return;
+    const check = () => {
+      void this.checkStatus().catch((error) => {
+        this.log("warn", "Automatic cloud endpoint status check failed", { message: toErrorMessage(error) });
+      });
+    };
+    setTimeout(check, 1500).unref?.();
+    this.timer = setInterval(check, 15000);
+    this.timer.unref?.();
   }
 
   stop() {

@@ -2,6 +2,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 
 const rootDir = path.resolve(__dirname, "..");
 const packageJson = JSON.parse(fs.readFileSync(path.join(rootDir, "package.json"), "utf8"));
@@ -34,10 +35,16 @@ const contentTypeFor = (fileName) => {
   return "application/octet-stream";
 };
 
+const comparableAssetName = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+
 const latestPath = path.join(releaseDir, "latest.yml");
 const latestText = readRequiredFile(latestPath).toString("utf8");
 const remoteInstallerName = yamlScalar((/^\s*path:\s*(.+)\s*$/m.exec(latestText) || [])[1]);
 if (!remoteInstallerName) fail("Could not read installer path from release/latest.yml.");
+const expectedInstallerSha512 = yamlScalar((/^\s*sha512:\s*(.+)\s*$/m.exec(latestText) || [])[1]);
+if (!expectedInstallerSha512) fail("Could not read installer sha512 from release/latest.yml.");
+
+const sha512Base64 = (filePath) => crypto.createHash("sha512").update(readRequiredFile(filePath)).digest("base64");
 
 const productName = packageJson.build?.productName || "Autocare24 Billing";
 const expectedInstallerPath = path.join(releaseDir, `${productName} Setup ${version}.exe`);
@@ -48,14 +55,21 @@ const localInstallerPath = fs.existsSync(expectedInstallerPath)
       .map((name) => path.join(releaseDir, name))[0];
 
 if (!localInstallerPath || !fs.existsSync(localInstallerPath)) fail(`Missing installer for version ${version} in ${releaseDir}.`);
+if (path.basename(localInstallerPath) !== remoteInstallerName) {
+  fail(`release/latest.yml points to ${remoteInstallerName}, but the selected installer is ${path.basename(localInstallerPath)}.`);
+}
+const actualInstallerSha512 = sha512Base64(localInstallerPath);
+if (actualInstallerSha512 !== expectedInstallerSha512) {
+  fail(`Installer checksum mismatch before publish. latest.yml has ${expectedInstallerSha512}, but ${remoteInstallerName} is ${actualInstallerSha512}.`);
+}
 
 const localBlockmapPath = `${localInstallerPath}.blockmap`;
 if (!fs.existsSync(localBlockmapPath)) fail(`Missing blockmap file: ${localBlockmapPath}`);
 
 const uploadFiles = [
-  { localPath: latestPath, remoteName: "latest.yml" },
   { localPath: localInstallerPath, remoteName: remoteInstallerName },
-  { localPath: localBlockmapPath, remoteName: `${remoteInstallerName}.blockmap` }
+  { localPath: localBlockmapPath, remoteName: `${remoteInstallerName}.blockmap` },
+  { localPath: latestPath, remoteName: "latest.yml" }
 ];
 
 const githubHeaders = (extra = {}) => ({
@@ -110,8 +124,22 @@ async function deleteExistingAsset(asset) {
   }
 }
 
-async function uploadAsset(release, file) {
-  const existing = (release.assets || []).find((asset) => asset.name === file.remoteName);
+async function listReleaseAssets(release) {
+  const assets = [];
+  const assetsUrl = release.assets_url || `https://api.github.com/repos/${owner}/${repo}/releases/${release.id}/assets`;
+  for (let page = 1; page <= 20; page += 1) {
+    const pageAssets = await githubJson(`${assetsUrl}?per_page=100&page=${page}`);
+    if (!Array.isArray(pageAssets) || pageAssets.length === 0) break;
+    assets.push(...pageAssets);
+    if (pageAssets.length < 100) break;
+  }
+  return assets;
+}
+
+async function uploadAsset(release, releaseAssets, file) {
+  const comparableRemoteName = comparableAssetName(file.remoteName);
+  const existing = releaseAssets.find((asset) => asset.name === file.remoteName)
+    || releaseAssets.find((asset) => comparableAssetName(asset.name) === comparableRemoteName);
   if (existing) {
     console.log(`Replacing existing asset: ${file.remoteName}`);
     await deleteExistingAsset(existing);
@@ -148,7 +176,8 @@ async function main() {
 
   if (!token) fail("Set GH_TOKEN or GITHUB_RELEASE_TOKEN before running npm.cmd run release:windows.");
   const release = await ensureRelease();
-  for (const file of uploadFiles) await uploadAsset(release, file);
+  const releaseAssets = await listReleaseAssets(release);
+  for (const file of uploadFiles) await uploadAsset(release, releaseAssets, file);
   console.log(`Private release ${tagName} is ready for the cloud update feed.`);
 }
 

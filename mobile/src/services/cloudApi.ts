@@ -3,20 +3,28 @@ import { ensureCloudApiTransportSecurity, getLastTlsPinningFailureHost } from ".
 import type {
   ApiEnvelope,
   BusinessSettings,
+  ChangePasswordInput,
+  Customer,
   CloudDeviceSummary,
   DashboardData,
   DeviceApprovalStatusResult,
   DeviceRegistrationResult,
   DevicesListResult,
+  InvoiceAppendItemInput,
+  InvoiceCancelInput,
+  InvoiceCreateInput,
   InventoryDashboardData,
   InvoiceDetail,
+  InvoicePaymentInput,
   InvoiceSummary,
   LoginResult,
   PurchaseRecord,
   ProfitReportData,
   ReportDateFilter,
   ReportData,
-  Supplier
+  ServiceItem,
+  Supplier,
+  Vehicle
 } from "../types/cloud";
 
 const BUSINESS_SETTINGS_RECORD_ID = "00000000-0000-4000-8000-000000000001";
@@ -130,8 +138,23 @@ export async function loginUser(cloudUrl: string, token: string, username: strin
 
 export const loginOwner = loginUser;
 
+export async function changeUserPassword(cloudUrl: string, token: string, userToken: string, input: ChangePasswordInput): Promise<void> {
+  await request<{ ok: true }>(cloudUrl, `/api/v1/users/${encodeURIComponent(input.userId)}/change-password`, {
+    method: "POST",
+    token,
+    userToken,
+    body: {
+      currentPassword: input.currentPassword,
+      newPassword: input.newPassword
+    }
+  });
+}
+
 function reportFilterPath(endpoint: "reports" | "profit", filter: ReportDateFilter): string {
   if (typeof filter === "string") {
+    if (filter === "month") {
+      return reportFilterPath(endpoint, currentMonthReportFilter());
+    }
     return `/api/v1/${endpoint}?preset=${encodeURIComponent(filter)}`;
   }
   const payload = {
@@ -140,6 +163,20 @@ function reportFilterPath(endpoint: "reports" | "profit", filter: ReportDateFilt
     toDate: filter.toDate || ""
   };
   return `/api/v1/${endpoint}?filterJson=${encodeURIComponent(JSON.stringify(payload))}`;
+}
+
+function currentMonthReportFilter() {
+  const now = new Date();
+  return {
+    preset: "" as const,
+    fromDate: toIsoDate(new Date(now.getFullYear(), now.getMonth(), 1)),
+    toDate: toIsoDate(now)
+  };
+}
+
+function toIsoDate(date: Date) {
+  const normalized = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return normalized.toISOString().slice(0, 10);
 }
 
 export async function fetchReport(cloudUrl: string, token: string, userToken: string, filter: ReportDateFilter): Promise<ReportData> {
@@ -187,6 +224,23 @@ export async function fetchBusinessSettings(cloudUrl: string, token: string, use
   return settings.find((row) => row.id === BUSINESS_SETTINGS_RECORD_ID) || settings[0] || {};
 }
 
+export async function fetchCustomers(cloudUrl: string, token: string, userToken: string): Promise<Customer[]> {
+  const customers = await fetchCloudRecords<Customer>(cloudUrl, token, userToken, "customers");
+  return customers.sort((left, right) => String(left.name || "").localeCompare(String(right.name || "")));
+}
+
+export async function fetchVehicles(cloudUrl: string, token: string, userToken: string): Promise<Vehicle[]> {
+  const vehicles = await fetchCloudRecords<Vehicle>(cloudUrl, token, userToken, "vehicles");
+  return vehicles.sort((left, right) => String(left.registrationNumber || "").localeCompare(String(right.registrationNumber || "")));
+}
+
+export async function fetchServices(cloudUrl: string, token: string, userToken: string): Promise<ServiceItem[]> {
+  const services = await fetchCloudRecords<ServiceItem>(cloudUrl, token, userToken, "services");
+  return services
+    .filter((service) => service.active !== false)
+    .sort((left, right) => String(left.name || "").localeCompare(String(right.name || "")));
+}
+
 export async function fetchInvoices(cloudUrl: string, token: string, userToken: string, query: string): Promise<InvoiceSummary[]> {
   const params = query.trim() ? `?query=${encodeURIComponent(query.trim())}` : "";
   const data = await request<{ invoices: InvoiceSummary[] }>(cloudUrl, `/api/v1/invoices${params}`, { token, userToken });
@@ -195,6 +249,55 @@ export async function fetchInvoices(cloudUrl: string, token: string, userToken: 
 
 export async function fetchInvoice(cloudUrl: string, token: string, userToken: string, invoiceId: string): Promise<InvoiceDetail> {
   const data = await request<{ invoice: InvoiceDetail }>(cloudUrl, `/api/v1/invoices/${encodeURIComponent(invoiceId)}`, { token, userToken });
+  return data.invoice;
+}
+
+export async function createInvoice(cloudUrl: string, token: string, userToken: string, input: InvoiceCreateInput): Promise<InvoiceDetail> {
+  const data = await request<{ invoice: InvoiceDetail }>(cloudUrl, "/api/v1/invoices/finalize", {
+    method: "POST",
+    token,
+    userToken,
+    body: {
+      idempotencyKey: `mobile-invoice:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      source: "mobile",
+      payload: input
+    }
+  });
+  return data.invoice;
+}
+
+export async function recordInvoicePayment(cloudUrl: string, token: string, userToken: string, input: InvoicePaymentInput): Promise<InvoiceDetail> {
+  const data = await request<{ invoice: InvoiceDetail }>(cloudUrl, `/api/v1/invoices/${encodeURIComponent(input.invoiceId)}/payments`, {
+    method: "POST",
+    token,
+    userToken,
+    body: {
+      amount: input.amount,
+      mode: input.mode,
+      reference: input.reference,
+      paymentDate: input.paymentDate
+    }
+  });
+  return data.invoice;
+}
+
+export async function appendInvoiceItem(cloudUrl: string, token: string, userToken: string, input: InvoiceAppendItemInput): Promise<InvoiceDetail> {
+  const data = await request<{ invoice: InvoiceDetail }>(cloudUrl, `/api/v1/invoices/${encodeURIComponent(input.invoiceId)}/items`, {
+    method: "POST",
+    token,
+    userToken,
+    body: { item: input.item }
+  });
+  return data.invoice;
+}
+
+export async function cancelInvoice(cloudUrl: string, token: string, userToken: string, input: InvoiceCancelInput): Promise<InvoiceDetail> {
+  const data = await request<{ invoice: InvoiceDetail }>(cloudUrl, `/api/v1/invoices/${encodeURIComponent(input.invoiceId)}/cancel`, {
+    method: "POST",
+    token,
+    userToken,
+    body: { reason: input.reason }
+  });
   return data.invoice;
 }
 

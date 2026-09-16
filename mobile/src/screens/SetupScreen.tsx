@@ -30,7 +30,7 @@ export function SetupScreen() {
 
   return (
     <AuthLayout>
-      <Image source={require("../../assets/autocare24-logo.png")} style={[styles.logo, layout.isNarrow ? styles.logoNarrow : null]} resizeMode="contain" />
+      <Image source={require("../../assets/autocare24-splash-full.png")} style={[styles.logo, layout.isNarrow ? styles.logoNarrow : null]} resizeMode="contain" />
       <View style={styles.headingBlock}>
         <Text style={styles.eyebrow}>Role-based mobile access</Text>
         <Text style={styles.title} numberOfLines={2}>
@@ -56,14 +56,14 @@ export function SetupScreen() {
 const styles = StyleSheet.create({
   logo: {
     width: "100%",
-    height: 76,
+    height: 142,
     backgroundColor: "#ffffff",
     borderRadius: 8,
     borderWidth: 1,
     borderColor: colors.border
   },
   logoNarrow: {
-    height: 64
+    height: 118
   },
   headingBlock: {
     gap: 4

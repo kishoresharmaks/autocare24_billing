@@ -1,6 +1,7 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { router } from "expo-router";
-import { ChevronRight, CircleDollarSign, Cloud, LogOut, MonitorSmartphone, Settings, ShieldCheck } from "lucide-react-native";
+import type { Href } from "expo-router";
+import { ChevronRight, CircleDollarSign, Cloud, KeyRound, LogOut, MonitorSmartphone, Settings, ShieldCheck } from "lucide-react-native";
 import type { LucideIcon } from "lucide-react-native";
 import { DeveloperCredit } from "../../src/components/DeveloperCredit";
 import { Screen } from "../../src/components/Screen";
@@ -10,7 +11,7 @@ import { useSession } from "../../src/providers/SessionProvider";
 import { hasPermission, readablePermissions } from "../../src/services/permissions";
 import { colors, radius } from "../../src/theme";
 
-type MoreRoute = "/profit" | "/devices" | "/settings";
+type MoreRoute = "/profit" | "/devices" | "/settings" | "/change-password";
 
 export default function MoreTab() {
   const guard = useRequireOwner();
@@ -51,6 +52,7 @@ export default function MoreTab() {
       <View style={styles.list}>
         {hasPermission(session.user, "reports.view") ? <MoreRow icon={CircleDollarSign} title="Profit & Expense" subtitle="Cash profit, margin, and expenses" route="/profit" /> : null}
         {hasPermission(session.user, "users.manage") ? <MoreRow icon={MonitorSmartphone} title="Cloud Devices" subtitle="Approve or revoke phones" route="/devices" /> : null}
+        <MoreRow icon={KeyRound} title="Change Password" subtitle="Current cloud user" route="/change-password" />
         <MoreRow icon={Settings} title="Settings" subtitle="Cloud URL, phone code, and reset tools" route="/settings" />
       </View>
 
@@ -76,7 +78,7 @@ export default function MoreTab() {
 
 function MoreRow({ icon: Icon, title, subtitle, route }: { icon: LucideIcon; title: string; subtitle: string; route: MoreRoute }) {
   return (
-    <Pressable accessibilityRole="button" onPress={() => router.push(route)} style={({ pressed }) => [styles.row, pressed ? styles.pressed : null]}>
+    <Pressable accessibilityRole="button" onPress={() => router.push(route as Href)} style={({ pressed }) => [styles.row, pressed ? styles.pressed : null]}>
       <View style={styles.rowIcon}>
         <Icon color={colors.primary} size={22} />
       </View>

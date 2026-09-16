@@ -66,6 +66,8 @@ import type {
   ReportExportKind,
   SavePdfInput,
   SaveAccessRoleInput,
+  SaveWhatsAppTemplateDraftInput,
+  SaveWhatsAppTemplateMappingInput,
   SaveResult,
   SaveUserInput,
   SafeRepairCode,
@@ -81,13 +83,22 @@ import type {
   SetupOwnerInput,
   Vehicle,
   VehicleType,
+  WarrantyRecord,
   WhatsAppBusinessStatus,
+  WhatsAppClearConversationResult,
+  WhatsAppConfigResult,
   WhatsAppConversation,
+  WhatsAppDeleteMessageResult,
   WhatsAppMessage,
+  WhatsAppProviderConfig,
   WhatsAppSendMessageInput,
   WhatsAppSendMessageResult,
   WhatsAppShareInput,
-  WhatsAppTemplate
+  WhatsAppTemplate,
+  WhatsAppTemplateManagerData,
+  WhatsAppTemplateMappingResult,
+  WhatsAppTemplateSubmitResult,
+  WhatsAppUnsentDraft
 } from "../shared/types";
 
 declare module "*.png" {
@@ -171,6 +182,7 @@ declare global {
       createInvoice: (input: InvoiceCreateInput) => Promise<InvoiceDetail>;
       listInvoices: (query?: string) => Promise<InvoiceSummary[]>;
       getInvoice: (id: string) => Promise<InvoiceDetail>;
+      listWarrantyRecords: (query?: string) => Promise<WarrantyRecord[]>;
       listInvoiceDrafts: () => Promise<InvoiceDraft[]>;
       getInvoiceDraft: (id: string) => Promise<InvoiceDraft>;
       saveInvoiceDraft: (input: InvoiceDraftSaveInput) => Promise<InvoiceDraft>;
@@ -233,11 +245,23 @@ declare global {
       resolveSyncConflict: (input: { conflictId: string; resolution: SyncConflictResolution }) => Promise<SyncConflictSummary>;
       onSyncStatus: (callback: (status: SyncDeviceStatus) => void) => () => void;
       getWhatsAppStatus: () => Promise<WhatsAppBusinessStatus>;
+      getWhatsAppConfig: () => Promise<WhatsAppConfigResult>;
+      saveWhatsAppConfig: (input: Partial<WhatsAppProviderConfig>) => Promise<WhatsAppConfigResult>;
       listWhatsAppConversations: (query?: string) => Promise<WhatsAppConversation[]>;
       listWhatsAppMessages: (conversationId: string) => Promise<{ conversation: WhatsAppConversation; messages: WhatsAppMessage[] }>;
       listWhatsAppTemplates: () => Promise<WhatsAppTemplate[]>;
       syncWhatsAppTemplates: () => Promise<WhatsAppTemplate[]>;
+      getWhatsAppTemplateManager: () => Promise<WhatsAppTemplateManagerData>;
+      saveWhatsAppTemplateDraft: (input: SaveWhatsAppTemplateDraftInput) => Promise<WhatsAppTemplateManagerData>;
+      updateWhatsAppTemplateDraft: (id: string, input: SaveWhatsAppTemplateDraftInput) => Promise<WhatsAppTemplateManagerData>;
+      submitWhatsAppTemplateDraft: (id: string) => Promise<WhatsAppTemplateSubmitResult & WhatsAppTemplateManagerData>;
+      saveWhatsAppTemplateMapping: (input: SaveWhatsAppTemplateMappingInput) => Promise<WhatsAppTemplateMappingResult>;
+      listWhatsAppUnsentDrafts: () => Promise<WhatsAppUnsentDraft[]>;
+      retryWhatsAppUnsentDraft: (id: string) => Promise<SaveResult>;
+      deleteWhatsAppUnsentDraft: (id: string) => Promise<boolean>;
       sendWhatsAppMessage: (input: WhatsAppSendMessageInput) => Promise<WhatsAppSendMessageResult>;
+      deleteWhatsAppMessage: (conversationId: string, messageId: string) => Promise<WhatsAppDeleteMessageResult>;
+      clearWhatsAppConversationHistory: (conversationId: string) => Promise<WhatsAppClearConversationResult>;
       openWhatsAppShare: (input: WhatsAppShareInput) => Promise<SaveResult>;
       exportCsv: (kind: "invoices" | "customers" | "services" | "inventory" | "enquiries" | "jobCards") => Promise<SaveResult>;
       onDatabaseRestored: (callback: () => void) => () => void;

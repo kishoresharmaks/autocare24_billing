@@ -33,7 +33,9 @@ export function ExportActions({ onExport, disabled = false }: ExportActionsProps
         style={({ pressed }) => [styles.button, styles.primaryButton, disabled || busyFormat ? styles.disabled : null, pressed ? styles.pressed : null]}
       >
         <FileText color="#ffffff" size={16} />
-        <Text style={styles.primaryText}>{busyFormat === "pdf" ? "Preparing PDF..." : "Export PDF"}</Text>
+        <Text style={styles.primaryText} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+          {busyFormat === "pdf" ? "Preparing PDF..." : "Export PDF"}
+        </Text>
       </Pressable>
       <Pressable
         accessibilityRole="button"
@@ -42,7 +44,20 @@ export function ExportActions({ onExport, disabled = false }: ExportActionsProps
         style={({ pressed }) => [styles.button, styles.secondaryButton, disabled || busyFormat ? styles.disabled : null, pressed ? styles.pressed : null]}
       >
         <FileSpreadsheet color={colors.primary} size={16} />
-        <Text style={styles.secondaryText}>{busyFormat === "csv" ? "Preparing CSV..." : "Export CSV"}</Text>
+        <Text style={styles.secondaryText} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+          {busyFormat === "csv" ? "Preparing CSV..." : "Export CSV"}
+        </Text>
+      </Pressable>
+      <Pressable
+        accessibilityRole="button"
+        disabled={disabled || Boolean(busyFormat)}
+        onPress={() => void run("excel")}
+        style={({ pressed }) => [styles.button, styles.secondaryButton, disabled || busyFormat ? styles.disabled : null, pressed ? styles.pressed : null]}
+      >
+        <FileSpreadsheet color={colors.primary} size={16} />
+        <Text style={styles.secondaryText} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
+          {busyFormat === "excel" ? "Preparing Excel..." : "Export Excel"}
+        </Text>
       </Pressable>
     </View>
   );
@@ -51,10 +66,12 @@ export function ExportActions({ onExport, disabled = false }: ExportActionsProps
 const styles = StyleSheet.create({
   wrap: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: 8
   },
   button: {
-    flex: 1,
+    flexGrow: 1,
+    flexBasis: "31%",
     minHeight: 42,
     minWidth: 0,
     flexDirection: "row",

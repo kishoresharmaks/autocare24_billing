@@ -2,9 +2,28 @@
 import { useEffect, useState } from "react";
 import { DEFAULT_SAC_CODE, money, normalizeSacCode } from "../../../shared/billing-math";
 import type { BusinessSettings, InventoryItem, ServiceConsumable, ServiceItem } from "../../../shared/types";
+import { normalizeWarrantyText, parseWarrantyDurationMonths, warrantyDurationLabel } from "../../../shared/warranty";
 
 const formatMoney = (value: number) =>
   `Rs ${money(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const serviceWarrantyDisplay = (service: ServiceItem) => {
+  if (!service.warrantyEnabled) return "No warranty";
+  const duration = warrantyDurationLabel(service.warrantyDurationMonths);
+  const note = service.warrantyText && service.warrantyText !== duration ? service.warrantyText : "";
+  return note ? `${duration} - ${note}` : duration;
+};
+
+const emptyServiceForm = (settings: BusinessSettings): Partial<ServiceItem> & Pick<ServiceItem, "name"> => ({
+  name: "",
+  category: "Detailing",
+  defaultPrice: 0,
+  gstRate: settings.defaultGstRate,
+  sacCode: DEFAULT_SAC_CODE,
+  warrantyEnabled: false,
+  warrantyDurationMonths: 0,
+  warrantyText: "",
+  active: true
+});
 
 export function ServicesPage({ settings, notify }: { settings: BusinessSettings; notify: (message: string) => void }) {
   const [services, setServices] = useState<ServiceItem[]>([]);
@@ -13,14 +32,7 @@ export function ServicesPage({ settings, notify }: { settings: BusinessSettings;
   const [recipeItemId, setRecipeItemId] = useState("");
   const [recipeQty, setRecipeQty] = useState(0);
   const [includeInactive, setIncludeInactive] = useState(false);
-  const [form, setForm] = useState<Partial<ServiceItem> & Pick<ServiceItem, "name">>({
-    name: "",
-    category: "Detailing",
-    defaultPrice: 0,
-    gstRate: settings.defaultGstRate,
-    sacCode: DEFAULT_SAC_CODE,
-    active: true
-  });
+  const [form, setForm] = useState<Partial<ServiceItem> & Pick<ServiceItem, "name">>(emptyServiceForm(settings));
 
   const load = () =>
     Promise.all([window.autocare.listServices(includeInactive), window.autocare.listInventoryItems()])
@@ -35,9 +47,21 @@ export function ServicesPage({ settings, notify }: { settings: BusinessSettings;
 
   const save = async () => {
     try {
-      await window.autocare.saveService({ ...form, sacCode: normalizeSacCode(form.sacCode) });
+      const warrantyDurationMonths = form.warrantyEnabled ? parseWarrantyDurationMonths(form.warrantyDurationMonths) : 0;
+      if (form.warrantyEnabled && !warrantyDurationMonths) {
+        notify("Enter warranty period in years.");
+        return;
+      }
+      const warrantyText = form.warrantyEnabled ? normalizeWarrantyText(form.warrantyText, warrantyDurationMonths) : "";
+      await window.autocare.saveService({
+        ...form,
+        sacCode: normalizeSacCode(form.sacCode),
+        warrantyEnabled: Boolean(form.warrantyEnabled && warrantyDurationMonths),
+        warrantyDurationMonths,
+        warrantyText
+      });
       notify("Service saved.");
-      setForm({ name: "", category: "Detailing", defaultPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE, active: true });
+      setForm(emptyServiceForm(settings));
       await load();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to save service.");
@@ -98,6 +122,7 @@ export function ServicesPage({ settings, notify }: { settings: BusinessSettings;
                 <th>Price</th>
                 <th>GST</th>
                 <th>SAC</th>
+                <th>Warranty</th>
                 <th>Status</th>
                 <th></th>
               </tr>
@@ -110,6 +135,7 @@ export function ServicesPage({ settings, notify }: { settings: BusinessSettings;
                   <td>{formatMoney(service.defaultPrice)}</td>
                   <td>{service.gstRate}%</td>
                   <td>{service.sacCode}</td>
+                  <td>{serviceWarrantyDisplay(service)}</td>
                   <td><span className={service.active ? "status paid" : "status unpaid"}>{service.active ? "Active" : "Inactive"}</span></td>
                   <td className="actions-cell">
                     <button className="ghost-button small" onClick={() => editService(service)}>Edit</button>
@@ -129,6 +155,27 @@ export function ServicesPage({ settings, notify }: { settings: BusinessSettings;
           <label>Default price<input type="number" min="0" value={form.defaultPrice ?? 0} onChange={(event) => setForm({ ...form, defaultPrice: Number(event.currentTarget.value) })} /></label>
           <label>GST rate<input type="number" min="0" value={form.gstRate ?? 0} onChange={(event) => setForm({ ...form, gstRate: Number(event.currentTarget.value) })} /></label>
           <label>SAC code<input value={form.sacCode ?? ""} onChange={(event) => setForm({ ...form, sacCode: event.currentTarget.value })} /></label>
+          <label className="inline-check">
+            <input
+              type="checkbox"
+              checked={Boolean(form.warrantyEnabled)}
+              onChange={(event) => setForm({ ...form, warrantyEnabled: event.currentTarget.checked, warrantyDurationMonths: event.currentTarget.checked ? (form.warrantyDurationMonths || 12) : 0 })}
+            />
+            Warranty
+          </label>
+          <label>
+            Warranty period (years)
+            <input
+              type="number"
+              min="0.1"
+              max="20"
+              step="0.5"
+              disabled={!form.warrantyEnabled}
+              value={form.warrantyEnabled ? (parseWarrantyDurationMonths(form.warrantyDurationMonths) || 12) / 12 : 0}
+              onChange={(event) => setForm({ ...form, warrantyDurationMonths: Math.max(0, Math.round(Number(event.currentTarget.value) * 12)) })}
+            />
+          </label>
+          <label>Warranty note<input disabled={!form.warrantyEnabled} value={form.warrantyText ?? ""} onChange={(event) => setForm({ ...form, warrantyText: event.currentTarget.value })} /></label>
           <button className="primary-action" onClick={save}><Save size={18} /> Save service</button>
         </div>
         <div className="section-title">Consumables recipe</div>

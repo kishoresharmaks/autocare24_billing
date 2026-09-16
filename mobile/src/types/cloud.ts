@@ -1,7 +1,10 @@
-export type DateRangePreset = "7d" | "30d" | "90d" | "all";
+export type DateRangePreset = "7d" | "30d" | "90d" | "month" | "all";
 export type ReportDateFilter = DateRangePreset | { fromDate?: string; toDate?: string; preset?: "" };
 export type CloudDeviceApprovalStatus = "APPROVED" | "PENDING" | "REVOKED";
 export type PaymentMode = "Cash" | "UPI" | "Card" | "Bank Transfer" | "Other";
+export type InvoiceMode = "gst" | "simple";
+export type TaxScope = "intra" | "inter";
+export type VehicleType = "car" | "bike" | "other";
 export type InventoryItemType = "consumable" | "retail";
 export type InventoryMovementType = "purchase" | "usage" | "sale" | "adjustment" | "return" | "damage" | "invoice_cancel_reversal";
 
@@ -62,6 +65,12 @@ export interface LoginResult {
   expiresAt?: string;
 }
 
+export interface ChangePasswordInput {
+  userId: string;
+  currentPassword: string;
+  newPassword: string;
+}
+
 export interface BusinessSettings {
   id?: string;
   businessName?: string;
@@ -70,6 +79,9 @@ export interface BusinessSettings {
   email?: string;
   gstin?: string;
   state?: string;
+  invoicePrefix?: string;
+  defaultGstRate?: number;
+  defaultTaxScope?: TaxScope;
   invoicePaperSize?: "A4" | "Letter" | "Legal";
   invoiceLogoPath?: string;
   invoiceSignaturePath?: string;
@@ -132,12 +144,16 @@ export interface InvoiceSummary {
   invoiceNumber: string;
   invoiceDate: string;
   invoiceStatus: string;
-  invoiceMode: string;
-  taxScope: string;
+  invoiceMode: InvoiceMode;
+  taxScope: TaxScope;
+  customerId: string;
+  customerCode: string;
+  vehicleId: string;
+  jobCardId: string;
   customerName: string;
   customerPhone: string;
   vehicleNumber: string;
-  vehicleType: string;
+  vehicleType: VehicleType;
   subTotal: number;
   discount: number;
   taxableValue: number;
@@ -160,6 +176,7 @@ export interface InvoiceSummary {
 
 export interface InvoiceCustomer {
   id: string;
+  customerCode?: string;
   name: string;
   phone: string;
   email: string;
@@ -169,8 +186,9 @@ export interface InvoiceCustomer {
 
 export interface InvoiceVehicle {
   id: string;
+  customerId?: string;
   registrationNumber: string;
-  vehicleType: string;
+  vehicleType: VehicleType;
   make: string;
   model: string;
   color: string;
@@ -178,11 +196,18 @@ export interface InvoiceVehicle {
 
 export interface InvoiceItem {
   id: string;
+  serviceId?: string;
+  inventoryItemId?: string;
   description: string;
   quantity: number;
   unitPrice: number;
   gstRate: number;
   sacCode: string;
+  warrantyIncluded?: boolean;
+  warrantyDurationMonths?: number;
+  warrantyText?: string;
+  warrantyStartDate?: string;
+  warrantyEndDate?: string;
   lineSubTotal: number;
   lineTax: number;
   lineTotal: number;
@@ -202,6 +227,91 @@ export interface InvoiceDetail extends InvoiceSummary {
   vehicle: InvoiceVehicle;
   items: InvoiceItem[];
   payments: Payment[];
+}
+
+export interface Customer {
+  id: string;
+  customerCode: string;
+  name: string;
+  phone: string;
+  email: string;
+  gstin: string;
+  address: string;
+  createdAt: string;
+}
+
+export interface Vehicle {
+  id: string;
+  customerId: string;
+  vehicleType: VehicleType;
+  registrationNumber: string;
+  make: string;
+  model: string;
+  color: string;
+  createdAt: string;
+}
+
+export interface ServiceItem {
+  id: string;
+  name: string;
+  category: string;
+  defaultPrice: number;
+  gstRate: number;
+  sacCode: string;
+  warrantyEnabled: boolean;
+  warrantyDurationMonths: number;
+  warrantyText: string;
+  active: boolean;
+  createdAt: string;
+}
+
+export interface InvoiceItemInput {
+  serviceId?: string;
+  inventoryItemId?: string;
+  description: string;
+  quantity: number;
+  unitPrice: number;
+  gstRate: number;
+  sacCode: string;
+  warrantyIncluded?: boolean;
+  warrantyDurationMonths?: number;
+  warrantyText?: string;
+  warrantyStartDate?: string;
+  warrantyEndDate?: string;
+}
+
+export interface InvoiceCreateInput {
+  invoiceMode: InvoiceMode;
+  taxScope: TaxScope;
+  invoiceDate: string;
+  customerId?: string;
+  customer: Partial<Customer> & Pick<Customer, "name">;
+  vehicleId?: string;
+  vehicle: Partial<Vehicle> & Pick<Vehicle, "registrationNumber">;
+  items: InvoiceItemInput[];
+  discount: number;
+  paidAmount: number;
+  paymentMode: PaymentMode;
+  paymentReference: string;
+  notes: string;
+}
+
+export interface InvoicePaymentInput {
+  invoiceId: string;
+  amount: number;
+  mode: PaymentMode;
+  reference: string;
+  paymentDate: string;
+}
+
+export interface InvoiceAppendItemInput {
+  invoiceId: string;
+  item: InvoiceItemInput;
+}
+
+export interface InvoiceCancelInput {
+  invoiceId: string;
+  reason: string;
 }
 
 export interface InventoryItem {

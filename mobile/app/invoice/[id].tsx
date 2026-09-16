@@ -1,12 +1,20 @@
-import { Alert, Share, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, Share, StyleSheet, Text, TextInput, View } from "react-native";
 import { useLocalSearchParams } from "expo-router";
-import { useQuery } from "@tanstack/react-query";
-import { useState, type ReactNode } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState, type ReactNode } from "react";
 import { AppButton } from "../../src/components/AppButton";
 import { MetricCard } from "../../src/components/MetricCard";
 import { MetricGrid } from "../../src/components/MetricGrid";
 import { Screen } from "../../src/components/Screen";
-import { fetchBusinessSettings, fetchInvoice } from "../../src/services/cloudApi";
+import {
+  appendInvoiceItem,
+  cancelInvoice,
+  fetchBusinessSettings,
+  fetchInventoryDashboard,
+  fetchInvoice,
+  fetchServices,
+  recordInvoicePayment
+} from "../../src/services/cloudApi";
 import {
   invoiceShareBlockReason,
   normalizeWhatsAppPhone,
@@ -20,7 +28,43 @@ import { formatDate, formatMoney, titleCase } from "../../src/utils/format";
 import { useRequirePermission } from "../../src/hooks/useRequireOwner";
 import { useSession } from "../../src/providers/SessionProvider";
 import { hasPermission } from "../../src/services/permissions";
-import type { BusinessSettings, InvoiceDetail, InvoiceItem, Payment } from "../../src/types/cloud";
+import { calculateInvoiceTotals, DEFAULT_SAC_CODE, money, normalizeSacCode } from "../../src/utils/billingMath";
+import { normalizeWarrantyText, parseWarrantyDurationMonths, warrantyDurationLabel } from "../../src/utils/warranty";
+import type { BusinessSettings, InventoryItem, InvoiceDetail, InvoiceItem, InvoiceItemInput, Payment, PaymentMode, ServiceItem } from "../../src/types/cloud";
+
+const PAYMENT_MODES: PaymentMode[] = ["Cash", "UPI", "Card", "Bank Transfer", "Other"];
+
+const todayIso = () => {
+  const date = new Date();
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+};
+
+const numberValue = (value: unknown) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const serviceWarrantyFields = (service: ServiceItem): Pick<InvoiceItemInput, "warrantyIncluded" | "warrantyDurationMonths" | "warrantyText"> => {
+  const durationMonths = parseWarrantyDurationMonths(service.warrantyDurationMonths || service.warrantyText);
+  if (!service.warrantyEnabled || !durationMonths) return { warrantyIncluded: false, warrantyDurationMonths: 0, warrantyText: "" };
+  return {
+    warrantyIncluded: true,
+    warrantyDurationMonths: durationMonths,
+    warrantyText: normalizeWarrantyText(service.warrantyText, durationMonths)
+  };
+};
+
+const emptyAppendItem = (gstRate: number): InvoiceItemInput => ({
+  description: "",
+  quantity: 1,
+  unitPrice: 0,
+  gstRate,
+  sacCode: DEFAULT_SAC_CODE,
+  warrantyIncluded: false,
+  warrantyDurationMonths: 0,
+  warrantyText: ""
+});
 
 export default function InvoiceDetailScreen() {
   const guard = useRequirePermission("billing.view");
@@ -79,6 +123,7 @@ export default function InvoiceDetailScreen() {
       {invoiceQuery.isLoading ? <Text style={styles.empty}>Loading invoice...</Text> : null}
       {invoice ? <InvoiceSharePanel invoice={invoice} settings={settingsQuery.data} onShareText={shareInvoice} /> : null}
       {invoice ? <InvoiceContent invoice={invoice} /> : null}
+      {invoice ? <InvoiceManagePanel invoice={invoice} onChanged={() => void invoiceQuery.refetch()} /> : null}
     </Screen>
   );
 }
@@ -129,6 +174,12 @@ function InvoiceContent({ invoice }: { invoice: InvoiceDetail }) {
               <Text style={styles.itemSub} numberOfLines={1}>
                 Qty {item.quantity || 0} x {formatMoney(item.unitPrice)} {item.gstRate ? `| GST ${item.gstRate}%` : ""}
               </Text>
+              {item.warrantyIncluded ? (
+                <Text style={styles.warrantyText} numberOfLines={1}>
+                  Warranty {item.warrantyText || warrantyDurationLabel(item.warrantyDurationMonths || 0)}
+                  {item.warrantyEndDate ? ` | Until ${formatDate(item.warrantyEndDate)}` : ""}
+                </Text>
+              ) : null}
             </View>
             <Text style={styles.rowAmount} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.72}>
               {formatMoney(item.lineTotal)}
@@ -181,6 +232,214 @@ function InvoiceContent({ invoice }: { invoice: InvoiceDetail }) {
         </Section>
       ) : null}
     </>
+  );
+}
+
+function InvoiceManagePanel({ invoice, onChanged }: { invoice: InvoiceDetail; onChanged: () => void }) {
+  const session = useSession();
+  const queryClient = useQueryClient();
+  const canPay = hasPermission(session.user, "billing.recordPayments");
+  const canAppend = hasPermission(session.user, "billing.manageInvoices");
+  const canCancel = hasPermission(session.user, "billing.cancelInvoices");
+  const canReadServices = hasPermission(session.user, "services.view");
+  const canReadStock = hasPermission(session.user, "stock.view");
+  const cancelled = invoice.invoiceStatus === "cancelled";
+  const [paymentAmount, setPaymentAmount] = useState(String(invoice.balanceDue > 0 ? invoice.balanceDue : ""));
+  const [paymentMode, setPaymentMode] = useState<PaymentMode>("UPI");
+  const [paymentReference, setPaymentReference] = useState("");
+  const [paymentDate, setPaymentDate] = useState(todayIso());
+  const [appendItem, setAppendItem] = useState<InvoiceItemInput>(emptyAppendItem(18));
+  const [serviceQuery, setServiceQuery] = useState("");
+  const [stockQuery, setStockQuery] = useState("");
+  const [cancelReason, setCancelReason] = useState("");
+
+  const servicesQuery = useQuery({
+    queryKey: ["services", session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchServices(session.cloudUrl, session.token, session.userToken),
+    enabled: Boolean(canAppend && canReadServices && session.token && session.userToken && session.approvalStatus === "APPROVED")
+  });
+  const inventoryQuery = useQuery({
+    queryKey: ["inventory-dashboard", session.cloudUrl, session.token, session.userToken],
+    queryFn: () => fetchInventoryDashboard(session.cloudUrl, session.token, session.userToken),
+    enabled: Boolean(canAppend && canReadStock && session.token && session.userToken && session.approvalStatus === "APPROVED")
+  });
+
+  const retailItems = useMemo(() => (inventoryQuery.data?.items || []).filter((item) => item.type === "retail" && item.active !== false), [inventoryQuery.data?.items]);
+  const serviceMatches = useMemo(() => filterServices(servicesQuery.data || [], serviceQuery), [serviceQuery, servicesQuery.data]);
+  const stockMatches = useMemo(() => filterStock(retailItems, stockQuery), [retailItems, stockQuery]);
+  const appendTotals = useMemo(() => calculateInvoiceTotals(invoice.invoiceMode, invoice.taxScope, [appendItem], 0), [appendItem, invoice.invoiceMode, invoice.taxScope]);
+
+  const invalidateInvoiceData = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["invoice"] }),
+      queryClient.invalidateQueries({ queryKey: ["invoices"] }),
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
+      queryClient.invalidateQueries({ queryKey: ["inventory-dashboard"] })
+    ]);
+    onChanged();
+  };
+
+  const paymentMutation = useMutation({
+    mutationFn: () =>
+      recordInvoicePayment(session.cloudUrl, session.token, session.userToken, {
+        invoiceId: invoice.id,
+        amount: money(numberValue(paymentAmount)),
+        mode: paymentMode,
+        reference: paymentReference.trim(),
+        paymentDate
+      }),
+    onSuccess: async () => {
+      await invalidateInvoiceData();
+      setPaymentAmount("");
+      setPaymentReference("");
+      Alert.alert("Payment recorded", "Invoice payment was updated.");
+    },
+    onError: (error) => Alert.alert("Unable to record payment", error instanceof Error ? error.message : "Payment failed.")
+  });
+
+  const appendMutation = useMutation({
+    mutationFn: () =>
+      appendInvoiceItem(session.cloudUrl, session.token, session.userToken, {
+        invoiceId: invoice.id,
+        item: {
+          ...appendItem,
+          description: appendItem.description.trim(),
+          quantity: money(numberValue(appendItem.quantity)),
+          unitPrice: money(numberValue(appendItem.unitPrice)),
+          gstRate: invoice.invoiceMode === "gst" ? money(numberValue(appendItem.gstRate)) : 0,
+          sacCode: normalizeSacCode(appendItem.sacCode),
+          warrantyIncluded: Boolean(appendItem.warrantyIncluded && parseWarrantyDurationMonths(appendItem.warrantyDurationMonths || appendItem.warrantyText)),
+          warrantyDurationMonths: parseWarrantyDurationMonths(appendItem.warrantyDurationMonths || appendItem.warrantyText),
+          warrantyText: normalizeWarrantyText(appendItem.warrantyText, parseWarrantyDurationMonths(appendItem.warrantyDurationMonths || appendItem.warrantyText))
+        }
+      }),
+    onSuccess: async () => {
+      await invalidateInvoiceData();
+      setAppendItem(emptyAppendItem(numberValue(appendItem.gstRate || 18)));
+      Alert.alert("Item added", "The item was appended to this invoice.");
+    },
+    onError: (error) => Alert.alert("Unable to add item", error instanceof Error ? error.message : "Append item failed.")
+  });
+
+  const cancelMutation = useMutation({
+    mutationFn: () => cancelInvoice(session.cloudUrl, session.token, session.userToken, { invoiceId: invoice.id, reason: cancelReason.trim() }),
+    onSuccess: async () => {
+      await invalidateInvoiceData();
+      setCancelReason("");
+      Alert.alert("Invoice cancelled", "Stock and dues were updated by the cloud API.");
+    },
+    onError: (error) => Alert.alert("Unable to cancel invoice", error instanceof Error ? error.message : "Cancellation failed.")
+  });
+
+  const paymentError = money(numberValue(paymentAmount)) <= 0
+    ? "Enter payment amount."
+    : money(numberValue(paymentAmount)) > money(invoice.balanceDue)
+      ? "Payment cannot be greater than balance due."
+      : "";
+  const appendError = !appendItem.description.trim()
+    ? "Enter item description."
+    : numberValue(appendItem.quantity) <= 0
+      ? "Quantity must be greater than zero."
+      : numberValue(appendItem.unitPrice) < 0
+        ? "Price cannot be negative."
+        : "";
+  const cancelError = cancelReason.trim() ? "" : "Cancellation reason is required.";
+
+  if (!canPay && !canAppend && !canCancel) return null;
+
+  return (
+    <Section title="Manage Invoice">
+      {cancelled ? <Text style={styles.error}>This invoice is cancelled. Further payment and item changes are blocked.</Text> : null}
+
+      {canPay && !cancelled ? (
+        <View style={styles.manageBox}>
+          <Text style={styles.manageTitle}>Record payment</Text>
+          <View style={styles.infoGrid}>
+            <ManageInput label="Amount" value={paymentAmount} onChangeText={setPaymentAmount} keyboardType="decimal-pad" />
+            <ManageInput label="Date" value={paymentDate} onChangeText={setPaymentDate} />
+          </View>
+          <Segmented options={PAYMENT_MODES.map((mode) => ({ label: mode, value: mode }))} value={paymentMode} onChange={(value) => setPaymentMode(value as PaymentMode)} />
+          <ManageInput label="Reference" value={paymentReference} onChangeText={setPaymentReference} />
+          {paymentError ? <Text style={styles.error}>{paymentError}</Text> : null}
+          <AppButton label={paymentMutation.isPending ? "Recording..." : "Record Payment"} onPress={() => paymentMutation.mutate()} loading={paymentMutation.isPending} disabled={Boolean(paymentError)} />
+        </View>
+      ) : null}
+
+      {canAppend && !cancelled ? (
+        <View style={styles.manageBox}>
+          <Text style={styles.manageTitle}>Append item</Text>
+          {!canReadServices ? <Text style={styles.empty}>This role cannot browse saved services. Enter the append item manually.</Text> : null}
+          <ManageInput label="Search service" value={serviceQuery} onChangeText={setServiceQuery} />
+          {serviceMatches.map((service) => (
+            <ActionRow
+              key={service.id}
+              title={service.name}
+              subtitle={`${formatMoney(service.defaultPrice)} | GST ${service.gstRate || appendItem.gstRate || 0}%${service.warrantyEnabled ? ` | Warranty ${warrantyDurationLabel(service.warrantyDurationMonths)}` : ""}`}
+              onPress={() =>
+                setAppendItem({
+                  ...emptyAppendItem(numberValue(service.gstRate || appendItem.gstRate || 18)),
+                  serviceId: service.id,
+                  description: service.name,
+                  unitPrice: numberValue(service.defaultPrice),
+                  gstRate: numberValue(service.gstRate || appendItem.gstRate || 18),
+                  sacCode: normalizeSacCode(service.sacCode),
+                  ...serviceWarrantyFields(service)
+                })
+              }
+            />
+          ))}
+          {!canReadStock ? <Text style={styles.empty}>This role cannot browse retail stock. Enter the append item manually.</Text> : null}
+          <ManageInput label="Search retail stock" value={stockQuery} onChangeText={setStockQuery} />
+          {stockMatches.map((item) => (
+            <ActionRow
+              key={item.id}
+              title={item.name}
+              subtitle={`${formatMoney(item.retailPrice)} | Stock ${item.currentQuantity || 0} ${item.unit || "unit"}`}
+              onPress={() =>
+                setAppendItem({
+                  ...emptyAppendItem(numberValue(item.gstRate || appendItem.gstRate || 18)),
+                  inventoryItemId: item.id,
+                  description: item.name,
+                  unitPrice: numberValue(item.retailPrice),
+                  gstRate: numberValue(item.gstRate || appendItem.gstRate || 18)
+                })
+              }
+            />
+          ))}
+          <ManageInput label="Description" value={appendItem.description} onChangeText={(value) => setAppendItem({ ...appendItem, description: value })} />
+          <View style={styles.infoGrid}>
+            <ManageInput label="Quantity" value={String(appendItem.quantity || 0)} onChangeText={(value) => setAppendItem({ ...appendItem, quantity: numberValue(value) })} keyboardType="decimal-pad" />
+            <ManageInput label="Unit price" value={String(appendItem.unitPrice || 0)} onChangeText={(value) => setAppendItem({ ...appendItem, unitPrice: numberValue(value) })} keyboardType="decimal-pad" />
+            <ManageInput label="GST %" value={String(appendItem.gstRate || 0)} onChangeText={(value) => setAppendItem({ ...appendItem, gstRate: numberValue(value) })} keyboardType="decimal-pad" />
+            <ManageInput label="SAC" value={appendItem.sacCode || DEFAULT_SAC_CODE} onChangeText={(value) => setAppendItem({ ...appendItem, sacCode: value })} keyboardType="number-pad" />
+          </View>
+          {parseWarrantyDurationMonths(appendItem.warrantyDurationMonths || appendItem.warrantyText) ? (
+            <Pressable
+              accessibilityRole="checkbox"
+              accessibilityState={{ checked: Boolean(appendItem.warrantyIncluded) }}
+              onPress={() => setAppendItem({ ...appendItem, warrantyIncluded: !appendItem.warrantyIncluded })}
+              style={styles.toggleRow}
+            >
+              <Text style={styles.toggleText}>
+                Warranty {appendItem.warrantyIncluded ? "included" : "removed"} - {warrantyDurationLabel(parseWarrantyDurationMonths(appendItem.warrantyDurationMonths || appendItem.warrantyText))}
+              </Text>
+            </Pressable>
+          ) : null}
+          <AmountRow label="Append total" value={appendTotals.grandTotal} strong />
+          {appendError ? <Text style={styles.error}>{appendError}</Text> : null}
+          <AppButton label={appendMutation.isPending ? "Adding..." : "Append Item"} onPress={() => appendMutation.mutate()} loading={appendMutation.isPending} disabled={Boolean(appendError)} />
+        </View>
+      ) : null}
+
+      {canCancel && !cancelled ? (
+        <View style={styles.manageBox}>
+          <Text style={styles.manageTitle}>Cancel invoice</Text>
+          <ManageInput label="Reason" value={cancelReason} onChangeText={setCancelReason} />
+          {cancelError ? <Text style={styles.error}>{cancelError}</Text> : null}
+          <AppButton label={cancelMutation.isPending ? "Cancelling..." : "Cancel Invoice"} variant="danger" onPress={() => cancelMutation.mutate()} loading={cancelMutation.isPending} disabled={Boolean(cancelError)} />
+        </View>
+      ) : null}
+    </Section>
   );
 }
 
@@ -351,6 +610,83 @@ function AmountRow({ label, value, strong = false }: { label: string; value: num
   );
 }
 
+function ManageInput({
+  label,
+  value,
+  onChangeText,
+  keyboardType = "default"
+}: {
+  label: string;
+  value: string;
+  onChangeText: (value: string) => void;
+  keyboardType?: "default" | "number-pad" | "decimal-pad";
+}) {
+  return (
+    <View style={styles.manageInputWrap}>
+      <Text style={styles.infoLabel}>{label}</Text>
+      <TextInput
+        keyboardType={keyboardType}
+        onChangeText={onChangeText}
+        placeholderTextColor={colors.muted}
+        style={styles.manageInput}
+        value={value}
+      />
+    </View>
+  );
+}
+
+function Segmented({
+  options,
+  value,
+  onChange
+}: {
+  options: Array<{ label: string; value: string }>;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <View style={styles.segmented}>
+      {options.map((option) => (
+        <Pressable key={option.value} accessibilityRole="button" onPress={() => onChange(option.value)} style={[styles.segment, value === option.value ? styles.segmentActive : null]}>
+          <Text style={[styles.segmentText, value === option.value ? styles.segmentTextActive : null]} numberOfLines={1}>
+            {option.label}
+          </Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
+function ActionRow({ title, subtitle, onPress }: { title: string; subtitle?: string; onPress: () => void }) {
+  return (
+    <Pressable accessibilityRole="button" onPress={onPress} style={({ pressed }) => [styles.actionRow, pressed ? styles.actionPressed : null]}>
+      <View style={styles.itemText}>
+        <Text style={styles.itemTitle} numberOfLines={1}>
+          {title}
+        </Text>
+        {subtitle ? (
+          <Text style={styles.itemSub} numberOfLines={1}>
+            {subtitle}
+          </Text>
+        ) : null}
+      </View>
+      <Text style={styles.actionText}>Use</Text>
+    </Pressable>
+  );
+}
+
+function filterServices(rows: ServiceItem[], query: string) {
+  const needle = query.trim().toLowerCase();
+  const filtered = needle ? rows.filter((row) => [row.name, row.category].some((value) => String(value || "").toLowerCase().includes(needle))) : rows;
+  return filtered.slice(0, 5);
+}
+
+function filterStock(rows: InventoryItem[], query: string) {
+  const needle = query.trim().toLowerCase();
+  const filtered = needle ? rows.filter((row) => [row.name, row.sku, row.category].some((value) => String(value || "").toLowerCase().includes(needle))) : rows;
+  return filtered.slice(0, 5);
+}
+
 function buildInvoiceShareText(invoice: InvoiceDetail) {
   const customerName = invoice.customer?.name || invoice.customerName || "Customer not available";
   const vehicleNumber = invoice.vehicle?.registrationNumber || invoice.vehicleNumber || "Vehicle not available";
@@ -398,6 +734,95 @@ const styles = StyleSheet.create({
   sectionTitle: {
     color: colors.text,
     fontSize: 16,
+    fontWeight: "900"
+  },
+  manageBox: {
+    gap: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.divider,
+    backgroundColor: colors.surface,
+    padding: 10
+  },
+  manageTitle: {
+    color: colors.primaryDark,
+    fontSize: 14,
+    fontWeight: "900"
+  },
+  manageInputWrap: {
+    flex: 1,
+    minWidth: 132,
+    gap: 6
+  },
+  manageInput: {
+    minHeight: 46,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceStrong,
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: "700",
+    paddingHorizontal: 10
+  },
+  segmented: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8
+  },
+  segment: {
+    minHeight: 40,
+    flexGrow: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceStrong,
+    paddingHorizontal: 10
+  },
+  segmentActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.chip
+  },
+  segmentText: {
+    color: colors.muted,
+    fontSize: 12,
+    fontWeight: "800"
+  },
+  segmentTextActive: {
+    color: colors.primaryDark
+  },
+  actionRow: {
+    minHeight: 50,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceStrong,
+    padding: 10
+  },
+  actionPressed: {
+    transform: [{ scale: 0.99 }]
+  },
+  actionText: {
+    color: colors.primary,
+    fontSize: 12,
+    fontWeight: "900"
+  },
+  toggleRow: {
+    minHeight: 40,
+    justifyContent: "center",
+    borderRadius: 8,
+    backgroundColor: colors.greenSoft,
+    paddingHorizontal: 10
+  },
+  toggleText: {
+    color: colors.success,
+    fontSize: 12,
     fontWeight: "900"
   },
   whatsappTopRow: {
@@ -522,6 +947,11 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontSize: 12,
     fontWeight: "600"
+  },
+  warrantyText: {
+    color: colors.success,
+    fontSize: 12,
+    fontWeight: "800"
   },
   rowAmount: {
     color: colors.primaryDark,

@@ -1,5 +1,5 @@
 export const APP_ID = "com.autocare24.billing";
-export const APP_PRODUCT_NAME = "Autocare24 Billing";
+export const APP_PRODUCT_NAME = "Autocare24";
 export const APP_SHORT_NAME = "Autocare24";
 export const APP_DESCRIPTION =
   "Windows billing software for vehicle detailing studios, covering billing, quotations, job cards, stock, purchase records, cloud sync, reports, backup, PDF, and WhatsApp sharing.";

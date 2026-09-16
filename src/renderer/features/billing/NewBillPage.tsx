@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { calculateInvoiceTotals, DEFAULT_SAC_CODE, money, normalizeSacCode } from "../../../shared/billing-math";
 import type { BusinessSettings, Customer, CustomerWithVehicles, InventoryItem, InvoiceDetail, InvoiceDraft, InvoiceDraftCorrectionType, InvoiceDraftPayload, InvoiceItemInput, InvoiceMode, PaymentMode, ServiceItem, TaxScope, Vehicle, VehicleType } from "../../../shared/types";
+import { addMonthsToDate, normalizeWarrantyText, parseWarrantyDurationMonths, warrantyDurationLabel } from "../../../shared/warranty";
 import { CustomerSearchSelect } from "./CustomerSearchSelect";
 
 type DraftItem = InvoiceItemInput & { key: string };
@@ -24,6 +25,21 @@ const formatInvoiceDate = (date: string) => {
   return parsed.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 };
 const vehicleTypeLabel = (type?: VehicleType | string) => (type === "bike" ? "Bike" : type === "other" ? "Other" : "Car");
+const serviceWarrantyFields = (service?: ServiceItem): Pick<InvoiceItemInput, "warrantyIncluded" | "warrantyDurationMonths" | "warrantyText"> => {
+  const warrantyDurationMonths = parseWarrantyDurationMonths(service?.warrantyDurationMonths || service?.warrantyText);
+  if (!service?.warrantyEnabled || !warrantyDurationMonths) return { warrantyIncluded: false, warrantyDurationMonths: 0, warrantyText: "" };
+  return {
+    warrantyIncluded: true,
+    warrantyDurationMonths,
+    warrantyText: normalizeWarrantyText(service.warrantyText, warrantyDurationMonths)
+  };
+};
+const warrantyLineLabel = (item: InvoiceItemInput, invoiceDate: string) => {
+  const durationMonths = parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText);
+  if (!durationMonths) return "No warranty";
+  const endDate = addMonthsToDate(invoiceDate, durationMonths);
+  return `${warrantyDurationLabel(durationMonths)}${endDate ? ` until ${formatInvoiceDate(endDate)}` : ""}`;
+};
 
 const emptyVehicle = (): Partial<Vehicle> & Pick<Vehicle, "registrationNumber"> => ({
   registrationNumber: "",
@@ -38,7 +54,10 @@ const emptyItem = (settings?: BusinessSettings): DraftItem => ({
   quantity: 1,
   unitPrice: 0,
   gstRate: settings?.defaultGstRate ?? 18,
-  sacCode: DEFAULT_SAC_CODE
+  sacCode: DEFAULT_SAC_CODE,
+  warrantyIncluded: false,
+  warrantyDurationMonths: 0,
+  warrantyText: ""
 });
 
 const emptyInvoiceDraftPayload = (settings: BusinessSettings): InvoiceDraftPayload => ({
@@ -64,7 +83,12 @@ const draftItemsFromPayload = (payload: InvoiceDraftPayload, settings: BusinessS
     quantity: Number.isFinite(Number(item.quantity)) ? Number(item.quantity) : 1,
     unitPrice: Number.isFinite(Number(item.unitPrice)) ? Number(item.unitPrice) : 0,
     gstRate: Number.isFinite(Number(item.gstRate)) ? Number(item.gstRate) : settings.defaultGstRate,
-    sacCode: normalizeSacCode(item.sacCode)
+    sacCode: normalizeSacCode(item.sacCode),
+    warrantyIncluded: Boolean(item.warrantyIncluded && parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText)),
+    warrantyDurationMonths: parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText),
+    warrantyText: normalizeWarrantyText(item.warrantyText, parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText)),
+    warrantyStartDate: item.warrantyStartDate || "",
+    warrantyEndDate: item.warrantyEndDate || ""
   }));
 
 const draftCorrectionLabel = (type: InvoiceDraftCorrectionType) =>
@@ -360,23 +384,27 @@ export function NewBillPage({
   const pickService = (key: string, serviceId: string) => {
     const service = services.find((item) => item.id === serviceId);
     if (!service) {
-      updateItem(key, { serviceId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE });
+      updateItem(key, { serviceId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE, warrantyIncluded: false, warrantyDurationMonths: 0, warrantyText: "", warrantyStartDate: "", warrantyEndDate: "" });
       return;
     }
+    const warranty = serviceWarrantyFields(service);
     updateItem(key, {
       serviceId: service.id,
       inventoryItemId: "",
       description: service.name,
       unitPrice: service.defaultPrice,
       gstRate: service.gstRate,
-      sacCode: normalizeSacCode(service.sacCode)
+      sacCode: normalizeSacCode(service.sacCode),
+      ...warranty,
+      warrantyStartDate: "",
+      warrantyEndDate: ""
     });
   };
 
   const pickRetailItem = (key: string, inventoryItemId: string) => {
     const item = retailItems.find((row) => row.id === inventoryItemId);
     if (!item) {
-      updateItem(key, { inventoryItemId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE });
+      updateItem(key, { inventoryItemId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE, warrantyIncluded: false, warrantyDurationMonths: 0, warrantyText: "", warrantyStartDate: "", warrantyEndDate: "" });
       return;
     }
     updateItem(key, {
@@ -385,7 +413,10 @@ export function NewBillPage({
       description: item.name,
       unitPrice: item.retailPrice,
       gstRate: item.gstRate,
-      sacCode: DEFAULT_SAC_CODE
+      sacCode: DEFAULT_SAC_CODE,
+      warrantyIncluded: false,
+      warrantyDurationMonths: 0,
+      warrantyText: ""
     });
   };
 
@@ -583,17 +614,18 @@ export function NewBillPage({
         </div>
 
         <div className="line-items">
-          <div className="line-head">
+          <div className="line-head with-warranty">
             <span>Service</span>
             <span>Retail stock</span>
             <span>Description</span>
             <span>Qty</span>
             <span>Rate</span>
             <span>GST</span>
+            <span>Warranty</span>
             <span></span>
           </div>
           {items.map((item) => (
-            <div className="line-row" key={item.key}>
+            <div className="line-row with-warranty" key={item.key}>
               <select value={item.serviceId || ""} onChange={(event) => pickService(item.key, event.currentTarget.value)}>
                 <option value="">Custom</option>
                 {services.map((service) => (
@@ -631,6 +663,23 @@ export function NewBillPage({
                 value={mode === "simple" ? 0 : item.gstRate}
                 onChange={(event) => updateItem(item.key, { gstRate: Number(event.currentTarget.value) })}
               />
+              <div className="warranty-cell">
+                {parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText) ? (
+                  <>
+                    <label className="inline-check warranty-toggle">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(item.warrantyIncluded)}
+                        onChange={(event) => updateItem(item.key, { warrantyIncluded: event.currentTarget.checked })}
+                      />
+                      Warranty
+                    </label>
+                    <span title={warrantyLineLabel(item, invoiceDate)}>{item.warrantyIncluded ? warrantyLineLabel(item, invoiceDate) : "Removed"}</span>
+                  </>
+                ) : (
+                  <span>No warranty</span>
+                )}
+              </div>
               <button
                 className="icon-button"
                 title="Remove line"

@@ -26,7 +26,7 @@
   X,
   type LucideIcon
 } from "lucide-react";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import type {
   AppUpdateStatus,
   AppUser,
@@ -1257,22 +1257,46 @@ function AuthGate({
     notify(cleaned);
   };
 
+  const setupFlowRef = useRef(setupFlow);
+  setupFlowRef.current = setupFlow;
+
   const switchToLoginWhenReady = async (status: SyncDeviceStatus) => {
     setStaffStatus(status);
+    setCloudUrl((current) => current || status.cloudUrl || "");
+    setDeviceName((current) => current || status.deviceName || "");
     if (!status.connected) return;
     const auth = await window.autocare.authStatus();
-    if (!auth.hasUsers) {
-      setSetupFlow("owner");
+    if (auth.hasUsers) {
+      if (setupFlowRef.current === "login") return;
+      setSetupFlow("login");
+      setUsername("");
       setPassword("");
-      setConfirmPassword("");
-      notify("Device approved. Create the owner account now.");
+      notify("Device approved. Staff can login.");
       return;
     }
-    setSetupFlow("login");
-    setUsername("");
+    if (setupFlowRef.current === "owner") return;
+    setSetupFlow("owner");
     setPassword("");
-    notify("Device approved. Staff can login.");
+    setConfirmPassword("");
+    notify("Device approved. Create the owner account now.");
   };
+
+  useEffect(() => {
+    if (mode !== "setup") return undefined;
+    const unsubscribe = window.autocare.onSyncStatus((status) => {
+      setStaffStatus(status);
+      setCloudUrl((current) => current || status.cloudUrl || "");
+      setDeviceName((current) => current || status.deviceName || "");
+      if (status.connected) {
+        void switchToLoginWhenReady(status).catch(() => undefined);
+        return;
+      }
+      if (status.configured && (status.state === "pending_approval" || status.state === "error" || status.approvalStatus === "PENDING")) {
+        setSetupFlow("staff");
+      }
+    });
+    return unsubscribe;
+  }, [mode]);
 
   const connectExistingBusiness = async () => {
     setAuthMessage("");
@@ -1358,7 +1382,7 @@ function AuthGate({
             <img className="brand-logo-image" src={BRAND_LOGO} alt="Autocare24" />
           </div>
           <div>
-            <strong>Autocare24 Billing</strong>
+            <strong>Autocare24</strong>
             <span>{brandStatus}</span>
           </div>
         </div>

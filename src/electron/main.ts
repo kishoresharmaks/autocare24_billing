@@ -74,8 +74,13 @@ import type {
   SyncEntity,
   SetupOwnerInput,
   Supplier,
+  SaveWhatsAppTemplateDraftInput,
+  SaveWhatsAppTemplateMappingInput,
+  WhatsAppProviderConfig,
   WhatsAppSendMessageInput,
-  WhatsAppShareInput
+  WhatsAppShareInput,
+  WhatsAppTemplateManagerData,
+  WhatsAppTemplateUseCase
 } from "../shared/types";
 
 let mainWindow: BrowserWindow | null = null;
@@ -213,7 +218,7 @@ const createSplashWindow = () => {
     alwaysOnTop: true,
     title: APP_PRODUCT_NAME,
     backgroundColor: "#061310",
-    icon: brandingAssetPath("autocare24.ico"),
+    icon: brandingAssetPath("app-icon.png"),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -497,7 +502,7 @@ const createWindow = () => {
     title: APP_PRODUCT_NAME,
     show: false,
     backgroundColor: "#f6f4ef",
-    icon: brandingAssetPath("autocare24.ico"),
+    icon: brandingAssetPath("app-icon.png"),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -1553,6 +1558,8 @@ const whatsappTemplateForShare = (kind: WhatsAppShareInput["kind"]) => {
   return "customer_chat";
 };
 
+const whatsappUseCaseForShare = (kind: WhatsAppShareInput["kind"]): WhatsAppTemplateUseCase => kind;
+
 const whatsappSourceForShare = (input: WhatsAppShareInput) => {
   if (input.invoiceNumber) return { type: "invoice", id: input.invoiceNumber };
   if (input.quotationNumber) return { type: "quotation", id: input.quotationNumber };
@@ -1560,16 +1567,22 @@ const whatsappSourceForShare = (input: WhatsAppShareInput) => {
   return { type: "customer", id: input.customerName || input.phone };
 };
 
-const whatsappVariablesForShare = (input: WhatsAppShareInput, message: string) => [
-  input.customerName || "Customer",
-  input.businessName || "Autocare24",
-  input.invoiceNumber || input.quotationNumber || input.jobNumber || "",
-  input.grandTotal === undefined ? "" : formatShareMoney(input.grandTotal),
-  input.balanceDue === undefined ? "" : formatShareMoney(input.balanceDue),
-  input.vehicleNumber || "",
-  shareStatusLabel(input.status) || "",
+const whatsappDeliveryLabel = (input: WhatsAppShareInput) =>
+  [input.expectedDeliveryDate, input.expectedDeliveryTime].filter(Boolean).join(" ") || "Will be updated soon";
+
+const whatsappVariableValuesForShare = (input: WhatsAppShareInput, message: string): Record<string, string> => ({
+  customer_name: input.customerName || "Customer",
+  business_name: input.businessName || "Autocare24",
+  invoice_number: input.invoiceNumber || "",
+  quotation_number: input.quotationNumber || "",
+  amount: input.grandTotal === undefined ? "-" : formatShareMoney(input.grandTotal),
+  due_amount: input.balanceDue === undefined ? "-" : formatShareMoney(input.balanceDue),
+  vehicle_number: input.vehicleNumber || "-",
+  job_number: input.jobNumber || "",
+  delivery_time: whatsappDeliveryLabel(input),
+  status: shareStatusLabel(input.status) || "Updated",
   message
-].filter((value) => String(value || "").trim());
+});
 
 const readWhatsAppPdfMedia = (input: WhatsAppShareInput): WhatsAppSendMessageInput["media"] | undefined => {
   if (input.kind !== "invoice_pdf" && input.kind !== "job_card_pdf") return undefined;
@@ -1597,6 +1610,12 @@ const readWhatsAppPdfMedia = (input: WhatsAppShareInput): WhatsAppSendMessageInp
   };
 };
 
+const WHATSAPP_CLOUD_UNAVAILABLE_MESSAGE = "WhatsApp cloud connection is unavailable. The message was saved as an unsent draft.";
+const isWhatsAppCloudUnavailableError = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /cloud.*unavailable|network|fetch|connect|econn|enotfound|etimedout|offline|socket|dns/i.test(message);
+};
+
 const buildWhatsAppBusinessSendInput = (input: WhatsAppShareInput): WhatsAppSendMessageInput => {
   const phone = normalizeIndianPhone(input.phone || "");
   const message = buildWhatsAppMessage(input);
@@ -1606,12 +1625,18 @@ const buildWhatsAppBusinessSendInput = (input: WhatsAppShareInput): WhatsAppSend
     customerName: input.customerName,
     mode: "template",
     text: message,
+    templateUseCase: whatsappUseCaseForShare(input.kind),
     templateName: whatsappTemplateForShare(input.kind),
     languageCode: "en",
-    variables: whatsappVariablesForShare(input, message),
+    templateVariableValues: whatsappVariableValuesForShare(input, message),
     ...(media ? { media } : {}),
     source: whatsappSourceForShare(input)
   };
+};
+
+const cacheWhatsAppTemplateManager = (data: WhatsAppTemplateManagerData) => {
+  database.cacheWhatsAppTemplateManagerData(data);
+  return data;
 };
 
 const registerIpcHandlers = () => {
@@ -1893,6 +1918,7 @@ const registerIpcHandlers = () => {
   ipcMain.handle("invoices:create", permitted("billing.create", async (_user, input: InvoiceCreateInput) => cloudData().createInvoice(input)));
   ipcMain.handle("invoices:list", permitted("billing.view", (_user, query?: string) => cloudData().listInvoices(query)));
   ipcMain.handle("invoices:get", permitted("billing.view", (_user, id: string) => cloudData().getInvoice(id)));
+  ipcMain.handle("warranties:list", permitted("billing.view", (_user, query?: string) => cloudData().listWarrantyRecords(query)));
   ipcMain.handle("invoiceDrafts:list", permitted("billing.create", () => database.listInvoiceDrafts()));
   ipcMain.handle("invoiceDrafts:get", permitted("billing.create", (_user, id: string) => database.getInvoiceDraft(id)));
   ipcMain.handle("invoiceDrafts:save", permitted("billing.create", (_user, input: InvoiceDraftSaveInput) => database.saveInvoiceDraft(input)));
@@ -2119,16 +2145,67 @@ const registerIpcHandlers = () => {
     };
   }));
   ipcMain.handle("whatsapp:status", permitted("sharing.whatsapp", () => cloudData().getWhatsAppStatus()));
+  ipcMain.handle("whatsapp:getConfig", permitted("settings.manage", () => cloudData().getWhatsAppConfig()));
+  ipcMain.handle("whatsapp:saveConfig", permitted("settings.manage", (_user, input: Partial<WhatsAppProviderConfig>) => cloudData().saveWhatsAppConfig(input)));
   ipcMain.handle("whatsapp:conversations", permitted("sharing.whatsapp", (_user, query?: string) => cloudData().listWhatsAppConversations(query)));
   ipcMain.handle("whatsapp:messages", permitted("sharing.whatsapp", (_user, conversationId: string) => cloudData().listWhatsAppMessages(conversationId)));
   ipcMain.handle("whatsapp:templates", permitted("sharing.whatsapp", () => cloudData().listWhatsAppTemplates()));
   ipcMain.handle("whatsapp:templatesSync", permitted("sharing.whatsapp", () => cloudData().syncWhatsAppTemplates()));
-  ipcMain.handle("whatsapp:sendMessage", permitted("sharing.whatsapp", (_user, input: WhatsAppSendMessageInput) => cloudData().sendWhatsAppMessage(input)));
+  ipcMain.handle("whatsapp:templateManager", permitted("settings.manage", async () =>
+    cacheWhatsAppTemplateManager(await cloudData().getWhatsAppTemplateManager())
+  ));
+  ipcMain.handle("whatsapp:saveTemplateDraft", permitted("settings.manage", async (_user, input: SaveWhatsAppTemplateDraftInput) =>
+    cacheWhatsAppTemplateManager(await cloudData().saveWhatsAppTemplateDraft(input))
+  ));
+  ipcMain.handle("whatsapp:updateTemplateDraft", permitted("settings.manage", async (_user, id: string, input: SaveWhatsAppTemplateDraftInput) =>
+    cacheWhatsAppTemplateManager(await cloudData().updateWhatsAppTemplateDraft(id, input))
+  ));
+  ipcMain.handle("whatsapp:submitTemplateDraft", permitted("settings.manage", async (_user, id: string) =>
+    cacheWhatsAppTemplateManager(await cloudData().submitWhatsAppTemplateDraft(id))
+  ));
+  ipcMain.handle("whatsapp:saveTemplateMapping", permitted("settings.manage", async (_user, input: SaveWhatsAppTemplateMappingInput) => {
+    const result = await cloudData().saveWhatsAppTemplateMapping(input);
+    cacheWhatsAppTemplateManager(await cloudData().getWhatsAppTemplateManager());
+    return result;
+  }));
+  ipcMain.handle("whatsapp:unsentDrafts", permitted("sharing.whatsapp", () => database.listWhatsAppUnsentDrafts()));
+  ipcMain.handle("whatsapp:deleteUnsentDraft", permitted("sharing.whatsapp", (_user, id: string) => database.deleteWhatsAppUnsentDraft(id)));
+  ipcMain.handle("whatsapp:retryUnsentDraft", permitted("sharing.whatsapp", async (_user, id: string) => {
+    const draft = database.getWhatsAppUnsentDraft(id);
+    if (!draft) return { ok: false, message: "WhatsApp unsent draft was not found." };
+    try {
+      const result = await cloudData().sendWhatsAppMessage(draft.payload);
+      database.deleteWhatsAppUnsentDraft(id);
+      logAppEvent("info", "WhatsApp unsent draft sent", { draftId: id, messageId: result.message.id });
+      return { ok: true, message: "WhatsApp draft sent.", path: result.message.id };
+    } catch (error) {
+      if (isWhatsAppCloudUnavailableError(error)) return { ok: false, message: WHATSAPP_CLOUD_UNAVAILABLE_MESSAGE, path: id };
+      throw error;
+    }
+  }));
+  ipcMain.handle("whatsapp:sendMessage", permitted("sharing.whatsapp", async (_user, input: WhatsAppSendMessageInput) => {
+    try {
+      return await cloudData().sendWhatsAppMessage(input);
+    } catch (error) {
+      if (!isWhatsAppCloudUnavailableError(error)) throw error;
+      const draft = database.saveWhatsAppUnsentDraft({ payload: input, reason: WHATSAPP_CLOUD_UNAVAILABLE_MESSAGE });
+      throw new Error(`${WHATSAPP_CLOUD_UNAVAILABLE_MESSAGE} Draft ID: ${draft.id}`);
+    }
+  }));
+  ipcMain.handle("whatsapp:deleteMessage", permitted("sharing.whatsapp", (_user, conversationId: string, messageId: string) => cloudData().deleteWhatsAppMessage(conversationId, messageId)));
+  ipcMain.handle("whatsapp:clearConversationHistory", permitted("sharing.whatsapp", (_user, conversationId: string) => cloudData().clearWhatsAppConversationHistory(conversationId)));
   ipcMain.handle("sharing:openWhatsAppShare", permitted("sharing.whatsapp", async (_user, input: WhatsAppShareInput) => {
     const sendInput = buildWhatsAppBusinessSendInput(input);
-    const result = await cloudData().sendWhatsAppMessage(sendInput);
-    logAppEvent("info", "WhatsApp Business API message queued", { kind: input.kind, phone: sendInput.phone, messageId: result.message.id });
-    return { ok: true, message: sendInput.media ? "WhatsApp Business PDF sent." : "WhatsApp Business message sent.", path: result.message.id };
+    try {
+      const result = await cloudData().sendWhatsAppMessage(sendInput);
+      logAppEvent("info", "WhatsApp Business API message queued", { kind: input.kind, phone: sendInput.phone, messageId: result.message.id });
+      return { ok: true, message: sendInput.media ? "WhatsApp Business PDF sent." : "WhatsApp Business message sent.", path: result.message.id };
+    } catch (error) {
+      if (!isWhatsAppCloudUnavailableError(error)) throw error;
+      const draft = database.saveWhatsAppUnsentDraft({ payload: sendInput, reason: WHATSAPP_CLOUD_UNAVAILABLE_MESSAGE });
+      logAppEvent("warn", "WhatsApp message saved as unsent draft", { kind: input.kind, phone: sendInput.phone, draftId: draft.id });
+      return { ok: false, message: WHATSAPP_CLOUD_UNAVAILABLE_MESSAGE, path: draft.id };
+    }
   }));
   ipcMain.handle("app:showItemInFolder", permitted("documents.printPdf", (_user, filePath: string) => {
     if (!filePath || !fs.existsSync(filePath)) return { ok: false, message: "PDF file was not found." };

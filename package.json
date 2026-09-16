@@ -1,6 +1,6 @@
 {
   "name": "autocare24-billing",
-  "version": "0.1.19",
+  "version": "0.1.21",
   "description": "Production Windows billing software for Autocare24 Bike & Car Detailing Studio with invoices, quotations, job cards, stock, reports, backup, PDF, and WhatsApp sharing.",
   "main": "dist-electron/electron/main.js",
   "author": "Kishoresharma",
@@ -44,7 +44,7 @@
   },
   "build": {
     "appId": "com.autocare24.billing",
-    "productName": "Autocare24 Billing",
+    "productName": "Autocare24",
     "copyright": "Copyright (c) 2026 Autocare24. All rights reserved.",
     "electronUpdaterCompatibility": ">=2.16",
     "directories": {
@@ -84,8 +84,8 @@
       "runAfterFinish": false,
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
-      "shortcutName": "Autocare24 Billing",
-      "uninstallDisplayName": "Autocare24 Billing"
+      "shortcutName": "Autocare24",
+      "uninstallDisplayName": "Autocare24"
     }
   }
 }

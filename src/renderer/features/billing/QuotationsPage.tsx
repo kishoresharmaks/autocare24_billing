@@ -20,6 +20,7 @@ import type {
   Vehicle,
   VehicleType
 } from "../../../shared/types";
+import { normalizeWarrantyText, parseWarrantyDurationMonths } from "../../../shared/warranty";
 import { CustomerSearchSelect } from "./CustomerSearchSelect";
 import { InvoicePreview } from "./InvoicePreview";
 
@@ -48,6 +49,15 @@ const statusLabel = (status: string) =>
     .replace(/[_-]/g, " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 const vehicleTypeLabel = (type?: VehicleType | string) => (type === "bike" ? "Bike" : type === "other" ? "Other" : "Car");
+const serviceWarrantyFields = (service?: ServiceItem): Pick<InvoiceItemInput, "warrantyIncluded" | "warrantyDurationMonths" | "warrantyText"> => {
+  const warrantyDurationMonths = parseWarrantyDurationMonths(service?.warrantyDurationMonths || service?.warrantyText);
+  if (!service?.warrantyEnabled || !warrantyDurationMonths) return { warrantyIncluded: false, warrantyDurationMonths: 0, warrantyText: "" };
+  return {
+    warrantyIncluded: true,
+    warrantyDurationMonths,
+    warrantyText: normalizeWarrantyText(service.warrantyText, warrantyDurationMonths)
+  };
+};
 
 const emptyVehicle = (): Partial<Vehicle> & Pick<Vehicle, "registrationNumber"> => ({
   registrationNumber: "",
@@ -62,7 +72,10 @@ const emptyItem = (settings?: BusinessSettings): DraftItem => ({
   quantity: 1,
   unitPrice: 0,
   gstRate: settings?.defaultGstRate ?? 18,
-  sacCode: DEFAULT_SAC_CODE
+  sacCode: DEFAULT_SAC_CODE,
+  warrantyIncluded: false,
+  warrantyDurationMonths: 0,
+  warrantyText: ""
 });
 
 const quotationItemHasContent = (item: Partial<InvoiceItemInput>) =>
@@ -83,7 +96,10 @@ const normalizeQuotationDraftItems = (rows: Array<Partial<InvoiceItemInput>>): I
       quantity: money(Math.max(0, Number(item.quantity || 0))),
       unitPrice: money(Math.max(0, Number(item.unitPrice || 0))),
       gstRate: money(Math.max(0, Number(item.gstRate || 0))),
-      sacCode: normalizeSacCode(item.sacCode)
+      sacCode: normalizeSacCode(item.sacCode),
+      warrantyIncluded: Boolean(item.warrantyIncluded && parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText)),
+      warrantyDurationMonths: parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText),
+      warrantyText: normalizeWarrantyText(item.warrantyText, parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText))
     }));
 
 const itemsFromQuotation = (quotation: QuotationDetail, settings: BusinessSettings): DraftItem[] =>
@@ -95,7 +111,10 @@ const itemsFromQuotation = (quotation: QuotationDetail, settings: BusinessSettin
     quantity: Number.isFinite(Number(item.quantity)) ? Number(item.quantity) : 1,
     unitPrice: Number.isFinite(Number(item.unitPrice)) ? Number(item.unitPrice) : 0,
     gstRate: Number.isFinite(Number(item.gstRate)) ? Number(item.gstRate) : settings.defaultGstRate,
-    sacCode: normalizeSacCode(item.sacCode)
+    sacCode: normalizeSacCode(item.sacCode),
+    warrantyIncluded: Boolean(item.warrantyIncluded && parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText)),
+    warrantyDurationMonths: parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText),
+    warrantyText: normalizeWarrantyText(item.warrantyText, parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText))
   }));
 
 const validateQuotationForBill = (payload: QuotationSaveInput) => {
@@ -310,7 +329,7 @@ export function QuotationsPage({
   const pickService = (key: string, serviceId: string) => {
     const service = services.find((item) => item.id === serviceId);
     if (!service) {
-      updateItem(key, { serviceId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE });
+      updateItem(key, { serviceId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE, warrantyIncluded: false, warrantyDurationMonths: 0, warrantyText: "" });
       return;
     }
     updateItem(key, {
@@ -319,14 +338,15 @@ export function QuotationsPage({
       description: service.name,
       unitPrice: service.defaultPrice,
       gstRate: service.gstRate,
-      sacCode: normalizeSacCode(service.sacCode)
+      sacCode: normalizeSacCode(service.sacCode),
+      ...serviceWarrantyFields(service)
     });
   };
 
   const pickRetailItem = (key: string, inventoryItemId: string) => {
     const item = retailItems.find((row) => row.id === inventoryItemId);
     if (!item) {
-      updateItem(key, { inventoryItemId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE });
+      updateItem(key, { inventoryItemId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE, warrantyIncluded: false, warrantyDurationMonths: 0, warrantyText: "" });
       return;
     }
     updateItem(key, {
@@ -335,7 +355,10 @@ export function QuotationsPage({
       description: item.name,
       unitPrice: item.retailPrice,
       gstRate: item.gstRate,
-      sacCode: DEFAULT_SAC_CODE
+      sacCode: DEFAULT_SAC_CODE,
+      warrantyIncluded: false,
+      warrantyDurationMonths: 0,
+      warrantyText: ""
     });
   };
 
@@ -535,6 +558,11 @@ export function QuotationsPage({
       unitPrice: item.unitPrice,
       gstRate: item.gstRate,
       sacCode: item.sacCode,
+      warrantyIncluded: item.warrantyIncluded,
+      warrantyDurationMonths: item.warrantyDurationMonths,
+      warrantyText: item.warrantyText,
+      warrantyStartDate: "",
+      warrantyEndDate: "",
       lineSubTotal: item.lineSubTotal,
       lineTax: item.lineTax,
       lineTotal: item.lineTotal

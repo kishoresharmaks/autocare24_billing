@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { calculateInvoiceTotals, money, normalizeSacCode } from "../shared/billing-math";
+import { normalizeWarrantyText, parseWarrantyDurationMonths } from "../shared/warranty";
 import { BUSINESS_SETTINGS_SYNC_ID, JOB_CARD_SETTINGS_SYNC_ID } from "../shared/types";
 import type { CloudSyncEngine } from "./sync-engine";
 import type {
@@ -63,12 +64,22 @@ import type {
   TaxScope,
   Vehicle,
   VehicleType,
+  WarrantyRecord,
   WhatsAppBusinessStatus,
+  WhatsAppClearConversationResult,
+  WhatsAppConfigResult,
+  WhatsAppProviderConfig,
   WhatsAppConversation,
+  WhatsAppDeleteMessageResult,
   WhatsAppMessage,
+  SaveWhatsAppTemplateDraftInput,
+  SaveWhatsAppTemplateMappingInput,
   WhatsAppSendMessageInput,
   WhatsAppSendMessageResult,
-  WhatsAppTemplate
+  WhatsAppTemplate,
+  WhatsAppTemplateManagerData,
+  WhatsAppTemplateMappingResult,
+  WhatsAppTemplateSubmitResult
 } from "../shared/types";
 
 type RecordResponse<T> = { record?: T; data?: T; revision?: number };
@@ -105,6 +116,11 @@ const normalizeVehicleType = (value: unknown): VehicleType => {
 };
 const normalizeTaxScope = (value: unknown): TaxScope => String(value || "") === "inter" ? "inter" : "intra";
 const isActive = (value: { active?: boolean }) => value.active !== false;
+const truthyRecordFlag = (value: unknown) => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  return /^(1|true|yes|on)$/i.test(String(value ?? "").trim());
+};
 const searchBlob = (value: unknown) => JSON.stringify(value || {}).toLowerCase();
 const JOB_CARD_PHOTO_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]);
 const MAX_JOB_CARD_PHOTO_BYTES = 10 * 1024 * 1024;
@@ -452,6 +468,8 @@ export class CloudDataClient {
   }
 
   saveService(service: Partial<ServiceItem> & Pick<ServiceItem, "name">) {
+    const warrantyDurationMonths = parseWarrantyDurationMonths(service.warrantyDurationMonths || service.warrantyText);
+    const warrantyText = normalizeWarrantyText(service.warrantyText, warrantyDurationMonths);
     return this.save<ServiceItem>("services", {
       id: service.id || randomUUID(),
       name: requiredText(service.name, "Service name"),
@@ -459,6 +477,9 @@ export class CloudDataClient {
       defaultPrice: money(Number(service.defaultPrice || 0)),
       gstRate: money(Number(service.gstRate || 0)),
       sacCode: normalizeSacCode(service.sacCode),
+      warrantyEnabled: truthyRecordFlag(service.warrantyEnabled) && warrantyDurationMonths > 0,
+      warrantyDurationMonths: truthyRecordFlag(service.warrantyEnabled) ? warrantyDurationMonths : 0,
+      warrantyText,
       active: service.active !== false,
       createdAt: service.createdAt || nowIso()
     });
@@ -482,6 +503,17 @@ export class CloudDataClient {
   async getWhatsAppStatus(): Promise<WhatsAppBusinessStatus> {
     const response = await this.cloud.cloudRequest<{ status: WhatsAppBusinessStatus }>("/api/v1/whatsapp/status");
     return response.status;
+  }
+
+  async getWhatsAppConfig(): Promise<WhatsAppConfigResult> {
+    return this.cloud.cloudRequest<WhatsAppConfigResult>("/api/v1/whatsapp/config");
+  }
+
+  saveWhatsAppConfig(input: Partial<WhatsAppProviderConfig>): Promise<WhatsAppConfigResult> {
+    return this.cloud.cloudRequest<WhatsAppConfigResult>("/api/v1/whatsapp/config", {
+      method: "POST",
+      body: input
+    });
   }
 
   async listWhatsAppConversations(query = ""): Promise<WhatsAppConversation[]> {
@@ -510,11 +542,63 @@ export class CloudDataClient {
     return response.templates || [];
   }
 
+  async getWhatsAppTemplateManager(): Promise<WhatsAppTemplateManagerData> {
+    return this.cloud.cloudRequest<WhatsAppTemplateManagerData>("/api/v1/whatsapp/template-manager");
+  }
+
+  saveWhatsAppTemplateDraft(input: SaveWhatsAppTemplateDraftInput): Promise<WhatsAppTemplateManagerData & { draft?: unknown }> {
+    return this.cloud.cloudRequest<WhatsAppTemplateManagerData & { draft?: unknown }>("/api/v1/whatsapp/template-drafts", {
+      method: "POST",
+      body: input
+    });
+  }
+
+  updateWhatsAppTemplateDraft(id: string, input: SaveWhatsAppTemplateDraftInput): Promise<WhatsAppTemplateManagerData & { draft?: unknown }> {
+    return this.cloud.cloudRequest<WhatsAppTemplateManagerData & { draft?: unknown }>(
+      `/api/v1/whatsapp/template-drafts/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        body: input
+      }
+    );
+  }
+
+  submitWhatsAppTemplateDraft(id: string): Promise<WhatsAppTemplateSubmitResult & WhatsAppTemplateManagerData> {
+    return this.cloud.cloudRequest<WhatsAppTemplateSubmitResult & WhatsAppTemplateManagerData>(
+      `/api/v1/whatsapp/template-drafts/${encodeURIComponent(id)}/submit`,
+      { method: "POST" }
+    );
+  }
+
+  saveWhatsAppTemplateMapping(input: SaveWhatsAppTemplateMappingInput): Promise<WhatsAppTemplateMappingResult> {
+    return this.cloud.cloudRequest<WhatsAppTemplateMappingResult>(
+      `/api/v1/whatsapp/template-mappings/${encodeURIComponent(input.useCase)}`,
+      {
+        method: "PUT",
+        body: input
+      }
+    );
+  }
+
   sendWhatsAppMessage(input: WhatsAppSendMessageInput): Promise<WhatsAppSendMessageResult> {
     return this.cloud.cloudRequest<WhatsAppSendMessageResult>("/api/v1/whatsapp/messages", {
       method: "POST",
       body: input
     });
+  }
+
+  deleteWhatsAppMessage(conversationId: string, messageId: string): Promise<WhatsAppDeleteMessageResult> {
+    return this.cloud.cloudRequest<WhatsAppDeleteMessageResult>(
+      `/api/v1/whatsapp/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`,
+      { method: "DELETE" }
+    );
+  }
+
+  clearWhatsAppConversationHistory(conversationId: string): Promise<WhatsAppClearConversationResult> {
+    return this.cloud.cloudRequest<WhatsAppClearConversationResult>(
+      `/api/v1/whatsapp/conversations/${encodeURIComponent(conversationId)}/messages`,
+      { method: "DELETE" }
+    );
   }
 
   saveCustomer(customer: Partial<Customer> & Pick<Customer, "name">) {
@@ -742,6 +826,15 @@ export class CloudDataClient {
   async getInvoice(id: string) {
     const response = await this.cloud.cloudRequest<{ invoice: InvoiceDetail }>(`/api/v1/invoices/${encodeURIComponent(id)}`);
     return response.invoice;
+  }
+
+  async listWarrantyRecords(query = "") {
+    const params = new URLSearchParams();
+    if (query) params.set("query", query);
+    const response = await this.cloud.cloudRequest<{ warranties: WarrantyRecord[] }>(`/api/v1/warranties${params.toString() ? `?${params}` : ""}`, {
+      timeoutMs: 6500
+    });
+    return response.warranties;
   }
 
   async recordPayment(input: RecordPaymentInput) {

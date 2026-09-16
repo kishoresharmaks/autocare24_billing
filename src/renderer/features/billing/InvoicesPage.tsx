@@ -4,8 +4,10 @@ import { Copy, MessageCircle } from "lucide-react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import { hasPermission } from "../../../shared/access-control";
 import { DEFAULT_SAC_CODE, money, normalizeSacCode } from "../../../shared/billing-math";
-import type { AppUser, BusinessSettings, InventoryItem, InvoiceDetail, InvoiceItemInput, InvoiceSummary, PaymentMode, ServiceItem, VehicleType } from "../../../shared/types";
+import type { AppUser, BusinessSettings, InventoryItem, InvoiceDetail, InvoiceItemInput, InvoiceSummary, PaymentMode, ServiceItem, VehicleType, WarrantyRecord } from "../../../shared/types";
+import { addMonthsToDate, normalizeWarrantyText, parseWarrantyDurationMonths, warrantyDurationLabel } from "../../../shared/warranty";
 import { InvoicePreview } from "./InvoicePreview";
+import { ensureWhatsAppPdfTemplateReady } from "./whatsappTemplatePreflight";
 
 type DraftItem = InvoiceItemInput & { key: string };
 const paymentModes: PaymentMode[] = ["Cash", "UPI", "Card", "Bank Transfer", "Other"];
@@ -18,6 +20,27 @@ const todayLocal = () => {
 
 const formatMoney = (value: number) =>
   `Rs ${money(value).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const formatInvoiceDate = (date: string) => {
+  if (!date) return "";
+  const parsed = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return date;
+  return parsed.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+};
+const serviceWarrantyFields = (service?: ServiceItem): Pick<InvoiceItemInput, "warrantyIncluded" | "warrantyDurationMonths" | "warrantyText"> => {
+  const warrantyDurationMonths = parseWarrantyDurationMonths(service?.warrantyDurationMonths || service?.warrantyText);
+  if (!service?.warrantyEnabled || !warrantyDurationMonths) return { warrantyIncluded: false, warrantyDurationMonths: 0, warrantyText: "" };
+  return {
+    warrantyIncluded: true,
+    warrantyDurationMonths,
+    warrantyText: normalizeWarrantyText(service.warrantyText, warrantyDurationMonths)
+  };
+};
+const warrantyLineLabel = (item: InvoiceItemInput, invoiceDate: string) => {
+  const durationMonths = parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText);
+  if (!durationMonths) return "No warranty";
+  const endDate = addMonthsToDate(invoiceDate, durationMonths);
+  return `${warrantyDurationLabel(durationMonths)}${endDate ? ` until ${formatInvoiceDate(endDate)}` : ""}`;
+};
 const readableError = (error: unknown, fallback: string) =>
   error instanceof Error ? error.message : typeof error === "string" && error.trim() ? error : fallback;
 const parsePaymentAmount = (value: string | number, maxAmount: number) => {
@@ -90,7 +113,10 @@ const emptyItem = (settings?: BusinessSettings | null): DraftItem => ({
   quantity: 1,
   unitPrice: 0,
   gstRate: settings?.defaultGstRate ?? 18,
-  sacCode: DEFAULT_SAC_CODE
+  sacCode: DEFAULT_SAC_CODE,
+  warrantyIncluded: false,
+  warrantyDurationMonths: 0,
+  warrantyText: ""
 });
 
 export function InvoicesPage({
@@ -110,6 +136,8 @@ export function InvoicesPage({
 }) {
   const [query, setQuery] = useState("");
   const [invoices, setInvoices] = useState<InvoiceSummary[]>([]);
+  const [warranties, setWarranties] = useState<WarrantyRecord[]>([]);
+  const [warrantyLoadError, setWarrantyLoadError] = useState("");
   const [invoiceLoading, setInvoiceLoading] = useState(false);
   const [invoiceLoadError, setInvoiceLoadError] = useState("");
   const [selectedId, setSelectedId] = useState("");
@@ -161,6 +189,19 @@ export function InvoicesPage({
       if (!mountedRef.current || requestId !== invoiceListRequestRef.current) return rows;
       setInvoices(rows);
       setInvoiceLoadError("");
+      window.autocare
+        .listWarrantyRecords(query)
+        .then((warrantyRows) => {
+          if (!mountedRef.current || requestId !== invoiceListRequestRef.current) return;
+          setWarranties(warrantyRows);
+          setWarrantyLoadError("");
+        })
+        .catch((error) => {
+          if (!mountedRef.current || requestId !== invoiceListRequestRef.current) return;
+          console.error("[InvoicesPage] Failed to load warranty tracker", { query, error });
+          setWarranties([]);
+          setWarrantyLoadError(readableError(error, "Warranty tracker could not be loaded."));
+        });
       setSelectedId((currentSelectedId) => {
         if (currentSelectedId && rows.some((row) => row.id === currentSelectedId)) return currentSelectedId;
         return rows[0]?.id || "";
@@ -171,6 +212,8 @@ export function InvoicesPage({
         const message = readableError(error, "Unable to load invoices.");
         console.error("[InvoicesPage] Failed to load invoice list", { query, error });
         setInvoices([]);
+        setWarranties([]);
+        setWarrantyLoadError("");
         setSelectedId("");
         setInvoice(null);
         setInvoiceLoadError(message);
@@ -318,6 +361,7 @@ export function InvoicesPage({
     setPdfSharePath("");
     try {
       await waitForInvoiceTemplateReady();
+      await ensureWhatsAppPdfTemplateReady("invoice_pdf", "invoice_pdf_ready", "invoice PDF sharing");
       const pdf = await window.autocare.savePdf({
         saveMode: "documents",
         documentsSubfolder: "Autocare24\\Invoice PDFs",
@@ -445,23 +489,27 @@ export function InvoicesPage({
   const pickAppendService = (serviceId: string) => {
     const service = services.find((item) => item.id === serviceId);
     if (!service) {
-      updateAppendItem({ serviceId: "", description: "", unitPrice: 0, gstRate: defaultGstRate, sacCode: DEFAULT_SAC_CODE });
+      updateAppendItem({ serviceId: "", description: "", unitPrice: 0, gstRate: defaultGstRate, sacCode: DEFAULT_SAC_CODE, warrantyIncluded: false, warrantyDurationMonths: 0, warrantyText: "", warrantyStartDate: "", warrantyEndDate: "" });
       return;
     }
+    const warranty = serviceWarrantyFields(service);
     updateAppendItem({
       serviceId: service.id,
       inventoryItemId: "",
       description: service.name,
       unitPrice: service.defaultPrice,
       gstRate: service.gstRate,
-      sacCode: normalizeSacCode(service.sacCode)
+      sacCode: normalizeSacCode(service.sacCode),
+      ...warranty,
+      warrantyStartDate: "",
+      warrantyEndDate: ""
     });
   };
 
   const pickAppendRetailItem = (inventoryItemId: string) => {
     const item = retailItems.find((row) => row.id === inventoryItemId);
     if (!item) {
-      updateAppendItem({ inventoryItemId: "", description: "", unitPrice: 0, gstRate: defaultGstRate, sacCode: DEFAULT_SAC_CODE });
+      updateAppendItem({ inventoryItemId: "", description: "", unitPrice: 0, gstRate: defaultGstRate, sacCode: DEFAULT_SAC_CODE, warrantyIncluded: false, warrantyDurationMonths: 0, warrantyText: "", warrantyStartDate: "", warrantyEndDate: "" });
       return;
     }
     updateAppendItem({
@@ -470,7 +518,10 @@ export function InvoicesPage({
       description: item.name,
       unitPrice: item.retailPrice,
       gstRate: item.gstRate,
-      sacCode: DEFAULT_SAC_CODE
+      sacCode: DEFAULT_SAC_CODE,
+      warrantyIncluded: false,
+      warrantyDurationMonths: 0,
+      warrantyText: ""
     });
   };
 
@@ -495,12 +546,38 @@ export function InvoicesPage({
     }
   };
 
+  const activeWarrantyCount = warranties.filter((warranty) => warranty.status === "active").length;
+  const expiringWarrantyCount = warranties.filter((warranty) => warranty.status === "expiring").length;
+  const expiredWarrantyCount = warranties.filter((warranty) => warranty.status === "expired").length;
+  const warrantyPreviewRows = warranties.slice(0, 6);
+
   return (
     <div className="invoice-layout">
       <section className="panel list-panel">
         <div className="search-box">
           <Search size={18} />
           <input placeholder="Invoice, customer ID, customer, phone, vehicle" value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
+        </div>
+        <div className="warranty-tracker no-print">
+          <div className="warranty-tracker-head">
+            <strong>Warranty tracker</strong>
+            <span>{activeWarrantyCount} active / {expiringWarrantyCount} expiring / {expiredWarrantyCount} expired</span>
+          </div>
+          {warrantyLoadError ? (
+            <div className="warranty-empty">{warrantyLoadError}</div>
+          ) : warrantyPreviewRows.length ? (
+            <div className="warranty-list">
+              {warrantyPreviewRows.map((warranty) => (
+                <button key={`${warranty.invoiceId}-${warranty.itemId}`} className="warranty-record" onClick={() => setSelectedId(warranty.invoiceId)}>
+                  <span className={`status ${warranty.status}`}>{statusLabel(warranty.status)}</span>
+                  <strong>{warranty.customerName || warranty.customerCode || warranty.invoiceNumber}</strong>
+                  <small>{warranty.description} - ends {formatInvoiceDate(warranty.warrantyEndDate)}</small>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="warranty-empty">No active service warranties found.</div>
+          )}
         </div>
         <div className="record-list invoice-list">
           {invoiceLoading && <div className="empty-state subtle invoice-list-state">Loading invoices...</div>}
@@ -562,7 +639,7 @@ export function InvoicesPage({
                 <button className="primary-action" disabled={sharingPdf || !whatsappPhone.valid} onClick={() => void shareInvoicePdf()}>
                   <MessageCircle size={17} />
                   <FileText size={17} />
-                  {sharingPdf ? "Preparing PDF..." : "Send WhatsApp template"}
+                  {sharingPdf ? "Preparing PDF..." : "Send WhatsApp PDF"}
                 </button>
               )}
               {canShareWhatsapp && !invoiceNeedsCloudNumber && invoice.invoiceStatus !== "cancelled" && invoice.balanceDue > 0 && (
@@ -681,6 +758,15 @@ export function InvoicesPage({
                   <label>
                     SAC
                     <input value={appendItem.sacCode} onChange={(event) => updateAppendItem({ sacCode: event.currentTarget.value })} />
+                  </label>
+                  <label className="inline-check align-bottom">
+                    <input
+                      type="checkbox"
+                      disabled={!parseWarrantyDurationMonths(appendItem.warrantyDurationMonths || appendItem.warrantyText)}
+                      checked={Boolean(appendItem.warrantyIncluded && parseWarrantyDurationMonths(appendItem.warrantyDurationMonths || appendItem.warrantyText))}
+                      onChange={(event) => updateAppendItem({ warrantyIncluded: event.currentTarget.checked })}
+                    />
+                    {appendItem.warrantyIncluded ? warrantyLineLabel(appendItem, invoice.invoiceDate) : "Warranty"}
                   </label>
                   <button className="primary-action align-bottom" disabled={updatingInvoice} onClick={appendExtraItem}>
                     Add to same invoice

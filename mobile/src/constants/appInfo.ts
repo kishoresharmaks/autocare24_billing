@@ -1,4 +1,4 @@
-export const MOBILE_APP_NAME = "Autocare24 Reports";
+export const MOBILE_APP_NAME = "Autocare24";
 export const MOBILE_APP_SUBTITLE = "Role-based mobile access";
 
 export const MOBILE_DEVELOPER = {

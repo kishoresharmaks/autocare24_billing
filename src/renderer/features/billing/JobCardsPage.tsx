@@ -4,7 +4,9 @@ import { MessageCircle } from "lucide-react";
 import { hasPermission } from "../../../shared/access-control";
 import { calculateInvoiceTotals, DEFAULT_SAC_CODE, money, normalizeSacCode } from "../../../shared/billing-math";
 import type { AppUser, BusinessSettings, CustomerWithVehicles, InventoryItem, InvoiceItemInput, InvoiceMode, JobCardDetail, JobCardInput, JobCardItemInput, JobCardPhotoType, JobCardStatus, JobCardSummary, ServiceItem, TaxScope, Vehicle, VehicleType } from "../../../shared/types";
+import { normalizeWarrantyText, parseWarrantyDurationMonths } from "../../../shared/warranty";
 import { CustomerSearchSelect } from "./CustomerSearchSelect";
+import { ensureWhatsAppPdfTemplateReady } from "./whatsappTemplatePreflight";
 
 type DraftJobCardItem = JobCardItemInput & { key: string };
 type JobCardTab = "today" | "open" | "approval" | "progress" | "ready" | "closed";
@@ -44,6 +46,15 @@ const statusLabel = (status: string) =>
     .replace(/[_-]/g, " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
 const vehicleTypeLabel = (type?: VehicleType | string) => (type === "bike" ? "Bike" : type === "other" ? "Other" : "Car");
+const serviceWarrantyFields = (service?: ServiceItem): Pick<JobCardItemInput, "warrantyIncluded" | "warrantyDurationMonths" | "warrantyText"> => {
+  const warrantyDurationMonths = parseWarrantyDurationMonths(service?.warrantyDurationMonths || service?.warrantyText);
+  if (!service?.warrantyEnabled || !warrantyDurationMonths) return { warrantyIncluded: false, warrantyDurationMonths: 0, warrantyText: "" };
+  return {
+    warrantyIncluded: true,
+    warrantyDurationMonths,
+    warrantyText: normalizeWarrantyText(service.warrantyText, warrantyDurationMonths)
+  };
+};
 const fileNamePart = (value: string, fallback: string) => {
   const cleaned = value
     .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "-")
@@ -69,7 +80,10 @@ const emptyJobCardItem = (settings?: BusinessSettings): DraftJobCardItem => ({
   quantity: 1,
   unitPrice: 0,
   gstRate: settings?.defaultGstRate ?? 18,
-  sacCode: DEFAULT_SAC_CODE
+  sacCode: DEFAULT_SAC_CODE,
+  warrantyIncluded: false,
+  warrantyDurationMonths: 0,
+  warrantyText: ""
 });
 
 const emptyJobCardInput = (settings?: BusinessSettings): JobCardInput => ({
@@ -118,7 +132,7 @@ const jobCardToInput = (jobCard: JobCardDetail): JobCardInput => ({
   internalNotes: jobCard.internalNotes,
   deliveryNotes: jobCard.deliveryNotes,
   discount: jobCard.discount,
-  items: jobCard.items.map(({ id, serviceId, inventoryItemId, description, quantity, unitPrice, gstRate, sacCode }) => ({
+  items: jobCard.items.map(({ id, serviceId, inventoryItemId, description, quantity, unitPrice, gstRate, sacCode, warrantyIncluded, warrantyDurationMonths, warrantyText }) => ({
     id,
     serviceId,
     inventoryItemId,
@@ -126,7 +140,10 @@ const jobCardToInput = (jobCard: JobCardDetail): JobCardInput => ({
     quantity,
     unitPrice,
     gstRate,
-    sacCode: normalizeSacCode(sacCode)
+    sacCode: normalizeSacCode(sacCode),
+    warrantyIncluded,
+    warrantyDurationMonths,
+    warrantyText
   }))
 });
 
@@ -269,27 +286,31 @@ export function JobCardsPage({
 
   const pickService = (key: string, serviceId: string) => {
     const service = services.find((row) => row.id === serviceId);
-    if (!service) return updateItem(key, { serviceId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE });
+    if (!service) return updateItem(key, { serviceId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE, warrantyIncluded: false, warrantyDurationMonths: 0, warrantyText: "" });
     updateItem(key, {
       serviceId: service.id,
       inventoryItemId: "",
       description: service.name,
       unitPrice: service.defaultPrice,
       gstRate: service.gstRate,
-      sacCode: normalizeSacCode(service.sacCode)
+      sacCode: normalizeSacCode(service.sacCode),
+      ...serviceWarrantyFields(service)
     });
   };
 
   const pickRetailItem = (key: string, inventoryItemId: string) => {
     const item = retailItems.find((row) => row.id === inventoryItemId);
-    if (!item) return updateItem(key, { inventoryItemId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE });
+    if (!item) return updateItem(key, { inventoryItemId: "", description: "", unitPrice: 0, gstRate: settings.defaultGstRate, sacCode: DEFAULT_SAC_CODE, warrantyIncluded: false, warrantyDurationMonths: 0, warrantyText: "" });
     updateItem(key, {
       serviceId: "",
       inventoryItemId: item.id,
       description: item.name,
       unitPrice: item.retailPrice,
       gstRate: item.gstRate,
-      sacCode: DEFAULT_SAC_CODE
+      sacCode: DEFAULT_SAC_CODE,
+      warrantyIncluded: false,
+      warrantyDurationMonths: 0,
+      warrantyText: ""
     });
   };
 
@@ -307,7 +328,10 @@ export function JobCardsPage({
           quantity: item.quantity,
           unitPrice: item.unitPrice,
           gstRate: item.gstRate,
-          sacCode: normalizeSacCode(item.sacCode)
+          sacCode: normalizeSacCode(item.sacCode),
+          warrantyIncluded: item.warrantyIncluded,
+          warrantyDurationMonths: item.warrantyDurationMonths,
+          warrantyText: item.warrantyText
         }))
       });
       notify(`${saved.jobNumber} saved.`);
@@ -445,6 +469,7 @@ export function JobCardsPage({
     setSharingPdf(true);
     setPdfSharePath("");
     try {
+      await ensureWhatsAppPdfTemplateReady("job_card_pdf", "job_card_pdf_ready", "job card PDF sharing");
       const pdf = await window.autocare.savePdf({
         saveMode: "documents",
         documentsSubfolder: "Autocare24\\Job Card PDFs",
@@ -583,7 +608,7 @@ export function JobCardsPage({
               {canPrintPdf && canShareWhatsapp && detail && (
                 <button className="primary-action" disabled={sharingPdf} onClick={() => void shareJobCardPdf()}>
                   <MessageCircle size={18} />
-                  {sharingPdf ? "Preparing PDF..." : "Send WhatsApp template"}
+                  {sharingPdf ? "Preparing PDF..." : "Send WhatsApp PDF"}
                 </button>
               )}
               {canShareWhatsapp && detail && <button className="ghost-button" onClick={() => void shareJobCardStatus()}><MessageCircle size={18} /> WhatsApp status</button>}

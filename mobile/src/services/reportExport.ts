@@ -14,8 +14,9 @@ import type {
   Supplier
 } from "../types/cloud";
 import { formatCount, formatDate, formatDateTime, formatMoney, titleCase } from "../utils/format";
+import { buildXlsxWorkbook, bytesToBase64 } from "../utils/xlsxWorkbook";
 
-export type ExportFormat = "pdf" | "csv";
+export type ExportFormat = "pdf" | "csv" | "excel";
 export type ReportCategoryId = "sales" | "gst" | "payments" | "stock" | "enquiries" | "jobCards" | "profit";
 
 type ExportCell = string | number | undefined | null;
@@ -32,13 +33,14 @@ export async function shareExportDocument(document: ExportDocument, format: Expo
   const available = await Sharing.isAvailableAsync();
   if (!available) throw new Error("Sharing is not available on this phone.");
 
-  const fileName = `${safeFileName(document.fileBaseName)}-${timestampForFile()}.${format}`;
-  const title = `${document.title} ${format.toUpperCase()}`;
-  const uri = format === "pdf" ? await createPdfFile(document, fileName) : await createCsvFile(document, fileName);
+  const extension = exportExtension(format);
+  const fileName = `${safeFileName(document.fileBaseName)}-${timestampForFile()}.${extension}`;
+  const title = `${document.title} ${exportFormatLabel(format)}`;
+  const uri = format === "pdf" ? await createPdfFile(document, fileName) : format === "excel" ? await createExcelFile(document, fileName) : await createCsvFile(document, fileName);
   await Sharing.shareAsync(uri, {
     dialogTitle: `Share ${title}`,
-    mimeType: format === "pdf" ? "application/pdf" : "text/csv",
-    UTI: format === "pdf" ? "com.adobe.pdf" : "public.comma-separated-values-text"
+    mimeType: exportMimeType(format),
+    UTI: exportUti(format)
   });
 }
 
@@ -52,7 +54,7 @@ export async function exportReportsDocument(input: {
   const subtitle = input.report.rangeLabel || reportFilterLabel(input.filter);
   await shareExportDocument(
     {
-      title: "Autocare24 Reports",
+      title: "Autocare24",
       subtitle,
       fileBaseName: `autocare24-reports-${reportFilterFilePart(subtitle)}`,
       sections: buildAllReportSections(input.report, input.invoices, input.filter, input.profit)
@@ -561,7 +563,14 @@ export async function exportInvoicesDocument(input: { invoices: InvoiceSummary[]
 async function createCsvFile(document: ExportDocument, fileName: string) {
   const uri = exportFileUri(fileName);
   await FileSystem.deleteAsync(uri, { idempotent: true });
-  await FileSystem.writeAsStringAsync(uri, buildCsv(document), { encoding: FileSystem.EncodingType.UTF8 });
+  await FileSystem.writeAsStringAsync(uri, `\ufeff${buildCsv(document)}`, { encoding: FileSystem.EncodingType.UTF8 });
+  return uri;
+}
+
+async function createExcelFile(document: ExportDocument, fileName: string) {
+  const uri = exportFileUri(fileName);
+  await FileSystem.deleteAsync(uri, { idempotent: true });
+  await FileSystem.writeAsStringAsync(uri, bytesToBase64(buildXlsxWorkbook(document)), { encoding: FileSystem.EncodingType.Base64 });
   return uri;
 }
 
@@ -661,7 +670,7 @@ function buildCsv(document: ExportDocument) {
     });
     lines.push("");
   });
-  return lines.join("\n");
+  return lines.join("\r\n");
 }
 
 function csvRow(values: ExportCell[]) {
@@ -669,6 +678,29 @@ function csvRow(values: ExportCell[]) {
     const text = String(value ?? "");
     return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   }).join(",");
+}
+
+function exportExtension(format: ExportFormat) {
+  if (format === "pdf") return "pdf";
+  if (format === "excel") return "xlsx";
+  return "csv";
+}
+
+function exportFormatLabel(format: ExportFormat) {
+  if (format === "excel") return "Excel";
+  return format.toUpperCase();
+}
+
+function exportMimeType(format: ExportFormat) {
+  if (format === "pdf") return "application/pdf";
+  if (format === "excel") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  return "text/csv";
+}
+
+function exportUti(format: ExportFormat) {
+  if (format === "pdf") return "com.adobe.pdf";
+  if (format === "excel") return "org.openxmlformats.spreadsheetml.sheet";
+  return "public.comma-separated-values-text";
 }
 
 function invoiceRow(invoice: InvoiceSummary): ExportCell[] {
@@ -717,6 +749,10 @@ function stockBatchRow(batch: StockBatch, supplierMap: Map<string, Supplier>): E
 function filterInvoicesByReportRange(invoices: InvoiceSummary[], filter: ReportDateFilter) {
   if (typeof filter === "string") {
     if (filter === "all") return invoices;
+    if (filter === "month") {
+      const month = currentMonthRange();
+      return filterInvoicesBetween(invoices, month.fromDate, month.toDate);
+    }
     const days = filter === "90d" ? 90 : filter === "7d" ? 7 : 30;
     const from = new Date();
     from.setDate(from.getDate() - (days - 1));
@@ -735,7 +771,11 @@ function filterInvoicesBetween(invoices: InvoiceSummary[], fromDate: string, toD
 }
 
 function reportFilterLabel(filter: ReportDateFilter) {
-  if (typeof filter === "string") return filter === "all" ? "All time" : `Last ${filter.replace("d", " days")}`;
+  if (typeof filter === "string") {
+    if (filter === "all") return "All time";
+    if (filter === "month") return "This month";
+    return `Last ${filter.replace("d", " days")}`;
+  }
   if (filter.fromDate && filter.toDate) return `${filter.fromDate} to ${filter.toDate}`;
   if (filter.fromDate) return `From ${filter.fromDate}`;
   if (filter.toDate) return `Until ${filter.toDate}`;
@@ -764,6 +804,14 @@ function timestampForFile() {
 function toIsoDate(date: Date) {
   const normalized = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
   return normalized.toISOString().slice(0, 10);
+}
+
+function currentMonthRange() {
+  const now = new Date();
+  return {
+    fromDate: toIsoDate(new Date(now.getFullYear(), now.getMonth(), 1)),
+    toDate: toIsoDate(now)
+  };
 }
 
 function escapeHtml(value: ExportCell) {

@@ -14,6 +14,14 @@ import {
   normalizePermissions
 } from "../../shared/access-control";
 import { calculateInvoiceTotals, DEFAULT_SAC_CODE, normalizeSacCode } from "../../shared/billing-math";
+import {
+  addMonthsToDate,
+  normalizeDateOnly,
+  normalizeWarrantyText,
+  parseWarrantyDurationMonths,
+  warrantyDurationLabel,
+  warrantyStatus
+} from "../../shared/warranty";
 import { CORE_SCHEMA_SQL, CUSTOMERS_CODE_INDEX_SQL, DATA_TABLES, INVOICES_JOB_CARD_INDEX_SQL, SCHEMA_COLUMNS } from "./schema";
 import { BUSINESS_SETTINGS_SYNC_ID, JOB_CARD_SETTINGS_SYNC_ID } from "../../shared/types";
 import type {
@@ -119,7 +127,13 @@ import type {
   BackupResult,
   SetupOwnerInput,
   Vehicle,
-  VehicleType
+  VehicleType,
+  WarrantyRecord,
+  WhatsAppSendMessageInput,
+  WhatsAppTemplateManagerData,
+  WhatsAppTemplateMapping,
+  WhatsAppTemplateSyncEvent,
+  WhatsAppUnsentDraft
 } from "../../shared/types";
 
 type SqlValue = string | number | null;
@@ -334,6 +348,30 @@ const normalizeCloudParam = (value: unknown): SqlValue => {
   if (typeof value === "boolean") return value ? 1 : 0;
   if (Array.isArray(value) || (value && typeof value === "object")) return JSON.stringify(value);
   return normalizeParam(value);
+};
+
+const truthyRecordFlag = (value: unknown) => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value !== 0;
+  return /^(1|true|yes|on)$/i.test(String(value ?? "").trim());
+};
+const invoiceItemWarrantyFields = (item: Partial<InvoiceItemInput & JobCardItemInput>, fallbackStartDate = "") => {
+  const durationMonths = parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText);
+  const warrantyText = normalizeWarrantyText(item.warrantyText, durationMonths);
+  const warrantyIncluded = truthyRecordFlag(item.warrantyIncluded) && durationMonths > 0;
+  const warrantyStartDate = warrantyIncluded
+    ? normalizeDateOnly(item.warrantyStartDate) || normalizeDateOnly(fallbackStartDate)
+    : "";
+  const warrantyEndDate = warrantyIncluded
+    ? normalizeDateOnly(item.warrantyEndDate) || addMonthsToDate(warrantyStartDate, durationMonths)
+    : "";
+  return {
+    warrantyIncluded,
+    warrantyDurationMonths: durationMonths,
+    warrantyText,
+    warrantyStartDate,
+    warrantyEndDate
+  };
 };
 
 const requiredText = (value: unknown, field: string) => {
@@ -670,6 +708,109 @@ export class AppDatabase {
   isCloudSyncConnected() {
     const status = this.getSyncStatus();
     return status.connected && status.cloudUrl.startsWith("http");
+  }
+
+  cacheWhatsAppTemplateManagerData(data: WhatsAppTemplateManagerData) {
+    this.writeTransaction(() => {
+      this.requireDb().run("DELETE FROM whatsapp_template_mapping_cache");
+      this.requireDb().run("DELETE FROM whatsapp_template_sync_event_cache");
+      (data.mappings || []).forEach((mapping) => {
+        this.requireDb().run(
+          `INSERT OR REPLACE INTO whatsapp_template_mapping_cache
+             (useCase, templateName, languageCode, variableTokensJson, requiresDocumentHeader, pendingTemplateName, pendingLanguageCode, updatedAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            mapping.useCase,
+            mapping.templateName,
+            mapping.languageCode,
+            JSON.stringify(mapping.variableTokens || []),
+            mapping.requiresDocumentHeader ? 1 : 0,
+            mapping.pendingTemplateName || "",
+            mapping.pendingLanguageCode || "",
+            mapping.updatedAt || nowIso()
+          ]
+        );
+      });
+      (data.syncEvents || []).slice(0, 80).forEach((event) => {
+        this.requireDb().run(
+          `INSERT OR REPLACE INTO whatsapp_template_sync_event_cache
+             (id, eventType, templateName, languageCode, status, message, createdAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            event.id,
+            event.eventType,
+            event.templateName,
+            event.languageCode,
+            event.status,
+            event.message,
+            event.createdAt || nowIso()
+          ]
+        );
+      });
+    });
+  }
+
+  listWhatsAppTemplateMappingCache(): WhatsAppTemplateMapping[] {
+    return this.select<Row>("SELECT * FROM whatsapp_template_mapping_cache ORDER BY useCase ASC").map((row) => ({
+      useCase: rowText(row, "useCase") as WhatsAppTemplateMapping["useCase"],
+      templateName: rowText(row, "templateName"),
+      languageCode: rowText(row, "languageCode") || "en",
+      variableTokens: rowStringArray(row, "variableTokensJson"),
+      requiresDocumentHeader: rowNumber(row, "requiresDocumentHeader") === 1,
+      pendingTemplateName: rowText(row, "pendingTemplateName"),
+      pendingLanguageCode: rowText(row, "pendingLanguageCode"),
+      updatedAt: rowText(row, "updatedAt")
+    }));
+  }
+
+  listWhatsAppTemplateSyncEventCache(): WhatsAppTemplateSyncEvent[] {
+    return this.select<Row>("SELECT * FROM whatsapp_template_sync_event_cache ORDER BY createdAt DESC LIMIT 80").map((row) => ({
+      id: rowNumber(row, "id"),
+      eventType: rowText(row, "eventType"),
+      templateName: rowText(row, "templateName"),
+      languageCode: rowText(row, "languageCode"),
+      status: rowText(row, "status"),
+      message: rowText(row, "message"),
+      createdAt: rowText(row, "createdAt")
+    }));
+  }
+
+  saveWhatsAppUnsentDraft(input: { payload: WhatsAppSendMessageInput; reason: string }): WhatsAppUnsentDraft {
+    const payload = input.payload;
+    const id = randomUUID();
+    const source = payload.source || { type: "", id: "" };
+    this.runWrite(
+      `INSERT INTO whatsapp_unsent_drafts
+         (id, phone, customerName, templateName, languageCode, message, reason, sourceType, sourceId, payloadJson, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id,
+        payload.phone,
+        payload.customerName || "",
+        payload.templateName || payload.templateUseCase || "",
+        payload.languageCode || "en",
+        payload.text || "",
+        input.reason,
+        source.type || "",
+        source.id || "",
+        JSON.stringify(payload),
+        nowIso()
+      ]
+    );
+    return this.getWhatsAppUnsentDraft(id)!;
+  }
+
+  listWhatsAppUnsentDrafts(): WhatsAppUnsentDraft[] {
+    return this.select<Row>("SELECT * FROM whatsapp_unsent_drafts ORDER BY createdAt DESC").map(this.mapWhatsAppUnsentDraft);
+  }
+
+  getWhatsAppUnsentDraft(id: string): WhatsAppUnsentDraft | null {
+    return this.select<Row>("SELECT * FROM whatsapp_unsent_drafts WHERE id = ? LIMIT 1", [id]).map(this.mapWhatsAppUnsentDraft)[0] || null;
+  }
+
+  deleteWhatsAppUnsentDraft(id: string) {
+    this.runWrite("DELETE FROM whatsapp_unsent_drafts WHERE id = ?", [id]);
+    return true;
   }
 
   seedLocalRecordsForSync() {
@@ -1588,11 +1729,14 @@ export class AppDatabase {
     const existing = input.id ? this.select<Row>("SELECT * FROM services WHERE id = ?", [input.id])[0] : undefined;
     const createdAt = rowText(existing || {}, "createdAt") || nowIso();
     const name = requiredText(input.name, "Service name");
+    const warrantyDurationMonths = parseWarrantyDurationMonths(input.warrantyDurationMonths || input.warrantyText);
+    const warrantyText = normalizeWarrantyText(input.warrantyText, warrantyDurationMonths);
+    const warrantyEnabled = truthyRecordFlag(input.warrantyEnabled) && warrantyDurationMonths > 0;
 
     this.runWrite(
       `INSERT OR REPLACE INTO services
-        (id, name, category, defaultPrice, gstRate, sacCode, active, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, name, category, defaultPrice, gstRate, sacCode, warrantyEnabled, warrantyDurationMonths, warrantyText, active, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         name,
@@ -1600,6 +1744,9 @@ export class AppDatabase {
         money(nonNegativeNumber(input.defaultPrice ?? 0, "Default price")),
         money(nonNegativeNumber(input.gstRate ?? this.getSettings().defaultGstRate, "GST rate")),
         normalizeSacCode(input.sacCode),
+        warrantyEnabled ? 1 : 0,
+        warrantyEnabled ? warrantyDurationMonths : 0,
+        warrantyText,
         input.active === false ? 0 : 1,
         createdAt
       ]
@@ -2565,7 +2712,7 @@ export class AppDatabase {
       ].map(normalizeParam)
     );
 
-    totals.items.forEach((item) => this.insertInvoiceItem(invoiceId, item));
+    totals.items.forEach((item) => this.insertInvoiceItem(invoiceId, item, invoiceDate));
 
     this.deductInvoiceInventory(invoiceId, totals.items, invoiceNumber, invoiceDate);
 
@@ -2640,6 +2787,59 @@ export class AppDatabase {
     );
 
     return { ...summary, customer, vehicle, items, payments };
+  }
+
+  listWarrantyRecords(query = ""): WarrantyRecord[] {
+    const search = query.trim().toLowerCase();
+    const records = this.listInvoices("")
+      .filter((invoice) => invoice.invoiceStatus !== "cancelled")
+      .flatMap((summary) => {
+        const invoice = this.getInvoice(summary.id);
+        return invoice.items
+          .filter((item) => item.warrantyIncluded)
+          .map((item) => {
+            const durationMonths = parseWarrantyDurationMonths(item.warrantyDurationMonths || item.warrantyText);
+            const startDate = normalizeDateOnly(item.warrantyStartDate) || invoice.invoiceDate;
+            const endDate = normalizeDateOnly(item.warrantyEndDate) || addMonthsToDate(startDate, durationMonths);
+            return {
+              invoiceId: invoice.id,
+              invoiceNumber: invoice.invoiceNumber,
+              invoiceDate: invoice.invoiceDate,
+              invoiceStatus: invoice.invoiceStatus,
+              itemId: item.id,
+              serviceId: item.serviceId || "",
+              description: item.description,
+              customerId: invoice.customerId,
+              customerCode: invoice.customerCode,
+              customerName: invoice.customerName,
+              customerPhone: invoice.customerPhone,
+              vehicleType: invoice.vehicleType,
+              vehicleNumber: invoice.vehicleNumber,
+              warrantyDurationMonths: durationMonths,
+              warrantyText: normalizeWarrantyText(item.warrantyText, durationMonths),
+              warrantyStartDate: startDate,
+              warrantyEndDate: endDate,
+              status: warrantyStatus(endDate) as WarrantyRecord["status"]
+            };
+          });
+      })
+      .filter((record) => record.warrantyDurationMonths > 0 && record.warrantyEndDate);
+
+    return records
+      .filter((record) => {
+        if (!search) return true;
+        return [
+          record.invoiceNumber,
+          record.customerCode,
+          record.customerName,
+          record.customerPhone,
+          record.vehicleNumber,
+          record.description,
+          record.warrantyText,
+          record.status
+        ].some((value) => String(value || "").toLowerCase().includes(search));
+      })
+      .sort((a, b) => a.warrantyEndDate.localeCompare(b.warrantyEndDate) || b.invoiceDate.localeCompare(a.invoiceDate));
   }
 
   recordPayment(input: RecordPaymentInput): InvoiceDetail {
@@ -2832,7 +3032,7 @@ export class AppDatabase {
 
     this.writeTransaction(() => {
       this.requireDb().run("DELETE FROM invoice_items WHERE invoiceId = ?", [invoice.id]);
-      totals.items.forEach((item) => this.insertInvoiceItem(invoice.id, item));
+      totals.items.forEach((item) => this.insertInvoiceItem(invoice.id, item, invoice.invoiceDate));
       this.requireDb().run(
         `UPDATE invoices
          SET subTotal = ?, discount = ?, taxableValue = ?, cgst = ?, sgst = ?, igst = ?, totalTax = ?, grandTotal = ?,
@@ -3404,6 +3604,8 @@ export class AppDatabase {
                 price: service.defaultPrice,
                 gstRate: service.gstRate,
                 sacCode: service.sacCode,
+                warranty: service.warrantyEnabled ? warrantyDurationLabel(service.warrantyDurationMonths) : "no",
+                warrantyDetails: service.warrantyEnabled ? service.warrantyText : "",
                 active: service.active ? "yes" : "no"
               }))
             : kind === "inventory"
@@ -4622,7 +4824,8 @@ export class AppDatabase {
         quantity: money(Math.max(0, finiteNumber(item.quantity ?? 0, "Item quantity"))),
         unitPrice: money(Math.max(0, finiteNumber(item.unitPrice ?? 0, "Item price"))),
         gstRate: money(Math.max(0, finiteNumber(item.gstRate ?? 0, "GST rate"))),
-        sacCode: normalizeSacCode(item.sacCode)
+        sacCode: normalizeSacCode(item.sacCode),
+        ...invoiceItemWarrantyFields(item)
       }));
   }
 
@@ -5008,18 +5211,21 @@ export class AppDatabase {
       quantity: money(positiveNumber(item.quantity, "Item quantity")),
       unitPrice: money(nonNegativeNumber(item.unitPrice, "Item price")),
       gstRate: invoiceMode === "gst" ? money(nonNegativeNumber(item.gstRate ?? 0, "GST rate")) : 0,
-      sacCode: normalizeSacCode(item.sacCode)
+      sacCode: normalizeSacCode(item.sacCode),
+      ...invoiceItemWarrantyFields(item)
     };
   }
 
   private insertInvoiceItem(
     invoiceId: string,
-    item: InvoiceItemInput & { lineSubTotal: number; lineTax: number; lineTotal: number }
+    item: InvoiceItemInput & { lineSubTotal: number; lineTax: number; lineTotal: number },
+    invoiceDate = ""
   ) {
+    const warranty = invoiceItemWarrantyFields(item, invoiceDate);
     this.requireDb().run(
       `INSERT INTO invoice_items
-        (id, invoiceId, serviceId, inventoryItemId, description, quantity, unitPrice, gstRate, sacCode, lineSubTotal, lineTax, lineTotal)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, invoiceId, serviceId, inventoryItemId, description, quantity, unitPrice, gstRate, sacCode, warrantyIncluded, warrantyDurationMonths, warrantyText, warrantyStartDate, warrantyEndDate, lineSubTotal, lineTax, lineTotal)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         randomUUID(),
         invoiceId,
@@ -5030,6 +5236,11 @@ export class AppDatabase {
         item.unitPrice,
         item.gstRate,
         item.sacCode,
+        warranty.warrantyIncluded ? 1 : 0,
+        warranty.warrantyDurationMonths,
+        warranty.warrantyText,
+        warranty.warrantyStartDate,
+        warranty.warrantyEndDate,
         item.lineSubTotal,
         item.lineTax,
         item.lineTotal
@@ -5041,10 +5252,11 @@ export class AppDatabase {
     quotationId: string,
     item: QuotationItemInput & { lineSubTotal: number; lineTax: number; lineTotal: number }
   ) {
+    const warranty = invoiceItemWarrantyFields(item);
     this.requireDb().run(
       `INSERT INTO quotation_items
-        (id, quotationId, serviceId, inventoryItemId, description, quantity, unitPrice, gstRate, sacCode, lineSubTotal, lineTax, lineTotal)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, quotationId, serviceId, inventoryItemId, description, quantity, unitPrice, gstRate, sacCode, warrantyIncluded, warrantyDurationMonths, warrantyText, warrantyStartDate, warrantyEndDate, lineSubTotal, lineTax, lineTotal)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         randomUUID(),
         quotationId,
@@ -5055,6 +5267,11 @@ export class AppDatabase {
         item.unitPrice,
         item.gstRate,
         item.sacCode,
+        warranty.warrantyIncluded ? 1 : 0,
+        warranty.warrantyDurationMonths,
+        warranty.warrantyText,
+        warranty.warrantyStartDate,
+        warranty.warrantyEndDate,
         item.lineSubTotal,
         item.lineTax,
         item.lineTotal
@@ -5083,6 +5300,7 @@ export class AppDatabase {
       unitPrice: money(finiteNumber(item.unitPrice, "Estimate price")),
       gstRate: money(finiteNumber(item.gstRate ?? 0, "Estimate GST rate")),
       sacCode: normalizeSacCode(item.sacCode),
+      ...invoiceItemWarrantyFields(item),
       lineSubTotal: money(finiteNumber(item.quantity, "Estimate quantity") * finiteNumber(item.unitPrice, "Estimate price"))
     }));
     const subTotal = money(normalized.reduce((sum, item) => sum + item.lineSubTotal, 0));
@@ -5099,10 +5317,11 @@ export class AppDatabase {
   }
 
   private insertJobCardItem(jobCardId: string, item: JobCardItemInput & { lineSubTotal: number; lineTax: number; lineTotal: number }) {
+    const warranty = invoiceItemWarrantyFields(item);
     this.requireDb().run(
       `INSERT INTO job_card_items
-        (id, jobCardId, serviceId, inventoryItemId, description, quantity, unitPrice, gstRate, sacCode, lineSubTotal, lineTax, lineTotal)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (id, jobCardId, serviceId, inventoryItemId, description, quantity, unitPrice, gstRate, sacCode, warrantyIncluded, warrantyDurationMonths, warrantyText, warrantyStartDate, warrantyEndDate, lineSubTotal, lineTax, lineTotal)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         randomUUID(),
         jobCardId,
@@ -5113,6 +5332,11 @@ export class AppDatabase {
         item.unitPrice,
         item.gstRate,
         item.sacCode,
+        warranty.warrantyIncluded ? 1 : 0,
+        warranty.warrantyDurationMonths,
+        warranty.warrantyText,
+        warranty.warrantyStartDate,
+        warranty.warrantyEndDate,
         item.lineSubTotal,
         item.lineTax,
         item.lineTotal
@@ -5720,6 +5944,20 @@ export class AppDatabase {
     `;
   }
 
+  private mapWhatsAppUnsentDraft = (row: Row | undefined | null): WhatsAppUnsentDraft => ({
+    id: rowText(row, "id"),
+    phone: rowText(row, "phone"),
+    customerName: rowText(row, "customerName"),
+    templateName: rowText(row, "templateName"),
+    languageCode: rowText(row, "languageCode") || "en",
+    message: rowText(row, "message"),
+    reason: rowText(row, "reason"),
+    sourceType: rowText(row, "sourceType"),
+    sourceId: rowText(row, "sourceId"),
+    payload: rowObject(row, "payloadJson") as unknown as WhatsAppSendMessageInput,
+    createdAt: rowText(row, "createdAt")
+  });
+
   private mapService = (row: Row | undefined | null): ServiceItem => ({
     id: rowText(row, "id"),
     name: rowText(row, "name"),
@@ -5727,6 +5965,9 @@ export class AppDatabase {
     defaultPrice: money(rowNumber(row, "defaultPrice")),
     gstRate: money(rowNumber(row, "gstRate")),
     sacCode: rowText(row, "sacCode"),
+    warrantyEnabled: rowNumber(row, "warrantyEnabled") === 1,
+    warrantyDurationMonths: parseWarrantyDurationMonths(rowNumber(row, "warrantyDurationMonths") || rowText(row, "warrantyText")),
+    warrantyText: normalizeWarrantyText(rowText(row, "warrantyText"), rowNumber(row, "warrantyDurationMonths")),
     active: rowNumber(row, "active") === 1,
     createdAt: rowText(row, "createdAt")
   });
@@ -5864,6 +6105,11 @@ export class AppDatabase {
     unitPrice: money(rowNumber(row, "unitPrice")),
     gstRate: money(rowNumber(row, "gstRate")),
     sacCode: rowText(row, "sacCode"),
+    warrantyIncluded: rowNumber(row, "warrantyIncluded") === 1,
+    warrantyDurationMonths: parseWarrantyDurationMonths(rowNumber(row, "warrantyDurationMonths") || rowText(row, "warrantyText")),
+    warrantyText: normalizeWarrantyText(rowText(row, "warrantyText"), rowNumber(row, "warrantyDurationMonths")),
+    warrantyStartDate: normalizeDateOnly(rowText(row, "warrantyStartDate")),
+    warrantyEndDate: normalizeDateOnly(rowText(row, "warrantyEndDate")),
     lineSubTotal: money(rowNumber(row, "lineSubTotal")),
     lineTax: money(rowNumber(row, "lineTax")),
     lineTotal: money(rowNumber(row, "lineTotal"))
@@ -5914,6 +6160,11 @@ export class AppDatabase {
     unitPrice: money(rowNumber(row, "unitPrice")),
     gstRate: money(rowNumber(row, "gstRate")),
     sacCode: rowText(row, "sacCode"),
+    warrantyIncluded: rowNumber(row, "warrantyIncluded") === 1,
+    warrantyDurationMonths: parseWarrantyDurationMonths(rowNumber(row, "warrantyDurationMonths") || rowText(row, "warrantyText")),
+    warrantyText: normalizeWarrantyText(rowText(row, "warrantyText"), rowNumber(row, "warrantyDurationMonths")),
+    warrantyStartDate: normalizeDateOnly(rowText(row, "warrantyStartDate")),
+    warrantyEndDate: normalizeDateOnly(rowText(row, "warrantyEndDate")),
     lineSubTotal: money(rowNumber(row, "lineSubTotal")),
     lineTax: money(rowNumber(row, "lineTax")),
     lineTotal: money(rowNumber(row, "lineTotal"))
@@ -6120,6 +6371,11 @@ export class AppDatabase {
     unitPrice: money(rowNumber(row, "unitPrice")),
     gstRate: money(rowNumber(row, "gstRate")),
     sacCode: rowText(row, "sacCode"),
+    warrantyIncluded: rowNumber(row, "warrantyIncluded") === 1,
+    warrantyDurationMonths: parseWarrantyDurationMonths(rowNumber(row, "warrantyDurationMonths") || rowText(row, "warrantyText")),
+    warrantyText: normalizeWarrantyText(rowText(row, "warrantyText"), rowNumber(row, "warrantyDurationMonths")),
+    warrantyStartDate: normalizeDateOnly(rowText(row, "warrantyStartDate")),
+    warrantyEndDate: normalizeDateOnly(rowText(row, "warrantyEndDate")),
     lineSubTotal: money(rowNumber(row, "lineSubTotal")),
     lineTax: money(rowNumber(row, "lineTax")),
     lineTotal: money(rowNumber(row, "lineTotal"))

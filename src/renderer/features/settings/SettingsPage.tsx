@@ -1,6 +1,5 @@
-﻿import { Save } from "lucide-react";
 import { useEffect, useState } from "react";
-import { Building2, ClipboardList, Cloud, Download, FileText, Plug, RefreshCw, Shield, UploadCloud, type LucideIcon } from "lucide-react";
+import { Building2, ClipboardList, Cloud, Download, FileText, MessageCircle, Paperclip, Plug, RefreshCw, Save, Shield, UploadCloud, type LucideIcon } from "lucide-react";
 import type {
   AccessRole,
   AppUser,
@@ -9,27 +8,38 @@ import type {
   CloudBackupRecord,
   CloudDeviceSummary,
   DriveConnectionStatus,
+  CustomerWithVehicles,
   InvoiceDensity,
   InvoiceDetail,
   InvoiceFontStyle,
   InvoiceLogoSize,
   InvoicePaperSize,
+  InvoiceSummary,
   InvoiceTextSize,
   InvoiceWatermarkPlacement,
   PermissionKey,
   SaveAccessRoleInput,
+  SaveWhatsAppTemplateDraftInput,
   SaveUserInput,
   SyncConflictResolution,
   SyncConflictSummary,
   SyncDeviceStatus,
-  TaxScope
+  TaxScope,
+  WhatsAppBusinessStatus,
+  WhatsAppProvider,
+  WhatsAppProviderConfig,
+  WhatsAppTemplateDraft,
+  WhatsAppTemplateHeaderType,
+  WhatsAppTemplateManagerData,
+  WhatsAppTemplateUseCase,
+  WhatsAppUnsentDraft
 } from "../../../shared/types";
 import { OWNER_ACCESS_ROLE_ID, PERMISSION_GROUPS, STAFF_OPERATIONS_ROLE_ID, hasAnyPermission, hasPermission } from "../../../shared/access-control";
 import { DEFAULT_SAC_CODE } from "../../../shared/billing-math";
 import { InvoicePreview } from "../billing/InvoicePreview";
 
 type InvoiceAssetKind = "logo" | "signature" | "watermark";
-type SettingsTab = "business" | "invoice" | "jobCards" | "security" | "backup" | "cloudSync" | "exports";
+type SettingsTab = "business" | "invoice" | "jobCards" | "whatsapp" | "security" | "backup" | "cloudSync" | "exports";
 type InvoiceEditorTab = "brand" | "layout" | "fields" | "payment" | "text" | "preview";
 type SettingsTabItem = {
   id: SettingsTab;
@@ -43,6 +53,7 @@ const settingsTabs: SettingsTabItem[] = [
   { id: "business", label: "Business", description: "Company, GST and numbering", icon: Building2, permissions: ["settings.manage"] },
   { id: "invoice", label: "Invoice", description: "Template and payment display", icon: FileText, permissions: ["settings.manage"] },
   { id: "jobCards", label: "Job Cards", description: "Default checklist", icon: ClipboardList, permissions: ["jobCards.settings"] },
+  { id: "whatsapp", label: "WhatsApp", description: "Business API provider", icon: MessageCircle, permissions: ["settings.manage"] },
   { id: "security", label: "Users & Roles", description: "Accounts and access control", icon: Shield, permissions: ["users.manage"] },
   { id: "backup", label: "Backup", description: "Local and Google Drive", icon: Cloud, permissions: ["backup.manage"] },
   { id: "cloudSync", label: "Cloud Status", description: "Online business data connection", icon: UploadCloud, permissions: ["backup.manage"] },
@@ -136,6 +147,225 @@ const emptySyncStatus: SyncDeviceStatus = {
   lastPullAt: "",
   lastError: ""
 };
+
+const emptyWhatsAppConfig: WhatsAppProviderConfig = {
+  enabled: false,
+  provider: "ycloud",
+  graphBaseUrl: "https://graph.facebook.com",
+  graphVersion: "v20.0",
+  accessToken: "",
+  phoneNumberId: "",
+  businessAccountId: "",
+  webhookVerifyToken: "",
+  appSecret: "",
+  displayPhoneNumber: "",
+  ycloudApiBaseUrl: "https://api.ycloud.com",
+  ycloudApiKey: "",
+  ycloudFromPhone: "",
+  ycloudWabaId: "",
+  ycloudWebhookSecret: ""
+};
+
+type WhatsAppDraftForm = SaveWhatsAppTemplateDraftInput & {
+  buttonsText: string;
+};
+
+const whatsappTemplateUseCases: Array<{ id: WhatsAppTemplateUseCase; label: string; pdf?: boolean; help?: string }> = [
+  { id: "invoice", label: "Invoice message", help: "Text-only invoice notification. No PDF is attached." },
+  { id: "invoice_pdf", label: "Invoice PDF attachment", pdf: true, help: "Sends the generated invoice PDF with the message." },
+  { id: "due_reminder", label: "Payment reminder" },
+  { id: "quotation", label: "Quotation" },
+  { id: "job_card_status", label: "Job-card update", help: "Text-only service status update." },
+  { id: "job_card_pdf", label: "Job-card PDF attachment", pdf: true, help: "Sends the generated job-card PDF with the message." },
+  { id: "customer_chat", label: "Customer chat" },
+  { id: "custom", label: "Custom" }
+];
+
+const whatsAppPdfUseCases = new Set<WhatsAppTemplateUseCase>(["invoice_pdf", "job_card_pdf"]);
+
+const whatsappReadyTemplatePresets: Record<Exclude<WhatsAppTemplateUseCase, "custom">, Omit<WhatsAppDraftForm, "buttonsText">> = {
+  invoice: {
+    useCase: "invoice",
+    templateName: "invoice_ready",
+    languageCode: "en",
+    category: "UTILITY",
+    headerType: "none",
+    headerText: "",
+    bodyText: [
+      "Hi {{customer_name}}, your invoice {{invoice_number}} from {{business_name}} is ready for review.",
+      "The total invoice amount is {{amount}} and the current balance due is {{due_amount}}.",
+      "Vehicle reference: {{vehicle_number}}.",
+      "Please check the invoice details and contact our team if any correction is needed before payment or delivery."
+    ].join("\n"),
+    footerText: "Autocare24",
+    buttons: [],
+    variableTokens: [],
+    replacementOfName: ""
+  },
+  invoice_pdf: {
+    useCase: "invoice_pdf",
+    templateName: "invoice_pdf_ready",
+    languageCode: "en",
+    category: "UTILITY",
+    headerType: "document",
+    headerText: "",
+    bodyText: [
+      "Hi {{customer_name}}, your invoice PDF for invoice {{invoice_number}} from {{business_name}} is attached.",
+      "The invoice total is {{amount}} and the current balance due is {{due_amount}} for vehicle {{vehicle_number}}.",
+      "Please review the document and keep it for your service and payment records."
+    ].join("\n"),
+    footerText: "Autocare24",
+    buttons: [],
+    variableTokens: [],
+    replacementOfName: ""
+  },
+  due_reminder: {
+    useCase: "due_reminder",
+    templateName: "payment_reminder",
+    languageCode: "en",
+    category: "UTILITY",
+    headerType: "none",
+    headerText: "",
+    bodyText: [
+      "Hi {{customer_name}}, this is a payment reminder from {{business_name}} for invoice {{invoice_number}}.",
+      "The pending amount is {{due_amount}} from the total invoice amount {{amount}}.",
+      "Please complete the payment when convenient or contact our team if you need any clarification."
+    ].join("\n"),
+    footerText: "Autocare24",
+    buttons: [],
+    variableTokens: [],
+    replacementOfName: ""
+  },
+  quotation: {
+    useCase: "quotation",
+    templateName: "quotation_ready",
+    languageCode: "en",
+    category: "UTILITY",
+    headerType: "none",
+    headerText: "",
+    bodyText: [
+      "Hi {{customer_name}}, your quotation {{quotation_number}} from {{business_name}} is ready for review.",
+      "The estimated amount is {{amount}} for vehicle {{vehicle_number}}.",
+      "Please check the details and confirm approval so our team can plan the work."
+    ].join("\n"),
+    footerText: "Autocare24",
+    buttons: [],
+    variableTokens: [],
+    replacementOfName: ""
+  },
+  job_card_status: {
+    useCase: "job_card_status",
+    templateName: "job_card_update",
+    languageCode: "en",
+    category: "UTILITY",
+    headerType: "none",
+    headerText: "",
+    bodyText: [
+      "Hi {{customer_name}}, here is an update from {{business_name}} for job card {{job_number}}.",
+      "Vehicle reference: {{vehicle_number}}.",
+      "Current status: {{status}}.",
+      "Expected delivery: {{delivery_time}}.",
+      "Please contact our team if you need any change or clarification."
+    ].join("\n"),
+    footerText: "Autocare24",
+    buttons: [],
+    variableTokens: [],
+    replacementOfName: ""
+  },
+  job_card_pdf: {
+    useCase: "job_card_pdf",
+    templateName: "job_card_pdf_ready",
+    languageCode: "en",
+    category: "UTILITY",
+    headerType: "document",
+    headerText: "",
+    bodyText: [
+      "Hi {{customer_name}}, your job card document from {{business_name}} for job card {{job_number}} is attached.",
+      "Vehicle reference: {{vehicle_number}}.",
+      "The estimated amount is {{amount}} and the expected delivery time is {{delivery_time}}.",
+      "Please review the document for service details."
+    ].join("\n"),
+    footerText: "Autocare24",
+    buttons: [],
+    variableTokens: [],
+    replacementOfName: ""
+  },
+  customer_chat: {
+    useCase: "customer_chat",
+    templateName: "customer_chat",
+    languageCode: "en",
+    category: "UTILITY",
+    headerType: "none",
+    headerText: "",
+    bodyText: [
+      "Hi {{customer_name}}, this is {{business_name}} from customer support.",
+      "We are contacting you with an update: {{message}}",
+      "Please reply here if you need help."
+    ].join("\n"),
+    footerText: "Autocare24",
+    buttons: [],
+    variableTokens: [],
+    replacementOfName: ""
+  }
+};
+
+const emptyWhatsAppTemplateManager: WhatsAppTemplateManagerData = {
+  variables: [],
+  drafts: [],
+  mappings: [],
+  templates: [],
+  submissionHistory: [],
+  mappingHistory: [],
+  syncEvents: []
+};
+
+const emptyWhatsAppDraftForm = (): WhatsAppDraftForm => ({
+  ...whatsappReadyTemplatePresets.invoice,
+  buttonsText: ""
+});
+
+const whatsappUseCaseLabel = (useCase: WhatsAppTemplateUseCase | string) =>
+  whatsappTemplateUseCases.find((item) => item.id === useCase)?.label || statusLabel(String(useCase || ""));
+const whatsappUseCaseHelp = (useCase: WhatsAppTemplateUseCase | string) =>
+  whatsappTemplateUseCases.find((item) => item.id === useCase)?.help || "";
+const whatsappReadyTemplateForUseCase = (useCase: WhatsAppTemplateUseCase): WhatsAppDraftForm => {
+  if (useCase === "custom") {
+    return {
+      useCase: "custom",
+      templateName: "custom_message",
+      languageCode: "en",
+      category: "UTILITY",
+      headerType: "none",
+      headerText: "",
+      bodyText: [
+        "Hi {{customer_name}}, this is {{business_name}}.",
+        "We are contacting you with an update: {{message}}",
+        "Please reply here if you need help."
+      ].join("\n"),
+      footerText: "Autocare24",
+      buttons: [],
+      variableTokens: [],
+      replacementOfName: "",
+      buttonsText: ""
+    };
+  }
+  return { ...whatsappReadyTemplatePresets[useCase], buttonsText: "" };
+};
+const normalizeWhatsAppDraftHeaderTypeForUseCase = (
+  useCase: WhatsAppTemplateUseCase,
+  headerType: WhatsAppTemplateHeaderType
+): WhatsAppTemplateHeaderType => {
+  if (whatsAppPdfUseCases.has(useCase)) return "document";
+  if (useCase !== "custom" && headerType === "document") return "none";
+  return headerType;
+};
+const whatsappTemplateVariableSlotCount = (text: string) => (text.match(/{{\s*[^{}\s]+\s*}}/g) || []).length;
+const whatsappTemplateStaticWordCount = (text: string) => {
+  const words = text.replace(/{{\s*[^{}\s]+\s*}}/g, " ").match(/[A-Za-z0-9][A-Za-z0-9'/-]*/g);
+  return words ? words.length : 0;
+};
+
+const secretPlaceholder = (saved?: boolean, label = "secret") => saved ? `Saved - leave blank to keep current ${label}` : "";
 
 const todayLocal = () => {
   const date = new Date();
@@ -510,6 +740,18 @@ export function SettingsPage({
   const [cloudDevices, setCloudDevices] = useState<CloudDeviceSummary[]>([]);
   const [cloudDevicesBusy, setCloudDevicesBusy] = useState("");
   const [syncBusy, setSyncBusy] = useState("");
+  const [whatsappConfig, setWhatsAppConfig] = useState<WhatsAppProviderConfig>(emptyWhatsAppConfig);
+  const [whatsappStatus, setWhatsAppStatus] = useState<WhatsAppBusinessStatus | null>(null);
+  const [whatsappBusy, setWhatsAppBusy] = useState("");
+  const [whatsappTemplateData, setWhatsAppTemplateData] = useState<WhatsAppTemplateManagerData>(emptyWhatsAppTemplateManager);
+  const [whatsappTemplateBusy, setWhatsAppTemplateBusy] = useState("");
+  const [whatsappDraftForm, setWhatsAppDraftForm] = useState<WhatsAppDraftForm>(emptyWhatsAppDraftForm);
+  const [selectedWhatsAppDraftId, setSelectedWhatsAppDraftId] = useState("");
+  const [previewCustomers, setPreviewCustomers] = useState<CustomerWithVehicles[]>([]);
+  const [previewInvoices, setPreviewInvoices] = useState<InvoiceSummary[]>([]);
+  const [previewCustomerId, setPreviewCustomerId] = useState("");
+  const [previewInvoiceId, setPreviewInvoiceId] = useState("");
+  const [whatsappUnsentDrafts, setWhatsAppUnsentDrafts] = useState<WhatsAppUnsentDraft[]>([]);
   const [activeTab, setActiveTab] = useState<SettingsTab>("business");
   const [activeInvoiceTab, setActiveInvoiceTab] = useState<InvoiceEditorTab>("brand");
 
@@ -571,6 +813,47 @@ export function SettingsPage({
     }
   };
 
+  const refreshWhatsAppConfig = async () => {
+    try {
+      const result = await window.autocare.getWhatsAppConfig();
+      setWhatsAppConfig({ ...emptyWhatsAppConfig, ...result.config });
+      setWhatsAppStatus(result.status);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to load WhatsApp settings.");
+    }
+  };
+
+  const loadWhatsAppTemplateManager = async () => {
+    try {
+      setWhatsAppTemplateBusy("load");
+      const data = await window.autocare.getWhatsAppTemplateManager();
+      setWhatsAppTemplateData(data);
+      return data;
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to load WhatsApp templates.");
+      return null;
+    } finally {
+      setWhatsAppTemplateBusy("");
+    }
+  };
+
+  const loadWhatsAppPreviewData = async () => {
+    try {
+      const [customers, invoices, unsentDrafts] = await Promise.all([
+        window.autocare.listCustomers(),
+        window.autocare.listInvoices(""),
+        window.autocare.listWhatsAppUnsentDrafts()
+      ]);
+      setPreviewCustomers(customers);
+      setPreviewInvoices(invoices);
+      setWhatsAppUnsentDrafts(unsentDrafts);
+      setPreviewCustomerId((current) => current || customers[0]?.id || "");
+      setPreviewInvoiceId((current) => current || invoices[0]?.id || "");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to load WhatsApp preview data.");
+    }
+  };
+
   useEffect(() => {
     if (hasPermission(currentUser, "users.manage")) {
       void loadUsers();
@@ -584,6 +867,11 @@ export function SettingsPage({
       void refreshBackupScheduleStatus();
       void refreshSyncStatus();
       void loadSyncConflicts();
+    }
+    if (hasPermission(currentUser, "settings.manage")) {
+      void refreshWhatsAppConfig();
+      void loadWhatsAppTemplateManager();
+      void loadWhatsAppPreviewData();
     }
     const offSync = window.autocare.onSyncStatus((status) => {
       setSyncStatus(status);
@@ -600,6 +888,210 @@ export function SettingsPage({
 
   const visibleTabs = settingsTabs.filter((tab) => hasAnyPermission(currentUser, tab.permissions));
   const groupedSyncConflicts = groupConflicts(syncConflicts);
+  const whatsappWebhookUrl = syncStatus.cloudUrl ? `${syncStatus.cloudUrl.replace(/\/+$/, "")}/api/v1/whatsapp/webhook` : "/api/v1/whatsapp/webhook";
+  const whatsappProviderLabel = whatsappConfig.provider === "ycloud" ? "YCloud" : "Meta Cloud API";
+  const selectedPreviewInvoice = previewInvoices.find((invoice) => invoice.id === previewInvoiceId) || previewInvoices[0];
+  const selectedPreviewCustomer = previewCustomers.find((customer) => customer.id === previewCustomerId) || previewCustomers[0];
+  const selectedWhatsAppDraft = whatsappTemplateData.drafts.find((draft) => draft.id === selectedWhatsAppDraftId);
+  const selectedUseCaseMapping = whatsappTemplateData.mappings.find((mapping) => mapping.useCase === whatsappDraftForm.useCase);
+  const selectedUseCaseRequiresDocument = whatsAppPdfUseCases.has(whatsappDraftForm.useCase);
+  const selectedHeaderType = normalizeWhatsAppDraftHeaderTypeForUseCase(whatsappDraftForm.useCase, whatsappDraftForm.headerType);
+  const selectedHeaderText = selectedHeaderType === "text" ? whatsappDraftForm.headerText || "" : "";
+  const bodyCounterOk = whatsappDraftForm.bodyText.length <= 1024;
+  const footerCounterOk = (whatsappDraftForm.footerText || "").length <= 60;
+  const headerCounterOk = selectedHeaderText.length <= 60;
+  const buttonsCounterOk = whatsappDraftForm.buttonsText.split(/\r?\n/).map((row) => row.trim()).filter(Boolean).length <= 10;
+  const templateVariableSlots = whatsappTemplateVariableSlotCount(whatsappDraftForm.bodyText);
+  const templateStaticWords = whatsappTemplateStaticWordCount(whatsappDraftForm.bodyText);
+  const variableDensityOk = templateVariableSlots === 0 || templateStaticWords >= templateVariableSlots * 5;
+  const selectedTemplateDraftOk = bodyCounterOk && footerCounterOk && headerCounterOk && buttonsCounterOk && variableDensityOk;
+  const approvedTemplateNames = new Set(
+    whatsappTemplateData.templates
+      .filter((template) => String(template.status || "").toUpperCase() === "APPROVED")
+      .map((template) => `${template.name}:${template.languageCode}`)
+  );
+  const approvedWhatsAppTemplates = whatsappTemplateData.templates.filter((template) =>
+    String(template.status || "").toUpperCase() === "APPROVED"
+  );
+  const moneyPreview = (value: number | undefined) =>
+    value === undefined ? "-" : new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR" }).format(value);
+  const whatsappPreviewTokens: Record<string, string> = {
+    customer_name: selectedPreviewInvoice?.customerName || selectedPreviewCustomer?.name || "Customer",
+    invoice_number: selectedPreviewInvoice?.invoiceNumber || "INV-1001",
+    quotation_number: "QT-1001",
+    amount: moneyPreview(selectedPreviewInvoice?.grandTotal ?? 4500),
+    due_amount: moneyPreview(selectedPreviewInvoice?.balanceDue ?? 1200),
+    vehicle_number: selectedPreviewInvoice?.vehicleNumber || selectedPreviewCustomer?.vehicles?.[0]?.registrationNumber || "TN 01 AB 1234",
+    business_name: form.businessName || "Autocare24",
+    job_number: "JC-1001",
+    delivery_time: "Today 6:00 PM",
+    status: "Ready for delivery",
+    message: "Please check the details."
+  };
+  const whatsappPreviewBody = whatsappDraftForm.bodyText.replace(/{{\s*([^{}\s]+)\s*}}/g, (_match, token) =>
+    whatsappPreviewTokens[String(token || "").trim()] || `{{${token}}}`
+  );
+
+  const applyWhatsAppReadyTemplate = (useCase: WhatsAppTemplateUseCase = whatsappDraftForm.useCase) => {
+    const mapping = whatsappTemplateData.mappings.find((item) => item.useCase === useCase);
+    const preset = whatsappReadyTemplateForUseCase(useCase);
+    setSelectedWhatsAppDraftId("");
+    setWhatsAppDraftForm({
+      ...preset,
+      templateName: mapping?.templateName || preset.templateName,
+      languageCode: mapping?.languageCode || preset.languageCode,
+      headerType: whatsAppPdfUseCases.has(useCase) ? "document" : preset.headerType,
+      headerText: whatsAppPdfUseCases.has(useCase) ? "" : preset.headerText
+    });
+  };
+
+  const selectWhatsAppUseCaseDraft = (useCase: WhatsAppTemplateUseCase) => {
+    const mapping = whatsappTemplateData.mappings.find((item) => item.useCase === useCase);
+    const existingDraft = whatsappTemplateData.drafts.find((draft) =>
+      draft.useCase === useCase &&
+      draft.templateName === (mapping?.templateName || whatsappReadyTemplateForUseCase(useCase).templateName) &&
+      draft.languageCode === (mapping?.languageCode || "en")
+    ) || whatsappTemplateData.drafts.find((draft) => draft.useCase === useCase);
+    if (existingDraft) {
+      selectWhatsAppDraft(existingDraft);
+      return;
+    }
+    applyWhatsAppReadyTemplate(useCase);
+  };
+
+  const setWhatsAppUseCase = (useCase: WhatsAppTemplateUseCase) => {
+    const mapping = whatsappTemplateData.mappings.find((item) => item.useCase === useCase);
+    const preset = whatsappReadyTemplateForUseCase(useCase);
+    if (whatsappDraftForm.useCase !== useCase) setSelectedWhatsAppDraftId("");
+    setWhatsAppDraftForm((current) => ({
+      ...current,
+      useCase,
+      templateName: mapping?.templateName || preset.templateName || current.templateName,
+      bodyText: current.useCase === useCase ? current.bodyText : preset.bodyText,
+      footerText: current.useCase === useCase ? current.footerText : preset.footerText,
+      headerType: whatsAppPdfUseCases.has(useCase) ? "document" : preset.headerType,
+      headerText: whatsAppPdfUseCases.has(useCase) ? "" : preset.headerText
+    }));
+  };
+
+  const selectWhatsAppDraft = (draft: WhatsAppTemplateDraft) => {
+    const normalizedHeaderType = normalizeWhatsAppDraftHeaderTypeForUseCase(draft.useCase, draft.headerType);
+    setSelectedWhatsAppDraftId(draft.id);
+    setWhatsAppDraftForm({
+      useCase: draft.useCase,
+      templateName: draft.templateName,
+      languageCode: draft.languageCode,
+      category: draft.category,
+      headerType: normalizedHeaderType,
+      headerText: normalizedHeaderType === "text" ? draft.headerText : "",
+      bodyText: draft.bodyText,
+      footerText: draft.footerText,
+      buttons: draft.buttons,
+      variableTokens: draft.variableTokens,
+      replacementOfName: draft.replacementOfName,
+      buttonsText: draft.buttons.map((button) => button.text).join("\n")
+    });
+  };
+
+  const whatsAppDraftPayload = (): SaveWhatsAppTemplateDraftInput => {
+    const headerType = normalizeWhatsAppDraftHeaderTypeForUseCase(whatsappDraftForm.useCase, whatsappDraftForm.headerType);
+    return {
+      ...(selectedWhatsAppDraftId ? { id: selectedWhatsAppDraftId } : {}),
+      useCase: whatsappDraftForm.useCase,
+      templateName: whatsappDraftForm.templateName,
+      languageCode: whatsappDraftForm.languageCode || "en",
+      category: whatsappDraftForm.category,
+      headerType,
+      headerText: headerType === "text" ? whatsappDraftForm.headerText || "" : "",
+      bodyText: whatsappDraftForm.bodyText,
+      footerText: whatsappDraftForm.footerText || "",
+      buttons: whatsappDraftForm.buttonsText
+        .split(/\r?\n/)
+        .map((text) => text.trim())
+        .filter(Boolean)
+        .slice(0, 10)
+        .map((text) => ({ type: "QUICK_REPLY" as const, text })),
+      replacementOfName: whatsappDraftForm.replacementOfName || ""
+    };
+  };
+
+  const saveWhatsAppTemplateDraft = async () => {
+    try {
+      setWhatsAppTemplateBusy("draft");
+      const payload = whatsAppDraftPayload();
+      const data = selectedWhatsAppDraftId
+        ? await window.autocare.updateWhatsAppTemplateDraft(selectedWhatsAppDraftId, payload)
+        : await window.autocare.saveWhatsAppTemplateDraft(payload);
+      setWhatsAppTemplateData(data);
+      const returnedDraft = (data as WhatsAppTemplateManagerData & { draft?: WhatsAppTemplateDraft }).draft;
+      const draft = returnedDraft?.id ? returnedDraft : data.drafts.find((item) =>
+        item.useCase === payload.useCase &&
+        item.templateName === payload.templateName &&
+        item.languageCode === payload.languageCode
+      );
+      if (draft) selectWhatsAppDraft(draft);
+      notify("WhatsApp template draft saved.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to save WhatsApp template draft.");
+    } finally {
+      setWhatsAppTemplateBusy("");
+    }
+  };
+
+  const submitWhatsAppTemplateDraft = async () => {
+    if (!selectedWhatsAppDraftId) return notify("Save the WhatsApp template draft before submitting.");
+    try {
+      setWhatsAppTemplateBusy("submit");
+      const data = await window.autocare.submitWhatsAppTemplateDraft(selectedWhatsAppDraftId);
+      setWhatsAppTemplateData(data);
+      notify(data.message || "WhatsApp template submitted.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to submit WhatsApp template.");
+    } finally {
+      setWhatsAppTemplateBusy("");
+    }
+  };
+
+  const syncWhatsAppTemplateManager = async () => {
+    try {
+      setWhatsAppTemplateBusy("sync");
+      const templates = await window.autocare.syncWhatsAppTemplates();
+      const data = await window.autocare.getWhatsAppTemplateManager();
+      setWhatsAppTemplateData(data);
+      setWhatsAppStatus((current) => current ? { ...current, templatesCount: templates.length } : current);
+      notify(`Synced ${templates.length} WhatsApp templates.`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to sync WhatsApp templates.");
+    } finally {
+      setWhatsAppTemplateBusy("");
+    }
+  };
+
+  const mapApprovedWhatsAppTemplate = async (useCase: WhatsAppTemplateUseCase, templateName: string, languageCode: string) => {
+    try {
+      setWhatsAppTemplateBusy(`mapping-${useCase}`);
+      await window.autocare.saveWhatsAppTemplateMapping({ useCase, templateName, languageCode });
+      await loadWhatsAppTemplateManager();
+      notify("WhatsApp template mapping updated.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to update template mapping.");
+    } finally {
+      setWhatsAppTemplateBusy("");
+    }
+  };
+
+  const retryWhatsAppDraft = async (id: string) => {
+    try {
+      setWhatsAppTemplateBusy(`retry-${id}`);
+      const result = await window.autocare.retryWhatsAppUnsentDraft(id);
+      notify(result.message);
+      await loadWhatsAppPreviewData();
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to retry WhatsApp draft.");
+    } finally {
+      setWhatsAppTemplateBusy("");
+    }
+  };
 
   useEffect(() => {
     const firstTab = visibleTabs[0];
@@ -630,6 +1122,20 @@ export function SettingsPage({
       onChanged();
     } catch (error) {
       notify(error instanceof Error ? error.message : "Unable to save settings.");
+    }
+  };
+
+  const saveWhatsAppConfig = async () => {
+    try {
+      setWhatsAppBusy("save");
+      const result = await window.autocare.saveWhatsAppConfig(whatsappConfig);
+      setWhatsAppConfig({ ...emptyWhatsAppConfig, ...result.config });
+      setWhatsAppStatus(result.status);
+      notify("WhatsApp settings saved.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "Unable to save WhatsApp settings.");
+    } finally {
+      setWhatsAppBusy("");
     }
   };
 
@@ -991,6 +1497,298 @@ export function SettingsPage({
         </div>
       </section>
 
+        )}
+
+        {activeTab === "whatsapp" && (
+          <section className="panel wide-panel cloud-panel">
+            <div className="panel-heading">
+              <div>
+                <h2>WhatsApp Business API</h2>
+                <p>Provider credentials are stored on the cloud API database and are not read from server env files.</p>
+              </div>
+              <div className="inline-actions">
+                <button className="ghost-button" disabled={Boolean(whatsappBusy)} onClick={() => void refreshWhatsAppConfig()}><RefreshCw size={17} /> Refresh</button>
+                <button className="primary-action" disabled={Boolean(whatsappBusy)} onClick={() => void saveWhatsAppConfig()}><Save size={18} /> {whatsappBusy === "save" ? "Saving..." : "Save WhatsApp"}</button>
+              </div>
+            </div>
+
+            <div className="mini-metrics cloud-metrics">
+              <div><span>Provider</span><strong>{whatsappProviderLabel}</strong></div>
+              <div><span>API</span><strong>{whatsappStatus?.configured ? "Configured" : "Not configured"}</strong></div>
+              <div><span>Webhook</span><strong>{whatsappStatus?.webhookReady ? "Ready" : "Pending"}</strong></div>
+              <div><span>Templates</span><strong>{whatsappStatus?.templatesCount ?? 0}</strong></div>
+            </div>
+            {whatsappStatus?.message && <p className={whatsappStatus.configured ? "muted" : "cloud-error"}>{whatsappStatus.message}</p>}
+
+            <div className="form-grid two">
+              <label className="inline-check wide-input">
+                <input type="checkbox" checked={whatsappConfig.enabled} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, enabled: event.currentTarget.checked })} />
+                Enable WhatsApp Business API
+              </label>
+              <label>Provider<select value={whatsappConfig.provider} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, provider: event.currentTarget.value as WhatsAppProvider })}><option value="ycloud">YCloud</option><option value="meta">Meta Cloud API</option></select></label>
+              <label className="wide-input">Webhook URL<input readOnly value={whatsappWebhookUrl} /></label>
+            </div>
+
+            {whatsappConfig.provider === "ycloud" ? (
+              <div className="form-grid two">
+                <label>Sender phone<input value={whatsappConfig.ycloudFromPhone} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, ycloudFromPhone: event.currentTarget.value })} placeholder="+919000000000" /></label>
+                <label>YCloud WABA ID<input value={whatsappConfig.ycloudWabaId} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, ycloudWabaId: event.currentTarget.value })} /></label>
+                <label className="wide-input">YCloud API base URL<input value={whatsappConfig.ycloudApiBaseUrl} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, ycloudApiBaseUrl: event.currentTarget.value })} /></label>
+                <label>YCloud API key<input type="password" value={whatsappConfig.ycloudApiKey} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, ycloudApiKey: event.currentTarget.value })} placeholder={secretPlaceholder(whatsappConfig.hasYCloudApiKey, "API key")} /></label>
+                <label>Webhook secret<input type="password" value={whatsappConfig.ycloudWebhookSecret} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, ycloudWebhookSecret: event.currentTarget.value })} placeholder={secretPlaceholder(whatsappConfig.hasYCloudWebhookSecret, "webhook secret")} /></label>
+              </div>
+            ) : (
+              <div className="form-grid two">
+                <label>Phone number ID<input value={whatsappConfig.phoneNumberId} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, phoneNumberId: event.currentTarget.value })} /></label>
+                <label>Business account ID<input value={whatsappConfig.businessAccountId} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, businessAccountId: event.currentTarget.value })} /></label>
+                <label>Display phone<input value={whatsappConfig.displayPhoneNumber} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, displayPhoneNumber: event.currentTarget.value })} /></label>
+                <label>Graph version<input value={whatsappConfig.graphVersion} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, graphVersion: event.currentTarget.value })} /></label>
+                <label className="wide-input">Graph base URL<input value={whatsappConfig.graphBaseUrl} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, graphBaseUrl: event.currentTarget.value })} /></label>
+                <label>Access token<input type="password" value={whatsappConfig.accessToken} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, accessToken: event.currentTarget.value })} placeholder={secretPlaceholder(whatsappConfig.hasAccessToken, "access token")} /></label>
+                <label>Verify token<input type="password" value={whatsappConfig.webhookVerifyToken} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, webhookVerifyToken: event.currentTarget.value })} placeholder={secretPlaceholder(whatsappConfig.hasWebhookVerifyToken, "verify token")} /></label>
+                <label>App secret<input type="password" value={whatsappConfig.appSecret} onChange={(event) => setWhatsAppConfig({ ...whatsappConfig, appSecret: event.currentTarget.value })} placeholder={secretPlaceholder(whatsappConfig.hasAppSecret, "app secret")} /></label>
+              </div>
+            )}
+
+            <div className="whatsapp-template-manager">
+              <div className="panel-heading compact">
+                <div>
+                  <h2>Templates</h2>
+                  <p>Draft, submit, sync, and map approved WhatsApp templates.</p>
+                </div>
+                <div className="inline-actions">
+                  <button className="ghost-button" disabled={Boolean(whatsappTemplateBusy)} onClick={() => void loadWhatsAppTemplateManager()}><RefreshCw size={17} /> Load</button>
+                  <button className="primary-action" disabled={Boolean(whatsappTemplateBusy)} onClick={() => void syncWhatsAppTemplateManager()}><RefreshCw size={17} /> {whatsappTemplateBusy === "sync" ? "Syncing..." : "Sync templates"}</button>
+                </div>
+              </div>
+
+              <div className="mini-metrics cloud-metrics">
+                <div><span>Registry</span><strong>{whatsappTemplateData.variables.filter((item) => item.active).length}</strong></div>
+                <div><span>Drafts</span><strong>{whatsappTemplateData.drafts.length}</strong></div>
+                <div><span>Approved</span><strong>{approvedWhatsAppTemplates.length}</strong></div>
+                <div><span>Unsent</span><strong>{whatsappUnsentDrafts.length}</strong></div>
+              </div>
+
+              <div className="whatsapp-template-grid">
+                <section className="whatsapp-template-pane">
+                  <div className="template-section-head">
+                    <h3>Required mappings</h3>
+                  </div>
+                  <div className="whatsapp-mapping-list">
+                    {whatsappTemplateUseCases.filter((item) => item.id !== "custom").map((item) => {
+                      const mapping = whatsappTemplateData.mappings.find((row) => row.useCase === item.id);
+                      const activeKey = `${mapping?.templateName || ""}:${mapping?.languageCode || "en"}`;
+                      const approved = approvedTemplateNames.has(activeKey);
+                      const draftReady = whatsappTemplateData.drafts.some((draft) =>
+                        draft.useCase === item.id &&
+                        draft.templateName === mapping?.templateName &&
+                        draft.languageCode === (mapping?.languageCode || "en")
+                      );
+                      return (
+                        <div className={item.pdf ? "whatsapp-mapping-row document-template" : "whatsapp-mapping-row"} key={item.id}>
+                          <div className="mapping-main">
+                            <strong>{item.label}</strong>
+                            {item.help && <span>{item.help}</span>}
+                            <span>{mapping?.templateName || "Not mapped"} - {mapping?.languageCode || "en"}</span>
+                          </div>
+                          <span className={`status-pill ${approved ? "success" : mapping?.pendingTemplateName || draftReady ? "warning" : "danger"}`}>
+                            {approved ? "Approved" : mapping?.pendingTemplateName ? "Pending" : draftReady ? "Draft ready" : "Needs template"}
+                          </span>
+                          <button className="ghost-button small" disabled={Boolean(whatsappTemplateBusy)} onClick={() => selectWhatsAppUseCaseDraft(item.id)}>
+                            <FileText size={15} /> Edit
+                          </button>
+                          <select
+                            value={activeKey}
+                            onChange={(event) => {
+                              const [name, languageCode] = event.currentTarget.value.split(":");
+                              if (name) void mapApprovedWhatsAppTemplate(item.id, name, languageCode || "en");
+                            }}
+                          >
+                            {mapping?.templateName && <option value={activeKey}>{mapping.templateName} ({mapping.languageCode || "en"})</option>}
+                            <option value="">Select approved</option>
+                            {approvedWhatsAppTemplates.map((template) => (
+                              <option key={`${item.id}-${template.name}-${template.languageCode}`} value={`${template.name}:${template.languageCode}`}>
+                                {template.name} ({template.languageCode})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+
+                <section className="whatsapp-template-pane">
+                  <div className="template-section-head">
+                    <h3>Draft editor</h3>
+                    <button className="ghost-button small" onClick={() => { setSelectedWhatsAppDraftId(""); setWhatsAppDraftForm(emptyWhatsAppDraftForm()); }}>New draft</button>
+                  </div>
+                  <div className="template-guidance-card">
+                    <div>
+                      <strong>{whatsappUseCaseLabel(whatsappDraftForm.useCase)}</strong>
+                      <span>{whatsappUseCaseHelp(whatsappDraftForm.useCase) || "Write a customer-friendly WhatsApp template and submit it for Meta approval."}</span>
+                    </div>
+                    <button className="ghost-button small" disabled={Boolean(whatsappTemplateBusy)} onClick={() => applyWhatsAppReadyTemplate()}>
+                      <FileText size={15} /> Use ready-made text
+                    </button>
+                  </div>
+                  <div className="form-grid two">
+                    <label>Use case<select value={whatsappDraftForm.useCase} onChange={(event) => setWhatsAppUseCase(event.currentTarget.value as WhatsAppTemplateUseCase)}>{whatsappTemplateUseCases.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
+                    <label>Template name<input value={whatsappDraftForm.templateName} onChange={(event) => setWhatsAppDraftForm({ ...whatsappDraftForm, templateName: event.currentTarget.value })} /></label>
+                    <label>Language<input value={whatsappDraftForm.languageCode} onChange={(event) => setWhatsAppDraftForm({ ...whatsappDraftForm, languageCode: event.currentTarget.value })} /></label>
+                    <label>Category<select value={whatsappDraftForm.category} onChange={(event) => setWhatsAppDraftForm({ ...whatsappDraftForm, category: event.currentTarget.value as SaveWhatsAppTemplateDraftInput["category"] })}><option value="UTILITY">Utility</option><option value="MARKETING">Marketing</option><option value="AUTHENTICATION">Authentication</option></select></label>
+                    <div className={selectedUseCaseRequiresDocument ? "attachment-choice active wide-input" : "attachment-choice wide-input"}>
+                      <div>
+                        <Paperclip size={18} />
+                        <div>
+                          <strong>{selectedUseCaseRequiresDocument ? "PDF attachment enabled" : "Attachment"}</strong>
+                          <span>
+                            {selectedUseCaseRequiresDocument
+                              ? "This template uses a Document header. The app attaches the generated PDF when sending."
+                              : "Most normal reminders and chat messages should stay as no attachment."}
+                          </span>
+                        </div>
+                      </div>
+                      <label>
+                        Attachment mode
+                        <select
+                          value={selectedHeaderType}
+                          disabled={selectedUseCaseRequiresDocument}
+                          onChange={(event) => {
+                            const headerType = event.currentTarget.value as WhatsAppTemplateHeaderType;
+                            setWhatsAppDraftForm({ ...whatsappDraftForm, headerType, headerText: headerType === "text" ? whatsappDraftForm.headerText : "" });
+                          }}
+                        >
+                          <option value="none">No attachment</option>
+                          <option value="text">Text title only</option>
+                          {(selectedUseCaseRequiresDocument || whatsappDraftForm.useCase === "custom") && <option value="document">PDF/document attachment</option>}
+                        </select>
+                      </label>
+                    </div>
+                    {selectedHeaderType === "text" && !selectedUseCaseRequiresDocument && (
+                      <label className="wide-input">Title shown at top<input value={whatsappDraftForm.headerText || ""} onChange={(event) => setWhatsAppDraftForm({ ...whatsappDraftForm, headerText: event.currentTarget.value })} /></label>
+                    )}
+                    <label className="wide-input">Message body<textarea rows={8} value={whatsappDraftForm.bodyText} onChange={(event) => setWhatsAppDraftForm({ ...whatsappDraftForm, bodyText: event.currentTarget.value })} /></label>
+                    <label>Footer<input value={whatsappDraftForm.footerText || ""} onChange={(event) => setWhatsAppDraftForm({ ...whatsappDraftForm, footerText: event.currentTarget.value })} /></label>
+                    <label>Replacing approved template<input value={whatsappDraftForm.replacementOfName || ""} onChange={(event) => setWhatsAppDraftForm({ ...whatsappDraftForm, replacementOfName: event.currentTarget.value })} placeholder="Leave blank for new template" /></label>
+                    <label className="wide-input">Quick reply buttons<textarea rows={3} value={whatsappDraftForm.buttonsText} onChange={(event) => setWhatsAppDraftForm({ ...whatsappDraftForm, buttonsText: event.currentTarget.value })} placeholder="One button label per line" /></label>
+                  </div>
+                  <div className="template-token-row">
+                    {whatsappTemplateData.variables.filter((item) => item.active).map((variable) => (
+                      <button
+                        className="token-chip"
+                        key={variable.token}
+                        onClick={() => setWhatsAppDraftForm((current) => ({ ...current, bodyText: `${current.bodyText}${current.bodyText.endsWith(" ") || !current.bodyText ? "" : " "}{{${variable.token}}}` }))}
+                        title={variable.sampleValue}
+                      >
+                        <strong>{variable.label}</strong>
+                        <span>{`{{${variable.token}}}`}</span>
+                      </button>
+                    ))}
+                  </div>
+                  {!variableDensityOk && (
+                    <div className="inline-warning">
+                      This message has {templateVariableSlots} variable(s) but only {templateStaticWords} fixed word(s). Add more normal words or remove variables before submitting.
+                    </div>
+                  )}
+                  <div className="template-counters">
+                    <span className={bodyCounterOk ? "" : "danger-text"}>Body {whatsappDraftForm.bodyText.length}/1024</span>
+                    <span className={footerCounterOk ? "" : "danger-text"}>Footer {(whatsappDraftForm.footerText || "").length}/60</span>
+                    <span className={headerCounterOk ? "" : "danger-text"}>Title {selectedHeaderText.length}/60</span>
+                    <span className={buttonsCounterOk ? "" : "danger-text"}>Buttons {whatsappDraftForm.buttonsText.split(/\r?\n/).filter((row) => row.trim()).length}/10</span>
+                  </div>
+                  <div className="inline-actions">
+                    <button className="ghost-button" disabled={Boolean(whatsappTemplateBusy || !selectedTemplateDraftOk)} onClick={() => void saveWhatsAppTemplateDraft()}><Save size={17} /> Save draft</button>
+                    <button className="primary-action" disabled={Boolean(whatsappTemplateBusy || !selectedWhatsAppDraftId || !selectedTemplateDraftOk)} onClick={() => void submitWhatsAppTemplateDraft()}>Submit to YCloud</button>
+                  </div>
+                </section>
+              </div>
+
+              <div className="whatsapp-template-grid">
+                <section className="whatsapp-template-pane">
+                  <div className="template-section-head">
+                    <h3>Preview</h3>
+                  </div>
+                  <div className="form-grid two">
+                    <label>Customer<select value={previewCustomerId} onChange={(event) => setPreviewCustomerId(event.currentTarget.value)}>{previewCustomers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}</select></label>
+                    <label>Invoice<select value={previewInvoiceId} onChange={(event) => setPreviewInvoiceId(event.currentTarget.value)}>{previewInvoices.slice(0, 50).map((invoice) => <option key={invoice.id} value={invoice.id}>{invoice.invoiceNumber} - {invoice.customerName}</option>)}</select></label>
+                  </div>
+                  <div className="whatsapp-preview-box">
+                    <strong>{selectedUseCaseRequiresDocument || selectedHeaderType === "document" ? "PDF/document attachment" : selectedHeaderText || selectedUseCaseMapping?.templateName || "WhatsApp template"}</strong>
+                    {(selectedUseCaseRequiresDocument || selectedHeaderType === "document") && <span>Generated document will be attached by the app during send.</span>}
+                    <p>{whatsappPreviewBody}</p>
+                    {whatsappDraftForm.footerText && <span>{whatsappDraftForm.footerText}</span>}
+                  </div>
+                </section>
+
+                <section className="whatsapp-template-pane">
+                  <div className="template-section-head">
+                    <h3>Drafts</h3>
+                  </div>
+                  <div className="whatsapp-history-list">
+                    {whatsappTemplateData.drafts.slice(0, 8).map((draft) => (
+                      <button className={draft.id === selectedWhatsAppDraft?.id ? "history-row active" : "history-row"} key={draft.id} onClick={() => selectWhatsAppDraft(draft)}>
+                        <strong>{draft.templateName}</strong>
+                        <span>{whatsappUseCaseLabel(draft.useCase)} - {draft.status || "DRAFT"} {draft.rejectionReason ? `- ${draft.rejectionReason}` : ""}</span>
+                      </button>
+                    ))}
+                    {!whatsappTemplateData.drafts.length && <p className="muted">No drafts yet.</p>}
+                  </div>
+                </section>
+              </div>
+
+              <div className="whatsapp-template-grid">
+                <section className="whatsapp-template-pane">
+                  <div className="template-section-head">
+                    <h3>Submission history</h3>
+                  </div>
+                  <div className="whatsapp-history-list">
+                    {whatsappTemplateData.submissionHistory.slice(0, 6).map((history) => (
+                      <div className="history-row" key={history.id}>
+                        <strong>{history.templateName}</strong>
+                        <span>{history.providerStatus || "Submitted"} - {formatDateTime(history.createdAt)} {history.errorMessage ? `- ${history.errorMessage}` : ""}</span>
+                      </div>
+                    ))}
+                    {!whatsappTemplateData.submissionHistory.length && <p className="muted">No submissions yet.</p>}
+                  </div>
+                </section>
+
+                <section className="whatsapp-template-pane">
+                  <div className="template-section-head">
+                    <h3>Sync events</h3>
+                  </div>
+                  <div className="whatsapp-history-list">
+                    {whatsappTemplateData.syncEvents.slice(0, 6).map((event) => (
+                      <div className="history-row" key={event.id}>
+                        <strong>{event.eventType}</strong>
+                        <span>{event.message || event.status} - {formatDateTime(event.createdAt)}</span>
+                      </div>
+                    ))}
+                    {!whatsappTemplateData.syncEvents.length && <p className="muted">No sync events yet.</p>}
+                  </div>
+                </section>
+              </div>
+
+              {whatsappUnsentDrafts.length > 0 && (
+                <section className="whatsapp-template-pane unsent-drafts-pane">
+                  <div className="template-section-head">
+                    <h3>Unsent drafts</h3>
+                  </div>
+                  <div className="whatsapp-history-list">
+                    {whatsappUnsentDrafts.slice(0, 6).map((draft) => (
+                      <div className="history-row split" key={draft.id}>
+                        <div>
+                          <strong>{draft.customerName || draft.phone}</strong>
+                          <span>{draft.templateName || "WhatsApp message"} - {draft.reason}</span>
+                        </div>
+                        <button className="ghost-button small" disabled={Boolean(whatsappTemplateBusy)} onClick={() => void retryWhatsAppDraft(draft.id)}>Retry</button>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+            </div>
+          </section>
         )}
 
         {activeTab === "invoice" && (

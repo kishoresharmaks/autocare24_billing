@@ -1,4 +1,5 @@
 import { router } from "expo-router";
+import type { Href } from "expo-router";
 import { StyleSheet, Text, View } from "react-native";
 import { AppButton } from "../../src/components/AppButton";
 import { Screen } from "../../src/components/Screen";
@@ -37,6 +38,7 @@ export default function SettingsTab() {
         <Info label="Network" value={session.isOnline ? "Online" : "Offline"} />
       </View>
       <View style={[styles.actions, layout.isTablet ? styles.actionsWide : null]}>
+        <AppButton label="Change password" onPress={() => router.push("/change-password" as Href)} variant="secondary" style={layout.isTablet ? styles.actionWide : undefined} />
         <AppButton label="Logout user" onPress={handleLogout} variant="secondary" style={layout.isTablet ? styles.actionWide : undefined} />
         <AppButton label="Reset phone connection" onPress={handleClear} variant="danger" style={layout.isTablet ? styles.actionWide : undefined} />
       </View>

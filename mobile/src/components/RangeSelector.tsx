@@ -9,6 +9,7 @@ const options: Array<{ label: string; value: DateRangePreset }> = [
   { label: "7D", value: "7d" },
   { label: "30D", value: "30d" },
   { label: "90D", value: "90d" },
+  { label: "Month", value: "month" },
   { label: "All", value: "all" }
 ];
 
@@ -58,10 +59,10 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceStrong
   },
   wrapWide: {
-    minWidth: 220
+    minWidth: 276
   },
   wrapCustom: {
-    minWidth: 292
+    minWidth: 348
   },
   wrapCompact: {
     width: "100%"

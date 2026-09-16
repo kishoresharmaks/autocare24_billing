@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Autocare24 Reports",
+    "name": "Autocare24",
     "slug": "autocare24-reports",
     "version": "0.1.0",
     "platforms": [
@@ -11,11 +11,11 @@
       "policy": "sdkVersion"
     },
     "orientation": "portrait",
-    "icon": "./assets/autocare24-icon.png",
-    "scheme": "autocare24reports",
+    "icon": "./assets/app-icon.png",
+    "scheme": "autocare24",
     "userInterfaceStyle": "light",
     "splash": {
-      "image": "./assets/autocare24-logo.png",
+      "image": "./assets/autocare24-splash-full.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
     },
@@ -24,16 +24,16 @@
     ],
     "ios": {
       "supportsTablet": false,
-      "bundleIdentifier": "com.autocare24.reports",
+      "bundleIdentifier": "com.autocare24.app",
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
-      "package": "com.autocare24.reports",
+      "package": "com.autocare24.app",
       "versionCode": 1,
       "adaptiveIcon": {
-        "foregroundImage": "./assets/autocare24-icon.png",
+        "foregroundImage": "./assets/app-icon.png",
         "backgroundColor": "#ffffff"
       }
     },

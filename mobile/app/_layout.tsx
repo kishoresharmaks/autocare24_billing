@@ -14,6 +14,8 @@ export default function RootLayout() {
             <Stack.Screen name="index" />
             <Stack.Screen name="login" />
             <Stack.Screen name="(tabs)" />
+            <Stack.Screen name="change-password" />
+            <Stack.Screen name="invoice/new" />
             <Stack.Screen name="invoice/[id]" />
           </Stack>
         </SessionProvider>

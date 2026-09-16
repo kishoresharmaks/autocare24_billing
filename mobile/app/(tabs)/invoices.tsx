@@ -15,6 +15,7 @@ import { useRequirePermission } from "../../src/hooks/useRequireOwner";
 import { useSession } from "../../src/providers/SessionProvider";
 import { hasPermission } from "../../src/services/permissions";
 import type { InvoiceSummary } from "../../src/types/cloud";
+import { AppButton } from "../../src/components/AppButton";
 
 const SEARCH_DEBOUNCE_MS = 300;
 
@@ -22,6 +23,7 @@ export default function InvoicesTab() {
   const guard = useRequirePermission("billing.view");
   const session = useSession();
   const canExport = hasPermission(session.user, "reports.export");
+  const canCreate = hasPermission(session.user, "billing.create");
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
 
@@ -72,6 +74,7 @@ export default function InvoicesTab() {
     <Screen
       title="Invoices"
       subtitle="Search and view synced cloud invoices."
+      right={canCreate ? <AppButton label="Create Invoice" onPress={() => router.push("/invoice/new")} style={styles.createButton} /> : undefined}
       refreshing={invoicesQuery.isFetching}
       onRefresh={invoicesQuery.refetch}
       showHome
@@ -260,5 +263,8 @@ const styles = StyleSheet.create({
     color: colors.danger,
     fontSize: 13,
     fontWeight: "700"
+  },
+  createButton: {
+    minWidth: 132
   }
 });

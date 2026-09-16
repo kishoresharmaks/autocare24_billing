@@ -59,6 +59,9 @@
         defaultPrice REAL NOT NULL,
         gstRate REAL NOT NULL,
         sacCode TEXT,
+        warrantyEnabled INTEGER NOT NULL DEFAULT 0,
+        warrantyDurationMonths INTEGER NOT NULL DEFAULT 0,
+        warrantyText TEXT,
         active INTEGER NOT NULL DEFAULT 1,
         createdAt TEXT NOT NULL
       );
@@ -122,6 +125,11 @@
         unitPrice REAL NOT NULL,
         gstRate REAL NOT NULL,
         sacCode TEXT,
+        warrantyIncluded INTEGER NOT NULL DEFAULT 0,
+        warrantyDurationMonths INTEGER NOT NULL DEFAULT 0,
+        warrantyText TEXT,
+        warrantyStartDate TEXT,
+        warrantyEndDate TEXT,
         lineSubTotal REAL NOT NULL,
         lineTax REAL NOT NULL,
         lineTotal REAL NOT NULL,
@@ -175,6 +183,11 @@
         unitPrice REAL NOT NULL,
         gstRate REAL NOT NULL,
         sacCode TEXT,
+        warrantyIncluded INTEGER NOT NULL DEFAULT 0,
+        warrantyDurationMonths INTEGER NOT NULL DEFAULT 0,
+        warrantyText TEXT,
+        warrantyStartDate TEXT,
+        warrantyEndDate TEXT,
         lineSubTotal REAL NOT NULL,
         lineTax REAL NOT NULL,
         lineTotal REAL NOT NULL,
@@ -350,6 +363,11 @@
         unitPrice REAL NOT NULL,
         gstRate REAL NOT NULL,
         sacCode TEXT,
+        warrantyIncluded INTEGER NOT NULL DEFAULT 0,
+        warrantyDurationMonths INTEGER NOT NULL DEFAULT 0,
+        warrantyText TEXT,
+        warrantyStartDate TEXT,
+        warrantyEndDate TEXT,
         lineSubTotal REAL NOT NULL,
         lineTax REAL NOT NULL,
         lineTotal REAL NOT NULL,
@@ -493,12 +511,55 @@
         approvalStatus TEXT NOT NULL DEFAULT 'APPROVED',
         lastStatus TEXT NOT NULL DEFAULT 'disconnected'
       );
+
+      CREATE TABLE IF NOT EXISTS whatsapp_template_mapping_cache (
+        useCase TEXT PRIMARY KEY,
+        templateName TEXT NOT NULL,
+        languageCode TEXT NOT NULL,
+        variableTokensJson TEXT NOT NULL,
+        requiresDocumentHeader INTEGER NOT NULL DEFAULT 0,
+        pendingTemplateName TEXT NOT NULL DEFAULT '',
+        pendingLanguageCode TEXT NOT NULL DEFAULT '',
+        updatedAt TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS whatsapp_template_sync_event_cache (
+        id INTEGER PRIMARY KEY,
+        eventType TEXT NOT NULL,
+        templateName TEXT NOT NULL DEFAULT '',
+        languageCode TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT '',
+        message TEXT NOT NULL DEFAULT '',
+        createdAt TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS whatsapp_unsent_drafts (
+        id TEXT PRIMARY KEY,
+        phone TEXT NOT NULL,
+        customerName TEXT NOT NULL DEFAULT '',
+        templateName TEXT NOT NULL DEFAULT '',
+        languageCode TEXT NOT NULL DEFAULT 'en',
+        message TEXT NOT NULL DEFAULT '',
+        reason TEXT NOT NULL DEFAULT '',
+        sourceType TEXT NOT NULL DEFAULT '',
+        sourceId TEXT NOT NULL DEFAULT '',
+        payloadJson TEXT NOT NULL,
+        createdAt TEXT NOT NULL
+      );
 `;
 
 export const SCHEMA_COLUMNS = [
   { table: "customers", column: "customerCode", definition: "TEXT" },
   { table: "users", column: "accessRoleId", definition: "TEXT" },
+  { table: "services", column: "warrantyEnabled", definition: "INTEGER NOT NULL DEFAULT 0" },
+  { table: "services", column: "warrantyDurationMonths", definition: "INTEGER NOT NULL DEFAULT 0" },
+  { table: "services", column: "warrantyText", definition: "TEXT" },
   { table: "invoice_items", column: "inventoryItemId", definition: "TEXT" },
+  { table: "invoice_items", column: "warrantyIncluded", definition: "INTEGER NOT NULL DEFAULT 0" },
+  { table: "invoice_items", column: "warrantyDurationMonths", definition: "INTEGER NOT NULL DEFAULT 0" },
+  { table: "invoice_items", column: "warrantyText", definition: "TEXT" },
+  { table: "invoice_items", column: "warrantyStartDate", definition: "TEXT" },
+  { table: "invoice_items", column: "warrantyEndDate", definition: "TEXT" },
   { table: "invoices", column: "jobCardId", definition: "TEXT" },
   { table: "invoices", column: "invoiceStatus", definition: "TEXT NOT NULL DEFAULT 'finalized'" },
   { table: "invoices", column: "cloudSyncStatus", definition: "TEXT NOT NULL DEFAULT 'local_only'" },
@@ -522,6 +583,16 @@ export const SCHEMA_COLUMNS = [
   { table: "quotations", column: "vehicleModel", definition: "TEXT" },
   { table: "quotations", column: "vehicleColor", definition: "TEXT" },
   { table: "quotation_items", column: "inventoryItemId", definition: "TEXT" },
+  { table: "quotation_items", column: "warrantyIncluded", definition: "INTEGER NOT NULL DEFAULT 0" },
+  { table: "quotation_items", column: "warrantyDurationMonths", definition: "INTEGER NOT NULL DEFAULT 0" },
+  { table: "quotation_items", column: "warrantyText", definition: "TEXT" },
+  { table: "quotation_items", column: "warrantyStartDate", definition: "TEXT" },
+  { table: "quotation_items", column: "warrantyEndDate", definition: "TEXT" },
+  { table: "job_card_items", column: "warrantyIncluded", definition: "INTEGER NOT NULL DEFAULT 0" },
+  { table: "job_card_items", column: "warrantyDurationMonths", definition: "INTEGER NOT NULL DEFAULT 0" },
+  { table: "job_card_items", column: "warrantyText", definition: "TEXT" },
+  { table: "job_card_items", column: "warrantyStartDate", definition: "TEXT" },
+  { table: "job_card_items", column: "warrantyEndDate", definition: "TEXT" },
   { table: "vehicles", column: "vehicleType", definition: "TEXT NOT NULL DEFAULT 'car'" },
   { table: "enquiries", column: "vehicleType", definition: "TEXT NOT NULL DEFAULT 'car'" },
   { table: "backups", column: "cloudSnapshotIncluded", definition: "INTEGER NOT NULL DEFAULT 0" },

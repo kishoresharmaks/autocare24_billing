@@ -2,6 +2,7 @@
 import QRCode from "qrcode";
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import type { BusinessSettings, InvoiceDetail, InvoiceItem, InvoicePaperSize, VehicleType } from "../../../shared/types";
+import { warrantyDurationLabel } from "../../../shared/warranty";
 
 type BillingDocumentKind = "invoice" | "quotation";
 
@@ -40,7 +41,17 @@ const paginationProfiles: Record<InvoicePaperSize, { single: number; first: numb
   Legal: { single: 14, first: 24, middle: 38, final: 18 }
 };
 
-const estimateInvoiceItemUnits = (item: InvoiceItem) => Math.max(1, Math.ceil((item.description.length || 1) / 42));
+const warrantyLine = (item: InvoiceItem) => {
+  if (!item.warrantyIncluded) return "";
+  const label = warrantyDurationLabel(item.warrantyDurationMonths || 0);
+  if (!label && !item.warrantyText?.trim()) return "";
+  const endDate = item.warrantyEndDate ? formatInvoiceDate(item.warrantyEndDate) : "";
+  return `Warranty: ${item.warrantyText?.trim() || label}${endDate ? `, valid until ${endDate}` : ""}`;
+};
+const estimateInvoiceItemUnits = (item: InvoiceItem) => {
+  const warranty = warrantyLine(item);
+  return Math.max(1, Math.ceil(((item.description.length || 1) + warranty.length) / 42) + (warranty ? 1 : 0));
+};
 
 const itemUnits = (items: InvoiceItem[]) => items.reduce((sum, item) => sum + estimateInvoiceItemUnits(item), 0);
 
@@ -457,7 +468,10 @@ function PremiumItemsTable({ invoice, settings, items, startIndex }: { invoice: 
         {items.map((item, index) => (
           <tr key={item.id}>
             <td>{startIndex + index + 1}</td>
-            <td>{item.description}</td>
+            <td>
+              <div className="premium-item-description">{item.description}</div>
+              {warrantyLine(item) && <div className="premium-item-warranty">{warrantyLine(item)}</div>}
+            </td>
             <td>{item.quantity}</td>
             <td>{money(item.unitPrice).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
             {showItemGstRate && <td>{item.gstRate}%</td>}

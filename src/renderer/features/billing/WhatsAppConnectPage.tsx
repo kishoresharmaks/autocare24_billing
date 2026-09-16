@@ -3,12 +3,17 @@ import {
   CheckCircle2,
   Clock3,
   MessageCircle,
+  Pencil,
+  Plus,
   RefreshCw,
+  Save,
   Search,
   Send,
   ShieldCheck,
   Sparkles,
-  UserRound
+  Trash2,
+  UserRound,
+  X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
@@ -31,6 +36,57 @@ type WhatsAppContact = CustomerWithVehicles & {
   whatsappPhone: WhatsAppPhone;
   conversation?: WhatsAppConversation;
   searchText: string;
+};
+
+type WhatsAppQuickReply = {
+  id: string;
+  title: string;
+  body: string;
+};
+
+const QUICK_REPLY_STORAGE_KEY = "autocare24.whatsapp.quickReplies.v1";
+
+const DEFAULT_QUICK_REPLIES: WhatsAppQuickReply[] = [
+  {
+    id: "greeting",
+    title: "Greeting",
+    body: "Hi {customer},\nThis is {business}. How can we help you today?"
+  },
+  {
+    id: "service-update",
+    title: "Service update",
+    body: "Hi {customer},\nYour {vehicle} service update is ready. Please let us know if you need any changes."
+  },
+  {
+    id: "payment-reminder",
+    title: "Payment reminder",
+    body: "Hi {customer},\nThis is a payment reminder from {business}. Please contact us for the pending balance details."
+  }
+];
+
+const safeQuickReplies = (value: unknown): WhatsAppQuickReply[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((row) => {
+      const item = row as Partial<WhatsAppQuickReply>;
+      return {
+        id: String(item.id || ""),
+        title: String(item.title || "").trim(),
+        body: String(item.body || "").trim()
+      };
+    })
+    .filter((row) => row.id && row.title && row.body)
+    .slice(0, 30);
+};
+
+const readQuickReplies = () => {
+  if (typeof window === "undefined") return DEFAULT_QUICK_REPLIES;
+  try {
+    const stored = safeQuickReplies(JSON.parse(window.localStorage.getItem(QUICK_REPLY_STORAGE_KEY) || "[]"));
+    return stored.length ? stored : DEFAULT_QUICK_REPLIES;
+  } catch {
+    return DEFAULT_QUICK_REPLIES;
+  }
 };
 
 const normalizeWhatsAppPhone = (phone: string | undefined | null): WhatsAppPhone => {
@@ -58,6 +114,21 @@ const customerInitials = (name: string) => {
 const defaultMessage = (customer: CustomerWithVehicles | null, businessName: string) =>
   customer ? [`Hi ${customer.name || "Customer"},`, `This is ${businessName || "your business"}.`].join("\n") : "";
 
+const contactPreview = (customer: WhatsAppContact) => {
+  if (customer.conversation?.lastMessagePreview) return customer.conversation.lastMessagePreview;
+  return [
+    customer.customerCode,
+    customer.whatsappPhone.display,
+    plural(customer.vehicles.length, "vehicle")
+  ].filter(Boolean).join(" - ");
+};
+
+const renderQuickReply = (body: string, customer: CustomerWithVehicles | null, businessName: string, vehicles: string) =>
+  body
+    .replace(/\{customer\}/gi, customer?.name || "Customer")
+    .replace(/\{business\}/gi, businessName || "your business")
+    .replace(/\{vehicle\}/gi, vehicles || "vehicle");
+
 const formatTime = (value: string) => {
   if (!value) return "";
   const date = new Date(value);
@@ -69,11 +140,70 @@ const formatTemplateLabel = (template: WhatsAppTemplate) =>
   `${template.name}${template.languageCode ? ` (${template.languageCode})` : ""}`;
 
 const templateKey = (template: WhatsAppTemplate) => `${template.name}::${template.languageCode}`;
+const WHATSAPP_TEMPLATE_EMPTY_VALUE = "-";
+
+type WhatsAppTemplateComponent = {
+  type?: unknown;
+  text?: unknown;
+  example?: { body_text?: unknown };
+  parameters?: unknown;
+  localizable_params?: unknown;
+};
+
+const templateBodyParameterCount = (template: WhatsAppTemplate | null) => {
+  const body = template?.components.find((component) =>
+    String((component as WhatsAppTemplateComponent)?.type || "").toUpperCase() === "BODY"
+  ) as WhatsAppTemplateComponent | undefined;
+  if (!body) return 0;
+  const text = String(body.text || "");
+  const textMatches = text.match(/{{\s*[^{}\s]+\s*}}/g);
+  if (textMatches?.length) return textMatches.length;
+  const exampleRows = body.example?.body_text;
+  if (Array.isArray(exampleRows)) {
+    const firstRow = exampleRows[0];
+    return Array.isArray(firstRow) ? firstRow.length : exampleRows.length;
+  }
+  if (Array.isArray(body.parameters)) return body.parameters.length;
+  if (Array.isArray(body.localizable_params)) return body.localizable_params.length;
+  return 0;
+};
+
+const templateValue = (value: unknown, fallback = WHATSAPP_TEMPLATE_EMPTY_VALUE) => {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text || fallback;
+};
+
+const chatTemplateVariables = (
+  template: WhatsAppTemplate | null,
+  customer: CustomerWithVehicles,
+  businessName: string,
+  vehicles: string,
+  messageText: string
+) => {
+  const customerName = templateValue(customer.name, "Customer");
+  const business = templateValue(businessName, "Autocare24");
+  const vehicle = templateValue(vehicles);
+  const message = templateValue(messageText);
+  const expected = templateBodyParameterCount(template);
+  const values = expected > 0 && expected <= 3
+    ? [customerName, business, message]
+    : [customerName, business, vehicle, message];
+  if (expected <= 0) return values;
+  return [...values, ...Array(Math.max(0, expected - values.length)).fill(WHATSAPP_TEMPLATE_EMPTY_VALUE)].slice(0, expected);
+};
 
 const statusLabel = (status: string) =>
   status
     .replace(/[_-]/g, " ")
     .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+const chatDeleteErrorMessage = (error: unknown, fallback: string) => {
+  const message = error instanceof Error ? error.message : String(error || "");
+  if (/No handler registered for 'whatsapp:(deleteMessage|clearConversationHistory)'/i.test(message)) {
+    return "Restart the app once to enable the new WhatsApp delete option.";
+  }
+  return message || fallback;
+};
 
 export function WhatsAppConnectPage({
   settings,
@@ -97,8 +227,14 @@ export function WhatsAppConnectPage({
   const [loading, setLoading] = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
+  const [historyBusy, setHistoryBusy] = useState("");
   const [syncingTemplates, setSyncingTemplates] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [quickReplies, setQuickReplies] = useState<WhatsAppQuickReply[]>(readQuickReplies);
+  const [quickReplyEditorOpen, setQuickReplyEditorOpen] = useState(false);
+  const [editingQuickReplyId, setEditingQuickReplyId] = useState("");
+  const [quickReplyTitle, setQuickReplyTitle] = useState("");
+  const [quickReplyBody, setQuickReplyBody] = useState("");
 
   const approvedTemplates = useMemo(
     () => templates.filter((template) => template.status.toUpperCase() === "APPROVED"),
@@ -158,6 +294,26 @@ export function WhatsAppConnectPage({
   const selectedTemplate = approvedTemplates.find((template) => templateKey(template) === selectedTemplateKey) || approvedTemplates[0] || null;
   const canSendText = Boolean(selectedConversation?.canSendFreeform);
   const apiReady = Boolean(status?.configured);
+  const providerLabel = status?.provider === "ycloud" ? "YCloud" : "Meta";
+  const statusMessage = status?.message || "WhatsApp Business API status is not loaded yet.";
+  const customRepliesReady = Boolean(selected && canSendText);
+  const sendDisabled = Boolean(
+    sending ||
+    !selected ||
+    !message.trim() ||
+    !apiReady ||
+    (mode === "text" && !canSendText) ||
+    (mode === "template" && !selectedTemplate)
+  );
+  const sendDisabledReason = !selected
+    ? "Select a customer first."
+    : !apiReady
+      ? status?.message || "WhatsApp Business API not configured."
+      : mode === "text" && !canSendText
+        ? "Customer reply required before sending custom replies."
+        : mode === "template" && !selectedTemplate
+          ? "Sync and select an approved WhatsApp template first."
+          : "";
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -187,6 +343,14 @@ export function WhatsAppConnectPage({
   useEffect(() => {
     void load();
   }, [load, refreshKey]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(QUICK_REPLY_STORAGE_KEY, JSON.stringify(quickReplies));
+    } catch {
+      // Local quick replies are a convenience feature; messaging still works without storage.
+    }
+  }, [quickReplies]);
 
   useEffect(() => {
     if (!contacts.length) {
@@ -235,11 +399,94 @@ export function WhatsAppConnectPage({
     }
   };
 
+  const startNewQuickReply = () => {
+    setEditingQuickReplyId("");
+    setQuickReplyTitle("");
+    setQuickReplyBody("");
+    setQuickReplyEditorOpen(true);
+  };
+
+  const editQuickReply = (reply: WhatsAppQuickReply) => {
+    setEditingQuickReplyId(reply.id);
+    setQuickReplyTitle(reply.title);
+    setQuickReplyBody(reply.body);
+    setQuickReplyEditorOpen(true);
+  };
+
+  const closeQuickReplyEditor = () => {
+    setQuickReplyEditorOpen(false);
+    setEditingQuickReplyId("");
+    setQuickReplyTitle("");
+    setQuickReplyBody("");
+  };
+
+  const saveQuickReply = () => {
+    const title = quickReplyTitle.trim();
+    const body = quickReplyBody.trim();
+    if (!title || !body) return notify("Reply name and message are required.");
+    setQuickReplies((current) => {
+      if (editingQuickReplyId) {
+        return current.map((reply) => (reply.id === editingQuickReplyId ? { ...reply, title, body } : reply));
+      }
+      return [{ id: `reply-${Date.now()}`, title, body }, ...current].slice(0, 30);
+    });
+    closeQuickReplyEditor();
+    notify("Custom WhatsApp reply saved.");
+  };
+
+  const deleteQuickReply = (replyId: string) => {
+    setQuickReplies((current) => current.filter((reply) => reply.id !== replyId));
+    if (editingQuickReplyId === replyId) closeQuickReplyEditor();
+    notify("Custom WhatsApp reply removed.");
+  };
+
+  const applyQuickReply = (reply: WhatsAppQuickReply) => {
+    if (!selected) return notify("Select a customer with WhatsApp number first.");
+    if (!canSendText) {
+      return notify("Custom replies unlock after the customer replies. Send an approved template first.");
+    }
+    setMessage(renderQuickReply(reply.body, selected, settings.businessName, selectedVehicleSummary));
+    setMode("text");
+  };
+
   const mergeConversation = (conversation: WhatsAppConversation) => {
     setConversations((current) => {
       const exists = current.some((row) => row.id === conversation.id);
       return exists ? current.map((row) => (row.id === conversation.id ? conversation : row)) : [conversation, ...current];
     });
+  };
+
+  const deleteMessage = async (row: WhatsAppMessage) => {
+    if (!selectedConversation) return notify("Select a chat first.");
+    if (!window.confirm("Delete this message from app chat history?")) return;
+    setHistoryBusy(`message:${row.id}`);
+    try {
+      const result = await window.autocare.deleteWhatsAppMessage(selectedConversation.id, row.id);
+      setMessages((current) => current.filter((messageRow) => messageRow.id !== row.id));
+      mergeConversation(result.conversation);
+      notify("WhatsApp message deleted from app history.");
+    } catch (error) {
+      notify(chatDeleteErrorMessage(error, "Unable to delete WhatsApp message."));
+    } finally {
+      setHistoryBusy("");
+    }
+  };
+
+  const clearChatHistory = async () => {
+    if (!selectedConversation) return notify("Select a chat first.");
+    if (!messages.length) return notify("No messages to delete in this chat.");
+    if (!window.confirm("Delete all messages in this chat from app history?")) return;
+    setHistoryBusy("conversation");
+    try {
+      const result = await window.autocare.clearWhatsAppConversationHistory(selectedConversation.id);
+      setMessages([]);
+      mergeConversation(result.conversation);
+      notify(`Deleted ${plural(result.deletedCount, "WhatsApp message")} from app history.`);
+    } catch (error) {
+      notify(chatDeleteErrorMessage(error, "Unable to clear WhatsApp chat history."));
+    } finally {
+      setHistoryBusy("");
+    }
   };
 
   const sendMessage = async () => {
@@ -248,7 +495,9 @@ export function WhatsAppConnectPage({
     const trimmed = message.trim();
     if (!trimmed) return notify("Message is required.");
     if (mode === "text" && !canSendText) return notify("Use an approved template first. Normal replies unlock after the customer messages you.");
-    if (mode === "template" && !selectedTemplate) return notify("Sync and select an approved WhatsApp template first.");
+    if (mode === "template" && !selectedTemplate) {
+      return notify(canSendText ? "Sync and select an approved WhatsApp template first." : "Send an approved template first. Custom replies unlock after the customer replies.");
+    }
     setSending(true);
     try {
       const result = await window.autocare.sendWhatsAppMessage({
@@ -261,12 +510,7 @@ export function WhatsAppConnectPage({
           ? {
               templateName: selectedTemplate.name,
               languageCode: selectedTemplate.languageCode,
-              variables: [
-                selected.name,
-                settings.businessName || "Autocare24",
-                selectedVehicleSummary,
-                trimmed
-              ].filter(Boolean)
+              variables: chatTemplateVariables(selectedTemplate, selected, settings.businessName, selectedVehicleSummary, trimmed)
             }
           : {}),
         source: { type: "customer", id: selected.id }
@@ -316,8 +560,8 @@ export function WhatsAppConnectPage({
             >
               <span className="whatsapp-contact-avatar">{customerInitials(customer.name)}</span>
               <span className="whatsapp-contact-main">
-                <strong>{customer.customerCode ? `${customer.customerCode} - ` : ""}{customer.name}</strong>
-                <span>{customer.conversation?.lastMessagePreview || `${customer.whatsappPhone.display} - ${plural(customer.vehicles.length, "vehicle")}`}</span>
+                <strong>{customer.name || customer.whatsappPhone.display}</strong>
+                <span>{contactPreview(customer)}</span>
               </span>
               <span className="whatsapp-contact-meta">
                 {customer.conversation?.lastMessageAt && <em>{formatTime(customer.conversation.lastMessageAt)}</em>}
@@ -337,12 +581,13 @@ export function WhatsAppConnectPage({
         <div className="whatsapp-business-status-row">
           <span className={apiReady ? "whatsapp-api-status connected" : "whatsapp-api-status warning"}>
             {apiReady ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
-            {apiReady ? "Business API connected" : "Business API not configured"}
+            {apiReady ? `${providerLabel} connected` : `${providerLabel} not configured`}
           </span>
           <span className={status?.webhookReady ? "whatsapp-api-status connected" : "whatsapp-api-status muted"}>
             <ShieldCheck size={16} />
             {status?.webhookReady ? "Webhook ready" : "Webhook pending"}
           </span>
+          <span className="whatsapp-status-message" title={statusMessage}>{statusMessage}</span>
           <button className="ghost-button small" onClick={() => void syncTemplates()} disabled={syncingTemplates || !apiReady}>
             <RefreshCw size={15} />
             {syncingTemplates ? "Syncing" : "Sync templates"}
@@ -360,6 +605,15 @@ export function WhatsAppConnectPage({
             </p>
           </div>
           <div className="whatsapp-chat-actions">
+            <button
+              className="whatsapp-icon-button danger"
+              onClick={() => void clearChatHistory()}
+              disabled={!selectedConversation || !messages.length || Boolean(historyBusy)}
+              title="Clear chat history"
+              aria-label="Clear chat history"
+            >
+              <Trash2 size={18} />
+            </button>
             <button className="whatsapp-icon-button" onClick={() => void load()} disabled={loading} title="Refresh WhatsApp data" aria-label="Refresh WhatsApp data">
               <RefreshCw size={19} />
             </button>
@@ -387,10 +641,22 @@ export function WhatsAppConnectPage({
               {messages.map((row) => (
                 <div key={row.id} className={row.direction === "inbound" ? "whatsapp-message-bubble incoming" : "whatsapp-message-bubble outgoing"}>
                   <span>{row.textBody || (row.templateName ? `Template: ${row.templateName}` : "WhatsApp message")}</span>
-                  <small className={row.status === "failed" ? "failed" : ""}>
-                    <Clock3 size={13} />
-                    {[formatTime(row.timestamp || row.createdAt), statusLabel(row.status), row.errorMessage].filter(Boolean).join(" - ")}
-                  </small>
+                  <div className="whatsapp-message-meta-row">
+                    <small className={row.status === "failed" ? "failed" : ""}>
+                      <Clock3 size={13} />
+                      {[formatTime(row.timestamp || row.createdAt), statusLabel(row.status), row.errorMessage].filter(Boolean).join(" - ")}
+                    </small>
+                    <button
+                      type="button"
+                      className="whatsapp-message-delete"
+                      onClick={() => void deleteMessage(row)}
+                      disabled={Boolean(historyBusy)}
+                      title="Delete message"
+                      aria-label="Delete message"
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </div>
                 </div>
               ))}
             </>
@@ -427,6 +693,55 @@ export function WhatsAppConnectPage({
           {!canSendText && <span className="whatsapp-policy-note">Template required until customer replies.</span>}
         </div>
 
+        <div className="whatsapp-quick-replies">
+          <div className="whatsapp-quick-replies-head">
+            <span>
+              <MessageCircle size={15} />
+              Custom replies
+            </span>
+            {!canSendText && selected && <em>Customer reply needed</em>}
+            <button type="button" onClick={startNewQuickReply}>
+              <Plus size={15} />
+              New
+            </button>
+          </div>
+          <div className="whatsapp-quick-reply-list">
+            {quickReplies.map((reply) => (
+              <span key={reply.id} className="whatsapp-quick-reply-chip">
+                <button
+                  type="button"
+                  onClick={() => applyQuickReply(reply)}
+                  disabled={!customRepliesReady}
+                  title={customRepliesReady ? reply.body : "Customer reply required before sending custom replies."}
+                >
+                  {reply.title}
+                </button>
+                <button type="button" className="whatsapp-quick-reply-edit" onClick={() => editQuickReply(reply)} title="Edit reply" aria-label={`Edit ${reply.title}`}>
+                  <Pencil size={14} />
+                </button>
+              </span>
+            ))}
+          </div>
+          {quickReplyEditorOpen && (
+            <div className="whatsapp-quick-reply-editor">
+              <input value={quickReplyTitle} onChange={(event) => setQuickReplyTitle(event.currentTarget.value)} placeholder="Reply name" />
+              <textarea value={quickReplyBody} onChange={(event) => setQuickReplyBody(event.currentTarget.value)} placeholder="Message" />
+              <button type="button" className="save" onClick={saveQuickReply}>
+                <Save size={15} />
+                Save
+              </button>
+              {editingQuickReplyId && (
+                <button type="button" className="danger" onClick={() => deleteQuickReply(editingQuickReplyId)} title="Delete reply" aria-label="Delete reply">
+                  <Trash2 size={15} />
+                </button>
+              )}
+              <button type="button" className="ghost" onClick={closeQuickReplyEditor} title="Close" aria-label="Close custom reply editor">
+                <X size={15} />
+              </button>
+            </div>
+          )}
+        </div>
+
         <div className="whatsapp-custom-composer">
           <textarea
             value={message}
@@ -434,7 +749,7 @@ export function WhatsAppConnectPage({
             onChange={(event) => setMessage(event.currentTarget.value)}
             placeholder={mode === "template" ? "Template variables / preview message" : "Type a reply"}
           />
-          <button className="whatsapp-send-button" onClick={() => void sendMessage()} disabled={sending || !selected || !message.trim() || !apiReady}>
+          <button className="whatsapp-send-button" onClick={() => void sendMessage()} disabled={sendDisabled} title={sendDisabledReason}>
             <Send size={21} />
             <span>{sending ? "Sending" : mode === "template" ? "Send Template" : "Send Reply"}</span>
           </button>

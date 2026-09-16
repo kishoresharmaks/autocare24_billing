@@ -379,6 +379,9 @@ export interface ServiceItem {
   defaultPrice: number;
   gstRate: number;
   sacCode: string;
+  warrantyEnabled: boolean;
+  warrantyDurationMonths: number;
+  warrantyText: string;
   active: boolean;
   createdAt: string;
 }
@@ -391,6 +394,11 @@ export interface InvoiceItemInput {
   unitPrice: number;
   gstRate: number;
   sacCode: string;
+  warrantyIncluded?: boolean;
+  warrantyDurationMonths?: number;
+  warrantyText?: string;
+  warrantyStartDate?: string;
+  warrantyEndDate?: string;
 }
 
 export interface InvoiceItem extends InvoiceItemInput {
@@ -500,6 +508,27 @@ export interface InvoiceDetail extends InvoiceSummary {
   vehicle: Vehicle;
   items: InvoiceItem[];
   payments: Payment[];
+}
+
+export interface WarrantyRecord {
+  invoiceId: string;
+  invoiceNumber: string;
+  invoiceDate: string;
+  invoiceStatus: InvoiceStatus;
+  itemId: string;
+  serviceId: string;
+  description: string;
+  customerId: string;
+  customerCode: string;
+  customerName: string;
+  customerPhone: string;
+  vehicleType: VehicleType;
+  vehicleNumber: string;
+  warrantyDurationMonths: number;
+  warrantyText: string;
+  warrantyStartDate: string;
+  warrantyEndDate: string;
+  status: "active" | "expiring" | "expired";
 }
 
 export interface Payment {
@@ -843,14 +872,46 @@ export type WhatsAppMessageMode = "text" | "template";
 export type WhatsAppMessageDirection = "inbound" | "outbound";
 export type WhatsAppMessageStatus = "queued" | "sent" | "delivered" | "read" | "failed" | "received";
 
+export type WhatsAppProvider = "meta" | "ycloud";
+
+export interface WhatsAppProviderConfig {
+  enabled: boolean;
+  provider: WhatsAppProvider;
+  graphBaseUrl: string;
+  graphVersion: string;
+  accessToken: string;
+  hasAccessToken?: boolean;
+  phoneNumberId: string;
+  businessAccountId: string;
+  webhookVerifyToken: string;
+  hasWebhookVerifyToken?: boolean;
+  appSecret: string;
+  hasAppSecret?: boolean;
+  displayPhoneNumber: string;
+  ycloudApiBaseUrl: string;
+  ycloudApiKey: string;
+  hasYCloudApiKey?: boolean;
+  ycloudFromPhone: string;
+  ycloudWabaId: string;
+  ycloudWebhookSecret: string;
+  hasYCloudWebhookSecret?: boolean;
+}
+
+export interface WhatsAppConfigResult {
+  config: WhatsAppProviderConfig;
+  status: WhatsAppBusinessStatus;
+}
+
 export interface WhatsAppBusinessStatus {
   enabled: boolean;
   configured: boolean;
   webhookReady: boolean;
+  provider?: WhatsAppProvider;
   phoneNumberId: string;
   businessAccountId: string;
   displayPhoneNumber: string;
   graphVersion: string;
+  missingConfig?: string[];
   templatesCount: number;
   lastTemplateSyncAt: string;
   webhookVerifiedAt: string;
@@ -864,6 +925,152 @@ export interface WhatsAppTemplate {
   category: string;
   components: unknown[];
   updatedAt: string;
+}
+
+export type WhatsAppTemplateUseCase = "invoice" | "invoice_pdf" | "due_reminder" | "quotation" | "job_card_status" | "job_card_pdf" | "customer_chat" | "custom";
+export type WhatsAppTemplateHeaderType = "none" | "text" | "document";
+export type WhatsAppTemplateCategory = "UTILITY" | "MARKETING" | "AUTHENTICATION";
+
+export interface WhatsAppTemplateVariable {
+  token: string;
+  label: string;
+  sampleValue: string;
+  sortOrder: number;
+  active: boolean;
+}
+
+export interface WhatsAppTemplateButton {
+  type: "QUICK_REPLY" | "PHONE_NUMBER" | "URL";
+  text: string;
+  value?: string;
+}
+
+export interface WhatsAppTemplateDraft {
+  id: string;
+  useCase: WhatsAppTemplateUseCase;
+  templateName: string;
+  languageCode: string;
+  category: WhatsAppTemplateCategory;
+  headerType: WhatsAppTemplateHeaderType;
+  headerText: string;
+  bodyText: string;
+  footerText: string;
+  buttons: WhatsAppTemplateButton[];
+  variableTokens: string[];
+  status: string;
+  providerTemplateName: string;
+  providerStatus: string;
+  rejectionReason: string;
+  replacementOfName: string;
+  submittedByUserId: string;
+  submittedAt: string;
+  approvedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveWhatsAppTemplateDraftInput {
+  id?: string;
+  useCase: WhatsAppTemplateUseCase;
+  templateName: string;
+  languageCode: string;
+  category: WhatsAppTemplateCategory;
+  headerType: WhatsAppTemplateHeaderType;
+  headerText?: string;
+  bodyText: string;
+  footerText?: string;
+  buttons?: WhatsAppTemplateButton[];
+  variableTokens?: string[];
+  replacementOfName?: string;
+}
+
+export interface WhatsAppTemplateMapping {
+  useCase: WhatsAppTemplateUseCase;
+  templateName: string;
+  languageCode: string;
+  variableTokens: string[];
+  requiresDocumentHeader: boolean;
+  pendingTemplateName: string;
+  pendingLanguageCode: string;
+  updatedAt: string;
+}
+
+export interface SaveWhatsAppTemplateMappingInput {
+  useCase: WhatsAppTemplateUseCase;
+  templateName: string;
+  languageCode?: string;
+  pendingTemplateName?: string;
+  pendingLanguageCode?: string;
+}
+
+export interface WhatsAppTemplateSubmissionHistory {
+  id: number;
+  draftId: string;
+  templateName: string;
+  languageCode: string;
+  submittedByUserId: string;
+  bodyText: string;
+  providerStatus: string;
+  errorMessage: string;
+  createdAt: string;
+}
+
+export interface WhatsAppTemplateMappingHistory {
+  id: number;
+  useCase: WhatsAppTemplateUseCase;
+  previousTemplateName: string;
+  previousLanguageCode: string;
+  nextTemplateName: string;
+  nextLanguageCode: string;
+  changedByUserId: string;
+  reason: string;
+  createdAt: string;
+}
+
+export interface WhatsAppTemplateSyncEvent {
+  id: number;
+  eventType: string;
+  templateName: string;
+  languageCode: string;
+  status: string;
+  message: string;
+  createdAt: string;
+}
+
+export interface WhatsAppTemplateManagerData {
+  variables: WhatsAppTemplateVariable[];
+  drafts: WhatsAppTemplateDraft[];
+  mappings: WhatsAppTemplateMapping[];
+  templates: WhatsAppTemplate[];
+  submissionHistory: WhatsAppTemplateSubmissionHistory[];
+  mappingHistory: WhatsAppTemplateMappingHistory[];
+  syncEvents: WhatsAppTemplateSyncEvent[];
+}
+
+export interface WhatsAppTemplateSubmitResult {
+  draft: WhatsAppTemplateDraft;
+  templates: WhatsAppTemplate[];
+  mapping?: WhatsAppTemplateMapping;
+  message: string;
+}
+
+export interface WhatsAppTemplateMappingResult {
+  mapping: WhatsAppTemplateMapping;
+  mappings: WhatsAppTemplateMapping[];
+}
+
+export interface WhatsAppUnsentDraft {
+  id: string;
+  phone: string;
+  customerName: string;
+  templateName: string;
+  languageCode: string;
+  message: string;
+  reason: string;
+  sourceType: string;
+  sourceId: string;
+  payload: WhatsAppSendMessageInput;
+  createdAt: string;
 }
 
 export interface WhatsAppConversation {
@@ -907,9 +1114,11 @@ export interface WhatsAppSendMessageInput {
   customerName?: string;
   mode: WhatsAppMessageMode;
   text?: string;
+  templateUseCase?: WhatsAppTemplateUseCase;
   templateName?: string;
   languageCode?: string;
   variables?: string[];
+  templateVariableValues?: Record<string, string>;
   media?: {
     fileName: string;
     mimeType: "application/pdf";
@@ -924,6 +1133,16 @@ export interface WhatsAppSendMessageInput {
 
 export interface WhatsAppSendMessageResult {
   message: WhatsAppMessage;
+  conversation: WhatsAppConversation;
+}
+
+export interface WhatsAppDeleteMessageResult {
+  deletedMessageId: string;
+  conversation: WhatsAppConversation;
+}
+
+export interface WhatsAppClearConversationResult {
+  deletedCount: number;
   conversation: WhatsAppConversation;
 }
 
@@ -1256,6 +1475,11 @@ export interface JobCardItemInput {
   unitPrice: number;
   gstRate: number;
   sacCode: string;
+  warrantyIncluded?: boolean;
+  warrantyDurationMonths?: number;
+  warrantyText?: string;
+  warrantyStartDate?: string;
+  warrantyEndDate?: string;
 }
 
 export interface JobCardItem extends JobCardItemInput {

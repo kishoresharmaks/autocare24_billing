@@ -83,7 +83,11 @@ export default function ReportsTab() {
     preset: ""
   });
   const customDateError = rangeMode === "custom" ? validateDateRange(draftFromDate, draftToDate) : "";
-  const reportFilter = useMemo<ReportDateFilter>(() => (rangeMode === "custom" ? appliedCustomRange : rangeMode), [appliedCustomRange, rangeMode]);
+  const reportFilter = useMemo<ReportDateFilter>(() => {
+    if (rangeMode === "custom") return appliedCustomRange;
+    if (rangeMode === "month") return currentMonthRange();
+    return rangeMode;
+  }, [appliedCustomRange, rangeMode]);
   const reportFilterKey = typeof reportFilter === "string" ? reportFilter : `custom:${reportFilter.fromDate || ""}:${reportFilter.toDate || ""}`;
   const reportQuery = useQuery({
     queryKey: ["report", reportFilterKey, session.cloudUrl, session.token, session.userToken],
@@ -962,6 +966,15 @@ function defaultFromDate() {
   return toIsoDate(date);
 }
 
+function currentMonthRange(): CustomReportDateFilter {
+  const now = new Date();
+  return {
+    fromDate: toIsoDate(new Date(now.getFullYear(), now.getMonth(), 1)),
+    toDate: toIsoDate(now),
+    preset: ""
+  };
+}
+
 function toIsoDate(date: Date) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -1005,6 +1018,7 @@ function selectedRangeLabel(rangeMode: ReportRangeMode, customRange: CustomRepor
   if (rangeMode === "7d") return "Last 7 days";
   if (rangeMode === "30d") return "Last 30 days";
   if (rangeMode === "90d") return "Last 90 days";
+  if (rangeMode === "month") return "This month";
   return "All time";
 }
 
@@ -1033,6 +1047,10 @@ function callPhoneNumber(phoneNumber: string) {
 function filterInvoicesByReportRange(invoices: InvoiceSummary[], filter: ReportDateFilter) {
   if (typeof filter === "string") {
     if (filter === "all") return invoices;
+    if (filter === "month") {
+      const month = currentMonthRange();
+      return filterInvoicesBetween(invoices, month.fromDate, month.toDate);
+    }
     const days = filter === "90d" ? 90 : filter === "7d" ? 7 : 30;
     const from = new Date();
     from.setDate(from.getDate() - (days - 1));
