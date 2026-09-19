@@ -1950,6 +1950,7 @@ const registerIpcHandlers = () => {
       correctionType: "replacement",
       payload: {
         invoiceMode: invoice.invoiceMode,
+        pricingMode: invoice.pricingMode || "exclusive",
         taxScope: invoice.taxScope,
         invoiceDate: todayForInvoice(),
         sourceInvoiceId: invoice.id,
@@ -1974,6 +1975,7 @@ const registerIpcHandlers = () => {
       correctionType: "addon",
       payload: {
         invoiceMode: invoice.invoiceMode,
+        pricingMode: invoice.pricingMode || "exclusive",
         taxScope: invoice.taxScope,
         invoiceDate: todayForInvoice(),
         sourceInvoiceId: invoice.id,

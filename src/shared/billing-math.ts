@@ -1,4 +1,4 @@
-import type { InvoiceItemInput, InvoiceMode, TaxScope } from "./types";
+import type { InvoiceItemInput, InvoiceMode, PricingMode, TaxScope } from "./types";
 
 const MONEY_SCALE = 100n;
 const GST_RATE_SCALE = 10000n;
@@ -104,7 +104,13 @@ const allocateProportionalCents = (amountCents: bigint, weights: bigint[]) => {
   return allocations.sort((a, b) => a.index - b.index).map((item) => item.base);
 };
 
-export const calculateInvoiceTotals = (invoiceMode: InvoiceMode, taxScope: TaxScope, items: InvoiceItemInput[], rawDiscount: number) => {
+export const calculateInvoiceTotals = (
+  invoiceMode: InvoiceMode,
+  taxScope: TaxScope,
+  items: InvoiceItemInput[],
+  rawDiscount: number,
+  pricingMode: PricingMode = "exclusive"
+) => {
   const normalized = items.map((item) => {
     const quantityCents = toCents(finiteNumber(item.quantity));
     const unitPriceCents = toCents(finiteNumber(item.unitPrice));
@@ -124,6 +130,47 @@ export const calculateInvoiceTotals = (invoiceMode: InvoiceMode, taxScope: TaxSc
   const subTotalCents = normalized.reduce((sum, item) => sum + item.lineSubTotalCents, 0n);
   const subTotal = fromCents(subTotalCents);
   const discountCents = toCents(Math.min(Math.max(finiteNumber(rawDiscount), 0), subTotal));
+
+  if (pricingMode === "inclusive" && invoiceMode === "gst") {
+    const netInclusiveCents = subTotalCents - discountCents;
+    const netLineInclusiveCents = allocateProportionalCents(
+      netInclusiveCents,
+      normalized.map((item) => item.lineSubTotalCents)
+    );
+
+    const calculatedItems = normalized.map((item, index) => {
+      const lineNetInclusive = netLineInclusiveCents[index] || 0n;
+      const rateUnits = toGstRateUnits(item.gstRate);
+      const scaleMultiplier = 100n * GST_RATE_SCALE;
+      const lineTaxableCents = divideRounded(lineNetInclusive * scaleMultiplier, scaleMultiplier + rateUnits);
+      const lineTaxCents = lineNetInclusive - lineTaxableCents;
+      const { lineSubTotalCents: _lineSubTotalCents, ...publicItem } = item;
+      return {
+        ...publicItem,
+        lineTax: fromCents(lineTaxCents),
+        lineTotal: fromCents(lineNetInclusive)
+      };
+    });
+
+    const totalTaxableCents = calculatedItems.reduce((sum, item) => sum + toCents(item.lineTotal) - toCents(item.lineTax), 0n);
+    const totalTaxCents = calculatedItems.reduce((sum, item) => sum + toCents(item.lineTax), 0n);
+    const cgstCents = taxScope === "intra" ? divideRounded(totalTaxCents, 2n) : 0n;
+    const sgstCents = taxScope === "intra" ? totalTaxCents - cgstCents : 0n;
+    const igstCents = taxScope === "inter" ? totalTaxCents : 0n;
+
+    return {
+      items: calculatedItems,
+      subTotal,
+      discount: fromCents(discountCents),
+      taxableValue: fromCents(totalTaxableCents),
+      cgst: fromCents(cgstCents),
+      sgst: fromCents(sgstCents),
+      igst: fromCents(igstCents),
+      totalTax: fromCents(totalTaxCents),
+      grandTotal: fromCents(netInclusiveCents)
+    };
+  }
+
   const taxableBaseCents = subTotalCents - discountCents;
   const taxableBase = fromCents(taxableBaseCents);
   const taxableLineCents = allocateProportionalCents(

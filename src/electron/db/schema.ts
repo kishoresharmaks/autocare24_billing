@@ -1,4 +1,4 @@
-﻿export const CORE_SCHEMA_SQL = `
+export const CORE_SCHEMA_SQL = `
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -100,6 +100,7 @@
         replacementInvoiceId TEXT,
         sourceInvoiceId TEXT,
         sourceQuotationId TEXT,
+        pricingMode TEXT NOT NULL DEFAULT 'exclusive',
         createdAt TEXT NOT NULL,
         FOREIGN KEY (customerId) REFERENCES customers(id),
         FOREIGN KEY (vehicleId) REFERENCES vehicles(id)
@@ -142,6 +143,7 @@
         quotationStatus TEXT NOT NULL DEFAULT 'draft',
         invoiceMode TEXT NOT NULL,
         taxScope TEXT NOT NULL,
+        pricingMode TEXT NOT NULL DEFAULT 'exclusive',
         quotationDate TEXT NOT NULL,
         validUntil TEXT,
         customerId TEXT,
@@ -572,6 +574,8 @@ export const SCHEMA_COLUMNS = [
   { table: "invoices", column: "replacementInvoiceId", definition: "TEXT" },
   { table: "invoices", column: "sourceInvoiceId", definition: "TEXT" },
   { table: "invoices", column: "sourceQuotationId", definition: "TEXT" },
+  { table: "invoices", column: "pricingMode", definition: "TEXT NOT NULL DEFAULT 'exclusive'" },
+  { table: "quotations", column: "pricingMode", definition: "TEXT NOT NULL DEFAULT 'exclusive'" },
   { table: "quotations", column: "customerName", definition: "TEXT" },
   { table: "quotations", column: "customerPhone", definition: "TEXT" },
   { table: "quotations", column: "customerEmail", definition: "TEXT" },

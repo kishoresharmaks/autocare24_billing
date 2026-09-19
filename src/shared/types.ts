@@ -1,4 +1,5 @@
 export type InvoiceMode = "gst" | "simple";
+export type PricingMode = "exclusive" | "inclusive";
 export type InvoiceStatus = "finalized" | "cancelled";
 export type InvoiceDraftCorrectionType = "normal" | "replacement" | "addon";
 export type QuotationStatus = "draft" | "sent" | "accepted" | "rejected" | "expired" | "converted";
@@ -199,6 +200,7 @@ export interface BusinessSettings {
   nextQuotationNumber: number;
   defaultGstRate: number;
   defaultTaxScope: TaxScope;
+  defaultPricingMode?: PricingMode;
   invoicePaperSize: InvoicePaperSize;
   backupDirectory: string;
   invoiceLogoPath: string;
@@ -412,6 +414,7 @@ export interface InvoiceItem extends InvoiceItemInput {
 export interface InvoiceCreateInput {
   invoiceMode: InvoiceMode;
   taxScope: TaxScope;
+  pricingMode?: PricingMode;
   invoiceDate: string;
   jobCardId?: string;
   sourceInvoiceId?: string;
@@ -471,6 +474,7 @@ export interface InvoiceSummary {
   cloudConflictId: string;
   invoiceMode: InvoiceMode;
   taxScope: TaxScope;
+  pricingMode?: PricingMode;
   invoiceDate: string;
   customerId: string;
   vehicleId: string;
@@ -555,6 +559,7 @@ export interface QuotationSaveInput {
   id?: string;
   invoiceMode: InvoiceMode;
   taxScope: TaxScope;
+  pricingMode?: PricingMode;
   quotationDate: string;
   validUntil?: string;
   status?: QuotationStatus;
@@ -578,6 +583,7 @@ export interface QuotationSummary {
   quotationStatus: QuotationStatus;
   invoiceMode: InvoiceMode;
   taxScope: TaxScope;
+  pricingMode?: PricingMode;
   quotationDate: string;
   validUntil: string;
   customerId: string;

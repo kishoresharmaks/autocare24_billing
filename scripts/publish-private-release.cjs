@@ -10,7 +10,14 @@ const releaseDir = path.join(rootDir, "release");
 const version = packageJson.version;
 const owner = String(process.env.GITHUB_RELEASE_OWNER || "kishoresharmaks").trim();
 const repo = String(process.env.GITHUB_RELEASE_REPO || "autocare24_billing").trim();
-const token = String(process.env.GH_TOKEN || process.env.GITHUB_RELEASE_TOKEN || "").trim();
+let token = String(process.env.GH_TOKEN || process.env.GITHUB_RELEASE_TOKEN || "").trim();
+if (!token && fs.existsSync(path.join(rootDir, "docs", "tokens.txt"))) {
+  const tokenDoc = fs.readFileSync(path.join(rootDir, "docs", "tokens.txt"), "utf8");
+  const tokenLine = tokenDoc.split("\n").find((l) => l.includes("GITHUB_RELEASE_TOKEN"));
+  if (tokenLine) {
+    token = tokenLine.split("=")[1].replace(/["'\r\n]/g, "").trim();
+  }
+}
 const tagName = String(process.env.GITHUB_RELEASE_TAG || `v${version}`).trim();
 const dryRun = process.argv.includes("--dry-run");
 

@@ -866,7 +866,7 @@ export class CloudDataClient {
 
   async saveQuotation(input: QuotationSaveInput): Promise<QuotationDetail> {
     const draftItems = normalizeQuotationDraftItems(input.items);
-    const totals = calculateInvoiceTotals(input.invoiceMode, normalizeTaxScope(input.taxScope), draftItems, input.discount);
+    const totals = calculateInvoiceTotals(input.invoiceMode, normalizeTaxScope(input.taxScope), draftItems, input.discount, input.pricingMode || "exclusive");
     const quotationId = input.id || randomUUID();
     const customerId = input.customerId || input.customer?.id || "";
     const vehicleId = input.vehicleId || input.vehicle?.id || "";
@@ -876,6 +876,7 @@ export class CloudDataClient {
       quotationNumber: "",
       quotationStatus: input.status || "draft",
       invoiceMode: input.invoiceMode,
+      pricingMode: input.pricingMode || "exclusive",
       taxScope: normalizeTaxScope(input.taxScope),
       quotationDate: input.quotationDate || localDate(),
       validUntil: input.validUntil || "",

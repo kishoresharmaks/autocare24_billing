@@ -1,7 +1,7 @@
 ﻿import { Save } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { calculateInvoiceTotals, DEFAULT_SAC_CODE, money, normalizeSacCode } from "../../../shared/billing-math";
-import type { BusinessSettings, Customer, CustomerWithVehicles, InventoryItem, InvoiceDetail, InvoiceDraft, InvoiceDraftCorrectionType, InvoiceDraftPayload, InvoiceItemInput, InvoiceMode, PaymentMode, ServiceItem, TaxScope, Vehicle, VehicleType } from "../../../shared/types";
+import type { BusinessSettings, Customer, CustomerWithVehicles, InventoryItem, InvoiceDetail, InvoiceDraft, InvoiceDraftCorrectionType, InvoiceDraftPayload, InvoiceItemInput, InvoiceMode, PaymentMode, PricingMode, ServiceItem, TaxScope, Vehicle, VehicleType } from "../../../shared/types";
 import { addMonthsToDate, normalizeWarrantyText, parseWarrantyDurationMonths, warrantyDurationLabel } from "../../../shared/warranty";
 import { CustomerSearchSelect } from "./CustomerSearchSelect";
 
@@ -63,6 +63,7 @@ const emptyItem = (settings?: BusinessSettings): DraftItem => ({
 const emptyInvoiceDraftPayload = (settings: BusinessSettings): InvoiceDraftPayload => ({
   invoiceMode: "gst",
   taxScope: settings.defaultTaxScope,
+  pricingMode: settings.defaultPricingMode || "exclusive",
   invoiceDate: todayLocal(),
   customer: { name: "" },
   vehicle: emptyVehicle(),
@@ -94,8 +95,8 @@ const draftItemsFromPayload = (payload: InvoiceDraftPayload, settings: BusinessS
 const draftCorrectionLabel = (type: InvoiceDraftCorrectionType) =>
   type === "replacement" ? "Replacement draft" : type === "addon" ? "Add-on draft" : "Draft bill";
 
-const calculateDraft = (mode: InvoiceMode, taxScope: TaxScope, items: DraftItem[], discount: number) => {
-  return calculateInvoiceTotals(mode, taxScope, items, discount);
+const calculateDraft = (mode: InvoiceMode, taxScope: TaxScope, items: DraftItem[], discount: number, pricingMode: PricingMode = "exclusive") => {
+  return calculateInvoiceTotals(mode, taxScope, items, discount, pricingMode);
 };
 
 function Row({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
@@ -126,6 +127,7 @@ export function NewBillPage({
   const [drafts, setDrafts] = useState<InvoiceDraft[]>([]);
   const [mode, setMode] = useState<InvoiceMode>("gst");
   const [taxScope, setTaxScope] = useState<TaxScope>(settings.defaultTaxScope);
+  const [pricingMode, setPricingMode] = useState<PricingMode>(settings.defaultPricingMode || "exclusive");
   const [invoiceDate, setInvoiceDate] = useState(todayLocal());
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
   const [selectedVehicleId, setSelectedVehicleId] = useState("");
@@ -178,13 +180,14 @@ export function NewBillPage({
 
   const selectedCustomer = customers.find((item) => item.id === selectedCustomerId);
   const vehicleOptions = selectedCustomer?.vehicles ?? [];
-  const totals = useMemo(() => calculateDraft(mode, taxScope, items, discount), [mode, taxScope, items, discount]);
+  const totals = useMemo(() => calculateDraft(mode, taxScope, items, discount, pricingMode), [mode, taxScope, items, discount, pricingMode]);
   const paidAmountError = money(paidAmount) > money(totals.grandTotal) ? PAID_AMOUNT_EXCEEDS_TOTAL_MESSAGE : "";
   const balanceDue = money(totals.grandTotal - Math.min(Math.max(paidAmount, 0), totals.grandTotal));
 
   const buildPayload = (): InvoiceDraftPayload => ({
     invoiceMode: mode,
     taxScope,
+    pricingMode,
     invoiceDate,
     sourceInvoiceId,
     selectedCustomerId,
@@ -225,6 +228,7 @@ export function NewBillPage({
     const emptyPayload = emptyInvoiceDraftPayload(settings);
     setMode(emptyPayload.invoiceMode);
     setTaxScope(emptyPayload.taxScope);
+    setPricingMode(emptyPayload.pricingMode || "exclusive");
     setInvoiceDate(emptyPayload.invoiceDate);
     setSelectedCustomerId("");
     setSelectedVehicleId("");
@@ -249,6 +253,7 @@ export function NewBillPage({
     hydratingDraftRef.current = true;
     setMode(payload.invoiceMode === "simple" ? "simple" : "gst");
     setTaxScope(payload.taxScope === "inter" ? "inter" : payload.taxScope === "intra" ? "intra" : settings.defaultTaxScope);
+    setPricingMode(payload.pricingMode === "inclusive" ? "inclusive" : "exclusive");
     setInvoiceDate(payload.invoiceDate || todayLocal());
     setSelectedCustomerId(payload.selectedCustomerId || payload.customerId || "");
     setSelectedVehicleId(payload.selectedVehicleId || payload.vehicleId || "");
@@ -522,7 +527,7 @@ export function NewBillPage({
           </div>
         </div>
 
-        <div className="form-grid two">
+        <div className="form-grid three">
           <label>
             Invoice date
             <input type="date" value={invoiceDate} onChange={(event) => setInvoiceDate(event.currentTarget.value)} />
@@ -532,6 +537,13 @@ export function NewBillPage({
             <select value={taxScope} disabled={mode === "simple"} onChange={(event) => setTaxScope(event.currentTarget.value as TaxScope)}>
               <option value="intra">CGST + SGST</option>
               <option value="inter">IGST</option>
+            </select>
+          </label>
+          <label>
+            Price mode
+            <select value={pricingMode} disabled={mode === "simple"} onChange={(event) => setPricingMode(event.currentTarget.value as PricingMode)}>
+              <option value="exclusive">Exclusive (GST extra)</option>
+              <option value="inclusive">Inclusive of GST (MRP)</option>
             </select>
           </label>
         </div>
@@ -619,7 +631,7 @@ export function NewBillPage({
             <span>Retail stock</span>
             <span>Description</span>
             <span>Qty</span>
-            <span>Rate</span>
+            <span>{pricingMode === "inclusive" && mode === "gst" ? "Rate (Incl. GST)" : "Rate"}</span>
             <span>GST</span>
             <span>Warranty</span>
             <span></span>

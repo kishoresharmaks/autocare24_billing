@@ -229,4 +229,58 @@ test("default access roles remain consistent and permission groups cover all key
   assert.deepEqual(new Set(groupedPermissions), new Set(ALL_PERMISSIONS));
 });
 
+test("GST inclusive mode reverse-calculates base price and keeps exact grand total", () => {
+  const totals = calculateInvoiceTotals(
+    "gst",
+    "intra",
+    [{ description: "Service 300", quantity: 1, unitPrice: 300, gstRate: 18, sacCode: "9987" }],
+    0,
+    "inclusive"
+  );
+  assert.equal(totals.subTotal, 300);
+  assert.equal(totals.discount, 0);
+  assert.equal(totals.taxableValue, 254.24);
+  assert.equal(totals.cgst, 22.88);
+  assert.equal(totals.sgst, 22.88);
+  assert.equal(totals.igst, 0);
+  assert.equal(totals.totalTax, 45.76);
+  assert.equal(totals.grandTotal, 300);
+  assert.equal(totals.items[0].lineTax, 45.76);
+  assert.equal(totals.items[0].lineTotal, 300);
+});
+
+test("GST inclusive mode inter-state uses IGST with exact grand total", () => {
+  const totals = calculateInvoiceTotals(
+    "gst",
+    "inter",
+    [{ description: "Service 300", quantity: 1, unitPrice: 300, gstRate: 18, sacCode: "9987" }],
+    0,
+    "inclusive"
+  );
+  assert.equal(totals.taxableValue, 254.24);
+  assert.equal(totals.cgst, 0);
+  assert.equal(totals.sgst, 0);
+  assert.equal(totals.igst, 45.76);
+  assert.equal(totals.totalTax, 45.76);
+  assert.equal(totals.grandTotal, 300);
+});
+
+test("GST inclusive mode with discount distributes discount and keeps exact net total", () => {
+  const totals = calculateInvoiceTotals(
+    "gst",
+    "intra",
+    [{ description: "Service 300", quantity: 1, unitPrice: 300, gstRate: 18, sacCode: "9987" }],
+    50,
+    "inclusive"
+  );
+  assert.equal(totals.subTotal, 300);
+  assert.equal(totals.discount, 50);
+  assert.equal(totals.grandTotal, 250);
+  assert.equal(totals.taxableValue, 211.86);
+  assert.equal(totals.cgst, 19.07);
+  assert.equal(totals.sgst, 19.07);
+  assert.equal(totals.totalTax, 38.14);
+  assert.equal(money(totals.taxableValue + totals.totalTax), 250);
+});
+
 run();

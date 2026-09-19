@@ -84,6 +84,7 @@ import type {
   InvoiceItem,
   InvoiceItemInput,
   InvoiceMode,
+  PricingMode,
   InvoiceSummary,
   Payment,
   PaymentMode,
@@ -2661,10 +2662,11 @@ export class AppDatabase {
     const cloudSyncStatus: CloudSyncRecordStatus = officialInvoiceNumber ? "synced" : "local_only";
     const invoiceDate = input.invoiceDate || localDate();
     const taxScope: TaxScope = input.taxScope === "inter" ? "inter" : "intra";
+    const pricingMode: PricingMode = this.normalizePricingMode(input.pricingMode);
     let savedCustomerId = input.customerId || "";
     let savedVehicleId = input.vehicleId || "";
 
-    const totals = this.calculateInvoice(input.invoiceMode, taxScope, input.items, finiteNumber(input.discount ?? 0, "Discount"));
+    const totals = this.calculateInvoice(input.invoiceMode, taxScope, input.items, finiteNumber(input.discount ?? 0, "Discount"), pricingMode);
     const paidAmount = money(nonNegativeNumber(input.paidAmount ?? 0, "Paid amount"));
     if (paidAmount > totals.grandTotal) throw new Error(PAID_AMOUNT_EXCEEDS_TOTAL_MESSAGE);
     const balanceDue = money(totals.grandTotal - paidAmount);
@@ -2678,16 +2680,17 @@ export class AppDatabase {
 
     this.requireDb().run(
       `INSERT INTO invoices
-        (id, invoiceNumber, cloudSyncStatus, invoiceMode, taxScope, invoiceDate, customerId, vehicleId,
+        (id, invoiceNumber, cloudSyncStatus, invoiceMode, taxScope, pricingMode, invoiceDate, customerId, vehicleId,
          subTotal, discount, taxableValue, cgst, sgst, igst, totalTax, grandTotal,
          paidAmount, balanceDue, paymentStatus, paymentMode, paymentReference, notes, jobCardId, sourceInvoiceId, sourceQuotationId, createdAt)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         invoiceId,
         invoiceNumber,
         cloudSyncStatus,
         input.invoiceMode,
         taxScope,
+        pricingMode,
         invoiceDate,
         savedCustomerId,
         savedVehicleId,
@@ -3025,7 +3028,7 @@ export class AppDatabase {
     if (invoice.invoiceStatus === "cancelled") throw new Error("Cancelled invoices cannot be changed.");
     const appendItem = this.normalizeAppendInvoiceItem(input.item, invoice.invoiceMode);
     const existingItems = invoice.items.map(({ id: _id, invoiceId: _invoiceId, lineSubTotal: _lineSubTotal, lineTax: _lineTax, lineTotal: _lineTotal, ...item }) => item);
-    const totals = this.calculateInvoice(invoice.invoiceMode, invoice.taxScope, [...existingItems, appendItem], invoice.discount);
+    const totals = this.calculateInvoice(invoice.invoiceMode, invoice.taxScope, [...existingItems, appendItem], invoice.discount, invoice.pricingMode || "exclusive");
     const paidAmount = money(invoice.paidAmount);
     const balanceDue = money(totals.grandTotal - paidAmount);
     const paymentStatus = this.paymentStatus(totals.grandTotal, paidAmount);
@@ -3076,6 +3079,7 @@ export class AppDatabase {
       payload: {
         invoiceMode: invoice.invoiceMode,
         taxScope: invoice.taxScope,
+        pricingMode: invoice.pricingMode || "exclusive",
         invoiceDate: localDate(),
         sourceInvoiceId: invoice.id,
         selectedCustomerId: invoice.customerId,
@@ -3163,8 +3167,9 @@ export class AppDatabase {
       : this.normalizeQuotationStatus(input.status || "draft");
     if (status === "converted") throw new Error("Use Convert to Bill to mark a quotation as converted.");
     const taxScope: TaxScope = input.taxScope === "inter" ? "inter" : "intra";
+    const pricingMode: PricingMode = this.normalizePricingMode(input.pricingMode);
     const draftItems = this.normalizeQuotationDraftItems(input.items);
-    const totals = this.calculateInvoice(input.invoiceMode, taxScope, draftItems, finiteNumber(input.discount ?? 0, "Discount"));
+    const totals = this.calculateInvoice(input.invoiceMode, taxScope, draftItems, finiteNumber(input.discount ?? 0, "Discount"), pricingMode);
     const quotationDate = input.quotationDate || localDate();
     const customerId = optionalForeignKey(input.customerId || input.customer?.id);
     const vehicleId = optionalForeignKey(input.vehicleId || input.vehicle?.id);
@@ -3185,6 +3190,7 @@ export class AppDatabase {
         status,
         input.invoiceMode === "simple" ? "simple" : "gst",
         taxScope,
+        pricingMode,
         quotationDate,
         input.validUntil?.trim() || "",
         customerId,
@@ -3215,7 +3221,7 @@ export class AppDatabase {
       if (existing) {
         this.requireDb().run(
           `UPDATE quotations
-           SET quotationNumber = ?, quotationStatus = ?, invoiceMode = ?, taxScope = ?, quotationDate = ?, validUntil = ?,
+           SET quotationNumber = ?, quotationStatus = ?, invoiceMode = ?, taxScope = ?, pricingMode = ?, quotationDate = ?, validUntil = ?,
                customerId = ?, vehicleId = ?, customerName = ?, customerPhone = ?, customerEmail = ?, customerGstin = ?, customerAddress = ?,
                vehicleType = ?, vehicleNumber = ?, vehicleMake = ?, vehicleModel = ?, vehicleColor = ?,
                subTotal = ?, discount = ?, taxableValue = ?, cgst = ?, sgst = ?, igst = ?,
@@ -3226,10 +3232,10 @@ export class AppDatabase {
       } else {
         this.requireDb().run(
           `INSERT INTO quotations
-            (quotationNumber, quotationStatus, invoiceMode, taxScope, quotationDate, validUntil, customerId, vehicleId,
+            (quotationNumber, quotationStatus, invoiceMode, taxScope, pricingMode, quotationDate, validUntil, customerId, vehicleId,
              customerName, customerPhone, customerEmail, customerGstin, customerAddress, vehicleType, vehicleNumber, vehicleMake, vehicleModel, vehicleColor,
              subTotal, discount, taxableValue, cgst, sgst, igst, totalTax, grandTotal, notes, convertedInvoiceId, updatedAt, id, createdAt)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [...commonParams, id, createdAt].map(normalizeParam)
         );
       }
@@ -3276,6 +3282,7 @@ export class AppDatabase {
         {
           invoiceMode: quotation.invoiceMode,
           taxScope: quotation.taxScope,
+          pricingMode: quotation.pricingMode || "exclusive",
           invoiceDate: localDate(),
           sourceQuotationId: quotation.id,
           customerId: quotation.customerId,
@@ -3947,6 +3954,7 @@ export class AppDatabase {
         q.quotationStatus,
         q.invoiceMode,
         q.taxScope,
+        q.pricingMode,
         q.quotationDate,
         q.validUntil,
         NULLIF(q.customerId, ''),
@@ -4833,9 +4841,10 @@ export class AppDatabase {
     invoiceMode: InvoiceMode,
     taxScope: TaxScope,
     items: InvoiceItemInput[],
-    rawDiscount: number
+    rawDiscount: number,
+    pricingMode: PricingMode = "exclusive"
   ) {
-    return calculateInvoiceTotals(invoiceMode, taxScope, items, rawDiscount);
+    return calculateInvoiceTotals(invoiceMode, taxScope, items, rawDiscount, pricingMode);
   }
 
   private deductInvoiceInventory(
@@ -5065,6 +5074,10 @@ export class AppDatabase {
   private normalizePaymentMode(value: unknown): PaymentMode {
     const mode = String(value || "Cash").trim();
     return ["Cash", "UPI", "Card", "Bank Transfer", "Other"].includes(mode) ? (mode as PaymentMode) : "Cash";
+  }
+
+  private normalizePricingMode(value: unknown): PricingMode {
+    return value === "inclusive" ? "inclusive" : "exclusive";
   }
 
   private saveCustomerInTransaction(customerId: string | undefined, input: InvoiceCreateInput["customer"]): Customer {
@@ -5883,6 +5896,7 @@ export class AppDatabase {
         q.quotationStatus,
         q.invoiceMode,
         q.taxScope,
+        q.pricingMode,
         q.quotationDate,
         q.validUntil,
         q.customerId,
@@ -6004,6 +6018,7 @@ export class AppDatabase {
     cloudConflictId: rowText(row, "cloudConflictId"),
     invoiceMode: rowText(row, "invoiceMode") as InvoiceMode,
     taxScope: rowText(row, "taxScope") as TaxScope,
+    pricingMode: this.normalizePricingMode(rowText(row, "pricingMode")),
     invoiceDate: rowText(row, "invoiceDate"),
     customerId: rowText(row, "customerId"),
     vehicleId: rowText(row, "vehicleId"),
@@ -6121,6 +6136,7 @@ export class AppDatabase {
     quotationStatus: this.normalizeQuotationStatus(rowText(row, "quotationStatus")),
     invoiceMode: rowText(row, "invoiceMode") as InvoiceMode,
     taxScope: rowText(row, "taxScope") as TaxScope,
+    pricingMode: this.normalizePricingMode(rowText(row, "pricingMode")),
     quotationDate: rowText(row, "quotationDate"),
     validUntil: rowText(row, "validUntil"),
     customerId: rowText(row, "customerId"),

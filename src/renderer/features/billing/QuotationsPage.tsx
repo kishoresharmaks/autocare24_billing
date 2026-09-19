@@ -11,6 +11,7 @@ import type {
   InvoiceDetail,
   InvoiceItemInput,
   InvoiceMode,
+  PricingMode,
   QuotationDetail,
   QuotationSaveInput,
   QuotationStatus,
@@ -188,6 +189,7 @@ export function QuotationsPage({
   const [customers, setCustomers] = useState<CustomerWithVehicles[]>([]);
   const [mode, setMode] = useState<InvoiceMode>("gst");
   const [taxScope, setTaxScope] = useState<TaxScope>(settings.defaultTaxScope);
+  const [pricingMode, setPricingMode] = useState<PricingMode>(settings.defaultPricingMode || "exclusive");
   const [quotationDate, setQuotationDate] = useState(todayLocal());
   const [validUntil, setValidUntil] = useState("");
   const [status, setStatus] = useState<QuotationStatus>("draft");
@@ -212,7 +214,7 @@ export function QuotationsPage({
   const selectedCustomer = customers.find((item) => item.id === selectedCustomerId);
   const vehicleOptions = selectedCustomer?.vehicles ?? [];
   const draftItems = useMemo(() => normalizeQuotationDraftItems(items), [items]);
-  const totals = useMemo(() => calculateInvoiceTotals(mode, taxScope, draftItems, discount), [mode, taxScope, draftItems, discount]);
+  const totals = useMemo(() => calculateInvoiceTotals(mode, taxScope, draftItems, discount, pricingMode), [mode, taxScope, draftItems, discount, pricingMode]);
   const isConverted = Boolean(activeQuotation?.convertedInvoiceId || status === "converted");
   const canEditCurrent = canManage && !isConverted;
   const canConvertCurrent = Boolean(
@@ -254,6 +256,7 @@ export function QuotationsPage({
     setActiveQuotation(null);
     setMode("gst");
     setTaxScope(settings.defaultTaxScope);
+    setPricingMode(settings.defaultPricingMode || "exclusive");
     setQuotationDate(todayLocal());
     setValidUntil("");
     setStatus("draft");
@@ -277,6 +280,7 @@ export function QuotationsPage({
     setActiveQuotation(quotation);
     setMode(quotation.invoiceMode === "simple" ? "simple" : "gst");
     setTaxScope(quotation.taxScope === "inter" ? "inter" : "intra");
+    setPricingMode(quotation.pricingMode === "inclusive" ? "inclusive" : "exclusive");
     setQuotationDate(quotation.quotationDate || todayLocal());
     setValidUntil(quotation.validUntil || "");
     setStatus(quotation.quotationStatus);
@@ -366,6 +370,7 @@ export function QuotationsPage({
     id: selectedId || undefined,
     invoiceMode: mode,
     taxScope,
+    pricingMode,
     quotationDate,
     validUntil,
     status,
@@ -701,6 +706,13 @@ export function QuotationsPage({
                   <option value="inter">IGST</option>
                 </select>
               </label>
+              <label>
+                Price mode
+                <select value={pricingMode} disabled={!canEditCurrent || mode === "simple"} onChange={(event) => setPricingMode(event.currentTarget.value as PricingMode)}>
+                  <option value="exclusive">Exclusive (GST extra)</option>
+                  <option value="inclusive">Inclusive of GST (MRP)</option>
+                </select>
+              </label>
               <div className="segmented align-bottom">
                 <button className={mode === "gst" ? "active" : ""} disabled={!canEditCurrent} onClick={() => setMode("gst")}>GST quote</button>
                 <button className={mode === "simple" ? "active" : ""} disabled={!canEditCurrent} onClick={() => setMode("simple")}>Simple quote</button>
@@ -745,7 +757,7 @@ export function QuotationsPage({
                 <span>Retail stock</span>
                 <span>Description</span>
                 <span>Qty</span>
-                <span>Rate</span>
+                <span>{pricingMode === "inclusive" && mode === "gst" ? "Rate (Incl. GST)" : "Rate"}</span>
                 <span>GST</span>
                 <span></span>
               </div>

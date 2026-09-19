@@ -458,7 +458,7 @@ function PremiumItemsTable({ invoice, settings, items, startIndex }: { invoice: 
           <th>#</th>
           <th>Service / Item</th>
           <th>Qty</th>
-          <th>Rate ({rupeeSymbol})</th>
+          <th>{invoice.pricingMode === "inclusive" ? `Rate (Incl. GST ${rupeeSymbol})` : `Rate (${rupeeSymbol})`}</th>
           {showItemGstRate && <th>GST</th>}
           {showSacCode && <th>SAC</th>}
           <th>Amount ({rupeeSymbol})</th>
@@ -510,7 +510,7 @@ function PremiumFinalSummary({ invoice, settings, documentKind, watermarkSrc }: 
       </div>
 
       <div className="premium-total-card">
-        <PremiumTotalRow label={invoiceLabel(settings.subtotalLabel, "Subtotal")} value={formatInvoiceMoney(invoice.subTotal)} />
+        <PremiumTotalRow label={invoice.pricingMode === "inclusive" ? "Gross Value (Incl. GST)" : invoiceLabel(settings.subtotalLabel, "Subtotal")} value={formatInvoiceMoney(invoice.subTotal)} />
         <PremiumTotalRow label="Discount" value={formatInvoiceMoney(invoice.discount)} />
         {invoice.invoiceMode === "gst" && <PremiumTotalRow label="Taxable Value" value={formatInvoiceMoney(invoice.taxableValue)} separated />}
         {invoice.cgst > 0 && <PremiumTotalRow label={`CGST (${cgstRate}%)`} value={formatInvoiceMoney(invoice.cgst)} />}

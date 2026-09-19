@@ -743,6 +743,7 @@ const nonNegativeNumber = (value, label) => {
 const normalizePaymentMode = (value) => PAYMENT_MODES.has(String(value || "")) ? String(value) : "UPI";
 const normalizeTaxScope = (value) => String(value || "") === "inter" ? "inter" : "intra";
 const normalizeInvoiceMode = (value) => String(value || "") === "simple" ? "simple" : "gst";
+const normalizePricingMode = (value) => String(value || "") === "inclusive" ? "inclusive" : "exclusive";
 const normalizeVehicleType = (value) => ["car", "bike", "other"].includes(String(value || "")) ? String(value) : "car";
 const normalizeQuotationStatus = (value) => QUOTATION_STATUSES.has(String(value || "")) ? String(value) : "draft";
 const normalizeEnquiryStatus = (value) => ENQUIRY_STATUSES.has(String(value || "")) ? String(value) : "new";
@@ -990,9 +991,10 @@ const allocateProportionalCents = (amountCents, weights) => {
     });
   return allocations.sort((a, b) => a.index - b.index).map((item) => item.base);
 };
-const calculateInvoiceTotals = (invoiceMode, taxScope, items, rawDiscount) => {
+const calculateInvoiceTotals = (invoiceMode, taxScope, items, rawDiscount, pricingMode = "exclusive") => {
   const normalizedMode = normalizeInvoiceMode(invoiceMode);
   const normalizedTaxScope = normalizeTaxScope(taxScope);
+  const normalizedPricingMode = normalizePricingMode(pricingMode);
   const normalized = (Array.isArray(items) ? items : []).map((item) => {
     const quantityCents = toCents(finiteNumber(item.quantity));
     const unitPriceCents = toCents(finiteNumber(item.unitPrice));
@@ -1012,6 +1014,47 @@ const calculateInvoiceTotals = (invoiceMode, taxScope, items, rawDiscount) => {
   const subTotalCents = normalized.reduce((sum, item) => sum + item.lineSubTotalCents, 0n);
   const subTotal = fromCents(subTotalCents);
   const discountCents = toCents(Math.min(Math.max(finiteNumber(rawDiscount), 0), subTotal));
+
+  if (normalizedPricingMode === "inclusive" && normalizedMode === "gst") {
+    const netInclusiveCents = subTotalCents - discountCents;
+    const netLineInclusiveCents = allocateProportionalCents(
+      netInclusiveCents,
+      normalized.map((item) => item.lineSubTotalCents)
+    );
+
+    const calculatedItems = normalized.map((item, index) => {
+      const lineNetInclusive = netLineInclusiveCents[index] || 0n;
+      const rateUnits = toGstRateUnits(item.gstRate);
+      const scaleMultiplier = 100n * GST_RATE_SCALE;
+      const lineTaxableCents = divideRounded(lineNetInclusive * scaleMultiplier, scaleMultiplier + rateUnits);
+      const lineTaxCents = lineNetInclusive - lineTaxableCents;
+      const { lineSubTotalCents, ...publicItem } = item;
+      return {
+        ...publicItem,
+        lineTax: fromCents(lineTaxCents),
+        lineTotal: fromCents(lineNetInclusive)
+      };
+    });
+
+    const totalTaxableCents = calculatedItems.reduce((sum, item) => sum + toCents(item.lineTotal) - toCents(item.lineTax), 0n);
+    const totalTaxCents = calculatedItems.reduce((sum, item) => sum + toCents(item.lineTax), 0n);
+    const cgstCents = normalizedTaxScope === "intra" ? divideRounded(totalTaxCents, 2n) : 0n;
+    const sgstCents = normalizedTaxScope === "intra" ? totalTaxCents - cgstCents : 0n;
+    const igstCents = normalizedTaxScope === "inter" ? totalTaxCents : 0n;
+
+    return {
+      items: calculatedItems,
+      subTotal,
+      discount: fromCents(discountCents),
+      taxableValue: fromCents(totalTaxableCents),
+      cgst: fromCents(cgstCents),
+      sgst: fromCents(sgstCents),
+      igst: fromCents(igstCents),
+      totalTax: fromCents(totalTaxCents),
+      grandTotal: fromCents(netInclusiveCents)
+    };
+  }
+
   const taxableBaseCents = subTotalCents - discountCents;
   const taxableBase = fromCents(taxableBaseCents);
   const taxableLineCents = allocateProportionalCents(
@@ -2251,6 +2294,7 @@ async function buildInvoiceDetail(connection, businessId, invoiceId) {
     customerPhone: invoice.data.customerPhone || customer.phone || "",
     vehicleType: normalizeVehicleType(invoice.data.vehicleType || vehicle.vehicleType),
     vehicleNumber: invoice.data.vehicleNumber || vehicle.registrationNumber || "",
+    pricingMode: normalizePricingMode(invoice.data.pricingMode),
     customer,
     vehicle,
     items,
@@ -2283,7 +2327,7 @@ async function buildQuotationDetail(connection, businessId, quotationId) {
   };
   const items = rowList(await loadBusinessRecords(connection, businessId, "quotation_items"))
     .filter((item) => String(item.quotationId || "") === quotationId);
-  return { ...quotation.data, customerCode: quotation.data.customerCode || customer.customerCode || "", customer, vehicle, items };
+  return { ...quotation.data, pricingMode: normalizePricingMode(quotation.data.pricingMode), customerCode: quotation.data.customerCode || customer.customerCode || "", customer, vehicle, items };
 }
 
 async function buildJobCardDetail(connection, businessId, jobCardId) {
@@ -2338,6 +2382,7 @@ async function listInvoiceSummaries(connection, businessId, query = "", limit = 
       return {
         ...invoice,
         id: invoice.id || row.recordId,
+        pricingMode: normalizePricingMode(invoice.pricingMode),
         customerId: customer.id || invoice.customerId,
         vehicleId: invoice.vehicleId || vehicle.id,
         customerCode: invoice.customerCode || customer.customerCode || "",
@@ -2805,7 +2850,8 @@ async function createFinalInvoiceGraph(connection, device, req, input) {
 
   const taxScope = normalizeTaxScope(payload.taxScope);
   const invoiceMode = normalizeInvoiceMode(payload.invoiceMode);
-  const totals = calculateInvoiceTotals(invoiceMode, taxScope, payload.items, payload.discount);
+  const pricingMode = normalizePricingMode(payload.pricingMode);
+  const totals = calculateInvoiceTotals(invoiceMode, taxScope, payload.items, payload.discount, pricingMode);
   const invoiceDate = String(payload.invoiceDate || localDate());
   const paidAmount = money(nonNegativeNumber(payload.paidAmount || 0, "Paid amount"));
   if (paidAmount > totals.grandTotal) throw Object.assign(new Error(PAID_AMOUNT_EXCEEDS_TOTAL_MESSAGE), { status: 422 });
@@ -2864,6 +2910,7 @@ async function createFinalInvoiceGraph(connection, device, req, input) {
     cloudSyncedAt: createdAt,
     cloudConflictId: "",
     invoiceMode,
+    pricingMode,
     taxScope,
     invoiceDate,
     customerId,
@@ -3155,7 +3202,7 @@ async function handleInvoiceAppendItem(req, res, device, invoiceId) {
       sacCode: item.sacCode,
       ...invoiceItemWarrantyFieldsForInvoice(item, current.invoiceDate)
     }));
-    const totals = calculateInvoiceTotals(current.invoiceMode, current.taxScope, [...existingInputs, appendItem], current.discount);
+    const totals = calculateInvoiceTotals(current.invoiceMode, current.taxScope, [...existingInputs, appendItem], current.discount, current.pricingMode);
     const paidAmount = money(current.paidAmount);
     const balanceDue = money(totals.grandTotal - paidAmount);
     const nextInvoice = {
@@ -3168,6 +3215,7 @@ async function handleInvoiceAppendItem(req, res, device, invoiceId) {
       igst: totals.igst,
       totalTax: totals.totalTax,
       grandTotal: totals.grandTotal,
+      pricingMode: current.pricingMode || "exclusive",
       paidAmount,
       balanceDue,
       paymentStatus: paymentStatus(totals.grandTotal, paidAmount)
@@ -3230,6 +3278,7 @@ async function handleQuotationConvertToInvoice(req, res, device, quotationId) {
       localId: quotationId,
       payload: {
         invoiceMode: quotation.invoiceMode,
+        pricingMode: quotation.pricingMode || "exclusive",
         taxScope: quotation.taxScope,
         invoiceDate: localDate(),
         sourceQuotationId: quotation.id,
@@ -3276,6 +3325,7 @@ async function handleJobCardConvertToInvoice(req, res, device, jobCardId) {
       localId: jobCardId,
       payload: {
         invoiceMode: "gst",
+        pricingMode: job.pricingMode || "exclusive",
         taxScope: "intra",
         invoiceDate: localDate(),
         jobCardId,
@@ -3651,12 +3701,18 @@ async function canonicalizeOperation(connection, businessId, op) {
   if (op.entity === "customers" && !String(data.customerCode || "").trim()) {
     data.customerCode = String(op.currentData?.customerCode || "").trim() || await nextNumber(connection, businessId, "customer", CUSTOMER_CODE_PREFIX);
   }
-  if (op.entity === "invoices" && (!data.invoiceNumber || String(data.invoiceNumber).startsWith("LOCAL-"))) {
-    data.invoiceNumber = await nextNumber(connection, businessId, "invoice", "INV");
-    data.cloudSyncStatus = "synced";
+  if (op.entity === "invoices") {
+    data.pricingMode = normalizePricingMode(data.pricingMode);
+    if (!data.invoiceNumber || String(data.invoiceNumber).startsWith("LOCAL-")) {
+      data.invoiceNumber = await nextNumber(connection, businessId, "invoice", "INV");
+      data.cloudSyncStatus = "synced";
+    }
   }
-  if (op.entity === "quotations" && (!data.quotationNumber || String(data.quotationNumber).startsWith("LOCAL-"))) {
-    data.quotationNumber = await nextNumber(connection, businessId, "quotation", "QT");
+  if (op.entity === "quotations") {
+    data.pricingMode = normalizePricingMode(data.pricingMode);
+    if (!data.quotationNumber || String(data.quotationNumber).startsWith("LOCAL-")) {
+      data.quotationNumber = await nextNumber(connection, businessId, "quotation", "QT");
+    }
   }
   if (op.entity === "job_cards" && (!data.jobNumber || String(data.jobNumber).startsWith("LOCAL-"))) {
     data.jobNumber = await nextNumber(connection, businessId, "job_card", "JC");

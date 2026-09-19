@@ -542,6 +542,22 @@ const run = async () => {
   closeToMoney(rounded.cgst + rounded.sgst, rounded.totalTax, "Rounded CGST + SGST");
   passed.push("Rounding keeps line totals and GST splits internally consistent");
 
+  const inclusiveInvoice = db.createInvoice(invoiceInput({
+    suffix: "INCL",
+    pricingMode: "inclusive",
+    items: [
+      { description: "Service 300 Inclusive", quantity: 1, unitPrice: 300, gstRate: 18, sacCode: "9987" }
+    ]
+  }));
+  closeToMoney(inclusiveInvoice.subTotal, 300, "Inclusive subTotal");
+  closeToMoney(inclusiveInvoice.taxableValue, 254.24, "Inclusive taxableValue");
+  closeToMoney(inclusiveInvoice.cgst, 22.88, "Inclusive CGST");
+  closeToMoney(inclusiveInvoice.sgst, 22.88, "Inclusive SGST");
+  closeToMoney(inclusiveInvoice.totalTax, 45.76, "Inclusive totalTax");
+  closeToMoney(inclusiveInvoice.grandTotal, 300, "Inclusive grandTotal");
+  assert.equal(inclusiveInvoice.pricingMode, "inclusive", "Inclusive pricingMode saved");
+  passed.push("GST inclusive invoices keep exact grand total and calculate reverse GST");
+
   assertNoCriticalHealthIssues("Final health scan");
   passed.push("Data-health scan has no critical invoice/stock issues");
 
